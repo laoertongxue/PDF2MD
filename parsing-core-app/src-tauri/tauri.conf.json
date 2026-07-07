@@ -1,0 +1,40 @@
+{
+  "productName": "parsing-core",
+  "version": "0.1.0",
+  "identifier": "com.parsingcore.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "parsing-core",
+        "width": 520,
+        "height": 480,
+        "resizable": true
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": ["icons/icon.png"],
+    "externalBin": ["binaries/python3"]
+  },
+  "plugins": {
+    "shell": {
+      "open": true,
+      "scope": [
+        { "name": "python3", "cmd": "binaries/python3",
+          "args": [{"validator": ".*"}]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,48 @@
+from pydantic import BaseModel, Field
+
+
+class BatchCreateRequest(BaseModel):
+    files: list[str] = Field(..., min_length=1)
+    concurrency: int = Field(4, ge=1, le=32)
+    priority: int = 0
+
+
+class TaskCreateRequest(BaseModel):
+    file_path: str
+    model_tier: str = "stub"
+
+
+class BatchResponse(BaseModel):
+    batch_id: str
+    task_ids: list[str]
+    accepted: int
+    rejected: int
+
+
+TaskResponse = BatchResponse
+
+
+class BatchStatus(BaseModel):
+    batch_id: str
+    status: str
+    total_tasks: int
+    completed_tasks: int
+    tasks: list[dict]
+
+
+class TaskStatus(BaseModel):
+    task_id: str
+    batch_id: str | None
+    status: str
+    sections: int
+    completed: int
+    error_msg: str | None
+
+
+class WSEvent(BaseModel):
+    seq: int
+    batch_id: str
+    task_id: str | None = None
+    event: str
+    payload: dict
+    ts: int
