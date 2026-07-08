@@ -29,12 +29,7 @@
   },
   "plugins": {
     "shell": {
-      "open": true,
-      "scope": [
-        { "name": "python3", "cmd": "binaries/python3",
-          "args": [{"validator": ".*"}]
-        }
-      ]
+      "open": true
     }
   }
 }

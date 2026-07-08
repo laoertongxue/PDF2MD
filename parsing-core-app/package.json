@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.0.0",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "lucide-react": "^0.400.0",
     "mermaid": "^11.0.0",
     "react": "^19.0.0",

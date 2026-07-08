@@ -1,1 +1,3 @@
-/Users/laoer/Documents/PDF2MD/.venv/bin/python3
+#!/bin/bash
+export PYTHONPATH=/Users/laoer/Documents/PDF2MD/src
+exec /Users/laoer/Documents/PDF2MD/.venv/bin/python3 -m parsing_core.serving.serve "$@"

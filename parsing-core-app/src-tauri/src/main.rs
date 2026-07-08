@@ -34,9 +34,23 @@ async fn stop_service(state: tauri::State<'_, SharedState>) -> Result<String, St
     Ok("stopped".into())
 }
 
+#[tauri::command]
+async fn pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let files = app
+        .dialog()
+        .file()
+        .blocking_pick_files();
+    match files {
+        Some(paths) => Ok(paths.iter().map(|p| p.as_path().unwrap().to_string_lossy().to_string()).collect()),
+        None => Ok(vec![]),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let tray = tauri::tray::TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -75,14 +89,16 @@ fn main() {
 
             let app_handle = app.handle().clone();
             let state_clone = s.clone();
-            tokio::spawn(async move {
-                let _ = sidecar::start_sidecar(&app_handle, state_clone).await;
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async { let _ = sidecar::start_sidecar(&app_handle, state_clone).await; });
             });
 
             let app_h2 = app.handle().clone();
             let state_h = s.clone();
-            tokio::spawn(async move {
-                sidecar::health_loop(app_h2, state_h).await;
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async { sidecar::health_loop(app_h2, state_h).await; });
             });
 
             Ok(())
@@ -92,7 +108,7 @@ fn main() {
                 let _ = w.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![get_status, start_service, stop_service])
+        .invoke_handler(tauri::generate_handler![get_status, start_service, stop_service, pick_files])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

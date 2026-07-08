@@ -34,7 +34,7 @@ pub async fn start_sidecar(app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) 
         .map_err(|e| e.to_string())?
         .args([
             "-m",
-            "parsing_core.serve",
+            "parsing_core.serving.serve",
             "--port",
             &port.to_string(),
             "--parent-pid",
@@ -53,7 +53,7 @@ pub async fn start_sidecar(app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) 
     let app_clone = app.clone();
     let state_clone = state.clone();
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(line) => {
