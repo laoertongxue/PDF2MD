@@ -1,21 +1,38 @@
 import { useEffect, useState } from "react";
+import { Loader2, AlertCircle } from "lucide-react";
 
 export default function MermaidBlock({ code }: { code: string }) {
-  const [svg, setSvg] = useState<string>("");
+  const [svg, setSvg] = useState("");
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    let cancelled = false;
-    import("mermaid").then((mermaid) => {
-      mermaid.default
-        .render(`mermaid-${Math.random().toString(36).slice(2)}`, code)
-        .then(({ svg }) => { if (!cancelled) setSvg(svg); })
-        .catch(() => { if (!cancelled) setError(true); });
+    let c = false;
+    import("mermaid").then((m) => {
+      m.default.render(`mm-${Math.random().toString(36).slice(2, 8)}`, code)
+        .then(({ svg }) => { if (!c) setSvg(svg); })
+        .catch(() => { if (!c) setError(true); });
     });
-    return () => { cancelled = true; };
+    return () => { c = true; };
   }, [code]);
 
-  if (error) return <pre className="text-xs text-red-500 bg-red-50 p-2 rounded overflow-auto">{code}</pre>;
-  if (!svg) return <div className="h-20 bg-gray-50 rounded animate-pulse" />;
-  return <div className="flex justify-center my-4" dangerouslySetInnerHTML={{ __html: svg }} />;
+  if (error) {
+    return (
+      <div className="flex items-start gap-2.5 rounded-xl bg-amber-50 border border-amber-200 p-3.5">
+        <AlertCircle size={16} className="text-amber-500 shrink-0 mt-0.5" />
+        <pre className="text-[11px] text-amber-800 overflow-auto whitespace-pre-wrap">{code}</pre>
+      </div>
+    );
+  }
+
+  if (!svg) {
+    return (
+      <div className="flex items-center justify-center h-32 rounded-xl bg-gray-50 border border-dashed border-gray-200">
+        <Loader2 size={20} className="animate-spin text-gray-300" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex justify-center overflow-x-auto" dangerouslySetInnerHTML={{ __html: svg }} />
+  );
 }
