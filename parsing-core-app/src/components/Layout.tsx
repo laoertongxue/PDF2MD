@@ -1,61 +1,81 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { LayoutDashboard, PlusCircle, FileText, Activity } from "lucide-react";
+import { LayoutDashboard, PlusCircle, FileText, Terminal } from "lucide-react";
+
+const nav = [
+  { to: "/", label: "仪表盘", icon: LayoutDashboard },
+  { to: "/submit", label: "新建批次", icon: PlusCircle },
+];
 
 export default function Layout() {
   const { pathname } = useLocation();
 
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* Top bar */}
-      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-border/60">
-        <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
-          {/* Left */}
-          <div className="flex items-center gap-8">
-            <Link to="/" className="flex items-center gap-2.5 shrink-0">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-white shadow-sm shadow-accent/25">
-                <FileText size={17} strokeWidth={2} />
-              </div>
-              <span className="font-semibold text-[15px] tracking-tight text-gray-900">PDF2MD</span>
-            </Link>
-            <nav className="flex items-center gap-0.5">
-              {[
-                { to: "/", label: "仪表盘", Icon: LayoutDashboard },
-                { to: "/submit", label: "新建批次", Icon: PlusCircle },
-              ].map(({ to, label, Icon }) => {
-                const active = pathname === to;
-                return (
-                  <Link
-                    key={to}
-                    to={to}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium transition-all duration-150 ${
-                      active
-                        ? "bg-gray-100/80 text-gray-900"
-                        : "text-muted hover:text-gray-700 hover:bg-gray-50"
-                    }`}
-                  >
-                    <Icon size={15} strokeWidth={2} />
-                    {label}
-                  </Link>
-                );
-              })}
-            </nav>
+    <div className="flex h-screen overflow-hidden">
+      {/* Sidebar */}
+      <aside className="w-56 shrink-0 flex flex-col border-r border-zinc-200 bg-white">
+        {/* Logo */}
+        <div className="h-14 flex items-center gap-2.5 px-5 border-b border-zinc-100">
+          <div className="flex h-7 w-7 items-center justify-center rounded-md bg-zinc-900 text-white">
+            <FileText size={15} strokeWidth={2} />
           </div>
+          <span className="font-semibold text-sm text-zinc-900">PDF2MD</span>
+        </div>
 
-          {/* Right: status */}
-          <div className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-[12px] font-medium text-emerald-700">
+        {/* Nav */}
+        <nav className="flex-1 px-3 py-4 space-y-0.5">
+          {nav.map(({ to, label, icon: Icon }) => {
+            const active = pathname === to || (to !== "/" && pathname.startsWith(to));
+            return (
+              <Link
+                key={to}
+                to={to}
+                className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors ${
+                  active
+                    ? "bg-zinc-100 text-zinc-900 font-medium"
+                    : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-50"
+                }`}
+              >
+                <Icon size={17} strokeWidth={active ? 2 : 1.5} />
+                {label}
+              </Link>
+            );
+          })}
+        </nav>
+
+        {/* Footer */}
+        <div className="px-4 py-3 border-t border-zinc-100">
+          <a
+            href="http://127.0.0.1:8000/health"
+            target="_blank"
+            rel="noopener"
+            className="flex items-center gap-2 text-xs text-zinc-400 hover:text-zinc-600 transition-colors"
+          >
             <span className="relative flex h-2 w-2">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
             </span>
-            服务运行中
-          </div>
+            服务运行中 :8000
+          </a>
         </div>
-      </header>
+      </aside>
 
-      {/* Page content */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-8">
-        <Outlet />
-      </main>
+      {/* Main content area */}
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Top bar */}
+        <header className="h-14 shrink-0 border-b border-zinc-200 bg-white/80 backdrop-blur-sm flex items-center px-6">
+          <div className="flex items-center gap-2 text-sm text-zinc-500">
+            <Terminal size={15} />
+            <span className="font-mono text-xs">parsing-core</span>
+          </div>
+        </header>
+
+        {/* Page */}
+        <main className="flex-1 overflow-y-auto">
+          <div className="max-w-4xl mx-auto px-8 py-8">
+            <Outlet />
+          </div>
+        </main>
+      </div>
     </div>
   );
 }
