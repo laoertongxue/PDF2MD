@@ -1,177 +1,149 @@
-# PDF2MD —— 课程资料精读与写作辅助桌面应用
+# PDF2MD
 
-将 PDF、Word、PPT、Excel、图片等多格式资料转为 Markdown，并围绕课程/教材章节生成高质量精读笔记、Mermaid 知识图、应用流程图和写作卡片。
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#license)
+[![Release](https://img.shields.io/github/v/release/laoertongxue/PDF2MD?include_prereleases)](https://github.com/laoertongxue/PDF2MD/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-blue)](https://github.com/laoertongxue/PDF2MD/releases)
 
-## 架构总览
+PDF2MD 是一个面向 MBA / 课程教材精读的桌面应用：把 PDF 等课程资料整理成 Markdown，并辅助生成结构化精读笔记、Mermaid 图和写作卡片。
 
-```
-┌──────────────────────────────────────────────────┐
-│  Tauri v2 桌面壳 (Rust)                          │
-│  • Sidecar 拉起 Python 服务                       │
-│  • 双向 PID 心跳守护                              │
-│  • WebView 渲染 React 前端                        │
-├──────────────────────────────────────────────────┤
-│  FastAPI 服务 (Python)                            │
-│  • REST API 批量提交                              │
-│  • WebSocket 实时状态推送                         │
-│  • asyncio 并发池调度                             │
-├──────────────────────────────────────────────────┤
-│  解析内核 (MarkItDown + LLM)                      │
-│  • 多格式文件 → Markdown                          │
-│  • 按节切分 + 节级 LLM 穿插解读                   │
-│  • Mermaid 图表即时生成                           │
-│  • 三档算力路由: 本地 Ollama / 私有 vLLM / 公有云 │
-├──────────────────────────────────────────────────┤
-│  SQLite (WAL 模式)                                │
-│  • 文件级 sha256 缓存                              │
-│  • 节级 sha256 缓存                                │
-│  • 崩溃可恢复 (resume 续跑)                       │
-└──────────────────────────────────────────────────┘
-```
+中文 | [English](#english)
 
-## 快速开始
+## 中文
 
-### 前置条件
+### 这是什么
 
-- Python 3.11+
-- Node.js 20+
-- Rust (用于 Tauri 编译)
-- [Ollama](https://ollama.com) (可选，本地 LLM)
+PDF2MD 不是普通的“PDF 转 Markdown”工具。它的目标是帮助你重读 MBA 或专业课程教材：按章节整理资料，生成稳定结构的精读笔记，并把概念解释、案例解读、应用方法和写作素材沉淀下来。
 
-### 1. 安装 Python 依赖
+### 适合谁
+
+- 正在系统重读 MBA、管理学、经济学、市场营销、战略等课程的人
+- 想把教材精读输出为公众号长文、系列贴文或知识卡片的人
+- 想用本地桌面应用管理课程资料、章节和精读结果的人
+
+### 核心特性
+
+- 课程工作台：按课程组织教材、章节、精读结果和卡片
+- Markdown 产出：把资料整理为便于继续写作的 Markdown
+- Mermaid 预览：精读笔记中的知识图和应用流程图可以直接预览
+- 大模型辅助：支持围绕章节生成概念解释、案例解读、实际应用和写作卡片
+- 桌面应用：Tauri 客户端自动拉起本地解析服务
+
+### 下载桌面客户端
+
+当前 Release 先支持 macOS Apple Silicon。
+
+下载地址：[GitHub Releases](https://github.com/laoertongxue/PDF2MD/releases)
+
+下载 `.dmg` 后安装 `PDF2MD.app`。如果 macOS 提示未签名应用，请在系统设置中允许打开。当前版本是 Apple Silicon 预览版；代码签名、公证和完整内置 Python runtime 不在当前版本范围内。
+
+### 典型流程
+
+1. 创建课程，例如“战略管理”。
+2. 导入教材 PDF 或课程资料。
+3. 识别并确认章节。
+4. 运行章节精读。
+5. 查看 Markdown 笔记、Mermaid 图和写作卡片。
+6. 基于卡片输出贴文或公众号长文。
+
+### 本地开发
 
 ```bash
-git clone https://github.com/your-username/PDF2MD.git
+git clone https://github.com/laoertongxue/PDF2MD.git
 cd PDF2MD
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev,serve,llm]"
+
+cd parsing-core-app
+npm install
+npm run tauri dev
 ```
 
-### 2. 启动后端服务
-
-```bash
-# 默认 stub 模式（无 LLM，用占位输出快速验证）
-python -m parsing_core.serve --port 8000
-
-# 使用本地 Ollama
-export PARSING_CORE_LOCAL_MODEL=ollama/llama3.2-vision:latest
-python -m parsing_core.serve --port 8000
-
-# 使用 OpenAI
-export OPENAI_API_KEY=sk-xxx
-export PARSING_CORE_PUBLIC_MODEL=openai/gpt-4o
-python -m parsing_core.serve --port 8000
-```
-
-### 3. 启动桌面应用
+### 本地构建桌面应用
 
 ```bash
 cd parsing-core-app
 npm install
-npx tauri dev
+npm run tauri build
 ```
 
-或仅启动 Web 前端：
+构建产物位于：
+
+```text
+parsing-core-app/src-tauri/target/release/bundle/dmg/
+```
+
+### 技术栈
+
+- Tauri v2
+- React + TypeScript + Vite
+- Tailwind CSS
+- Python + FastAPI
+- SQLite
+- Mermaid
+
+### 路线图
+
+- macOS Apple Silicon Release 下载
+- 完整内置 Python runtime
+- 更稳健的 PDF 章节识别
+- Word / PPT / Excel / 图片等多格式资料工作流
+- 更完整的精读模板和写作卡片模板
+- macOS 签名与公证
+- Windows / Linux 客户端
+
+### License
+
+MIT
+
+## English
+
+PDF2MD is a desktop app for intensive course reading. It helps turn course materials into Markdown notes, Mermaid diagrams, and reusable writing cards.
+
+### Who It Is For
+
+- MBA or professional-course learners
+- Writers turning textbook reading into posts or long-form essays
+- Users who want a local desktop workspace for course materials and chapter notes
+
+### Features
+
+- Course workspace for sources, chapters, notes, and cards
+- Markdown-oriented output
+- Mermaid diagram preview
+- LLM-assisted chapter reading notes
+- Tauri desktop client with a local parsing service
+
+### Download
+
+The first downloadable client is a macOS Apple Silicon preview.
+
+Download from [GitHub Releases](https://github.com/laoertongxue/PDF2MD/releases).
+
+Code signing, notarization, and a fully embedded Python runtime are outside the current release scope.
+
+### Development
+
+```bash
+git clone https://github.com/laoertongxue/PDF2MD.git
+cd PDF2MD
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev,serve,llm]"
+
+cd parsing-core-app
+npm install
+npm run tauri dev
+```
+
+### Build
 
 ```bash
 cd parsing-core-app
 npm install
-npm run dev  # → http://localhost:1420
+npm run tauri build
 ```
 
-### 4. 命令行单文件解析
-
-```bash
-python -m parsing_core.cli parse /path/to/report.xlsx
-# 产物: ~/.local/share/parsing-core/{task_id}/merged.md
-```
-
-## 项目结构
-
-```
-PDF2MD/
-├── src/parsing_core/          # Python 后端
-│   ├── cli.py                 # CLI 入口 (5 子命令)
-│   ├── orchestrator.py        # 解析编排器
-│   ├── models/                # 数据模型 (Task/Section/AIArtifact)
-│   ├── utils/                 # 工具 (sha256/副本/重试)
-│   ├── storage/               # SQLite 持久化
-│   ├── parser/                # MarkItDown + 分节器 + 图片抽取
-│   ├── llm/                   # LLM 客户端 (Stub/LiteLLM)
-│   └── serving/               # FastAPI 服务 (REST + WS + Scheduler)
-├── parsing-core-app/          # Tauri 桌面应用
-│   ├── src/                   # React + TypeScript 前端
-│   │   ├── components/        # UI 组件
-│   │   ├── api/               # REST/WS 客户端
-│   │   └── store/             # Zustand 状态管理
-│   ├── src-tauri/             # Rust 后端
-│   │   ├── src/
-│   │   │   ├── main.rs        # 入口 (窗口/托盘/生命周期)
-│   │   │   ├── sidecar.rs     # Sidecar 管理
-│   │   │   └── state.rs       # 状态定义
-│   │   └── tauri.conf.json    # Tauri 配置
-│   └── package.json
-├── tests/                     # Python 测试 (154 passed)
-└── docs/superpowers/          # 设计文档
-    ├── specs/                 # 规格说明 (5 个子系统)
-    └── plans/                 # 实现计划
-```
-
-## API 端点
-
-| 路由 | 方法 | 说明 |
-|---|---|---|
-| `/health` | GET | 健康检查 |
-| `/api/batches` | POST | 创建批次 `{files, concurrency}` |
-| `/api/batches` | GET | 列出批次 `?status=RUNNING` |
-| `/api/batches/{id}` | GET | 批次详情 |
-| `/api/batches/{id}` | DELETE | 取消批次 |
-| `/api/tasks` | POST | 单文件入口 |
-| `/api/tasks/{id}` | GET | 任务状态 |
-| `/api/tasks/{id}` | DELETE | 清理任务 |
-| `/api/tasks/{id}/merged` | GET | 下载 merged.md |
-| `/ws/batch/{id}?since=N` | WS | 实时事件流 |
-
-## 算力路由
-
-通过环境变量配置三档路由：
-
-| Tier | 默认模型 | 配置变量 |
-|---|---|---|
-| `local` | ollama/llama3.2-vision | `PARSING_CORE_LOCAL_MODEL`, `OLLAMA_HOST` |
-| `private` | openai/gpt-4o-mini | `PARSING_CORE_PRIVATE_MODEL`, `PARSING_CORE_PRIVATE_BASE_URL`, `PARSING_CORE_PRIVATE_API_KEY` |
-| `public` | openai/gpt-4o | `PARSING_CORE_PUBLIC_MODEL`, `OPENAI_API_KEY` |
-| `stub` | — (占位) | 无需配置 |
-
-## 技术栈
-
-| 层 | 技术 |
-|---|---|
-| 桌面壳 | Tauri v2 (Rust) + WebView |
-| 前端 | Vite 6 + React 19 + TypeScript + Tailwind CSS + Zustand |
-| 后端 | Python 3.11 + FastAPI + uvicorn |
-| 解析 | MarkItDown + 自研分节器 |
-| LLM | LiteLLM (OpenAI / Anthropic / Ollama / vLLM) |
-| 存储 | SQLite (WAL) |
-| 测试 | pytest (154) + tsc + ruff |
-
-## 开发
-
-```bash
-# 运行全部测试
-pytest -v
-
-# 代码检查
-ruff check src tests
-
-# 前端编译检查
-cd parsing-core-app && npx tsc --noEmit
-
-# 构建桌面应用
-cd parsing-core-app && npx tauri build
-```
-
-## License
+### License
 
 MIT
