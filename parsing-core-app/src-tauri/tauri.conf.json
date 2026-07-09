@@ -30,9 +30,9 @@
     "externalBin": [
       "binaries/python3"
     ],
-    "resources": [
-      "../../src"
-    ]
+    "resources": {
+      "../../src": "src"
+    }
   },
   "plugins": {
     "shell": {
