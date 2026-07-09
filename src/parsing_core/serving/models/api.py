@@ -46,3 +46,44 @@ class WSEvent(BaseModel):
     event: str
     payload: dict
     ts: int
+
+
+class CourseCreateRequest(BaseModel):
+    title: str
+    description: str = ""
+    root_dir: str
+
+
+class CourseResponse(BaseModel):
+    id: str
+    title: str
+    description: str
+    root_dir: str
+
+
+class SourceCreateRequest(BaseModel):
+    kind: str = "main"
+    file_path: str
+    title: str
+
+
+class SourceResponse(BaseModel):
+    id: str
+    course_id: str
+    kind: str
+    file_path: str
+    title: str
+    status: str
+
+
+class ChapterResponse(BaseModel):
+    id: str
+    source_id: str
+    course_id: str
+    seq: int
+    title: str
+    status: str
+
+
+class RunChapterRequest(BaseModel):
+    executor: str = "stub"

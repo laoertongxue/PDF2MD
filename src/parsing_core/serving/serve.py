@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from parsing_core.serving.api.deps import set_scheduler
 from parsing_core.serving.api.routes_batches import router as batches_router
 from parsing_core.serving.api.routes_tasks import router as tasks_router
+from parsing_core.serving.api.routes_workbench import router as workbench_router
 from parsing_core.serving.api.routes_ws import router as ws_router
 from parsing_core.serving.config import (
     HOST,
@@ -41,6 +42,7 @@ def build_app(
 
     app.include_router(batches_router)
     app.include_router(tasks_router)
+    app.include_router(workbench_router)
     app.include_router(ws_router)
     return app
 
@@ -80,6 +82,7 @@ def main() -> int:
     from parsing_core.storage.repository import Repository
     from parsing_core.storage.schema import init_db
     from parsing_core.storage.schema_ext import apply_serve_schema
+    from parsing_core.workbench.schema import apply_workbench_schema
 
     base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
     serve_base = os.path.join(base, SERVE_FS_DIRNAME)
@@ -90,6 +93,7 @@ def main() -> int:
         fs = FsLayout(base_dir=serve_base)
         conn = init_db(db_path)
         apply_serve_schema(conn)
+        apply_workbench_schema(conn)
         repo = Repository(conn)
         return Orchestrator(repo=repo, fs=fs, llm=StubLLMClient(), db_path=db_path)
 

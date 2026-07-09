@@ -77,6 +77,13 @@ class WorkbenchRepository:
         ).fetchall()
         return [Source(*row) for row in rows]
 
+    def get_source(self, source_id: str) -> Source | None:
+        row = self.conn.execute(
+            "SELECT * FROM wb_sources WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+        return Source(*row) if row else None
+
     def create_chapter(
         self,
         course_id: str,
