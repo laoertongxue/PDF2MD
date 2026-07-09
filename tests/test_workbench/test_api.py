@@ -56,8 +56,18 @@ def test_confirm_chapter_then_run_pipeline(tmp_path):
 
     res = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters")
     assert res.status_code == 200
-    chapter_id = res.json()[0]["id"]
-    c.post(f"/api/workbench/chapters/{chapter_id}/confirm")
+    chapter = res.json()[0]
+    chapter_id = chapter["id"]
+    res = c.post(f"/api/workbench/chapters/{chapter_id}/confirm")
+    assert res.status_code == 200
+    assert res.json() == {
+        "id": chapter_id,
+        "source_id": source["id"],
+        "course_id": course["id"],
+        "seq": chapter["seq"],
+        "title": chapter["title"],
+        "status": "CONFIRMED",
+    }
 
     res = c.post(f"/api/workbench/chapters/{chapter_id}/run", json={"executor": "stub"})
     assert res.status_code == 200

@@ -118,13 +118,13 @@ async def detect_source_chapters(source_id: str, sch: SchedulerDep):
     return [_chapter_response(chapter) for chapter in chapters]
 
 
-@router.post("/chapters/{chapter_id}/confirm")
+@router.post("/chapters/{chapter_id}/confirm", response_model=ChapterResponse)
 async def confirm_chapter(chapter_id: str, sch: SchedulerDep):
     repo = _repo(sch)
     if repo.get_chapter(chapter_id) is None:
         raise HTTPException(404, "chapter not found")
     repo.update_chapter_status(chapter_id, "CONFIRMED")
-    return {"chapter_id": chapter_id, "status": "CONFIRMED"}
+    return _chapter_response(repo.get_chapter(chapter_id))
 
 
 @router.post("/chapters/{chapter_id}/run")
