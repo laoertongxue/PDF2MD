@@ -1,3 +1,18 @@
-#!/bin/bash
-export PYTHONPATH=/Users/laoer/Documents/PDF2MD/src
-exec /Users/laoer/Documents/PDF2MD/.venv/bin/python3 -m parsing_core.serving.serve "$@"
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+app_root="$(cd "$script_dir/../../.." && pwd)"
+resource_src="$script_dir/../Resources/src"
+repo_src="$app_root/src"
+
+if [[ -d "$resource_src" ]]; then
+  default_pythonpath="$resource_src"
+else
+  default_pythonpath="$repo_src"
+fi
+
+export PYTHONPATH="${PDF2MD_PYTHONPATH:-$default_pythonpath}"
+python_bin="${PDF2MD_PYTHON:-python3}"
+
+exec "$python_bin" -m parsing_core.serving.serve "$@"

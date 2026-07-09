@@ -29,6 +29,9 @@
     ],
     "externalBin": [
       "binaries/python3"
+    ],
+    "resources": [
+      "../../src"
     ]
   },
   "plugins": {
