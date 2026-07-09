@@ -7,6 +7,7 @@ from parsing_core.storage.fs_layout import FsLayout
 from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
+from parsing_core.serving.api import routes_workbench
 from parsing_core.workbench.schema import apply_workbench_schema
 
 
@@ -31,6 +32,23 @@ def course_root(tmp_path):
     root = tmp_path / "fs" / "workbench-courses" / "out"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def confirmed_chapter(client, root):
+    course = client.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source_md = root / "source.md"
+    source_md.write_text("## 第一章\n战略是选择。", encoding="utf-8")
+    source = client.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"kind": "main", "file_path": str(source_md), "title": "战略教材"},
+    ).json()
+    chapter = client.post(f"/api/workbench/sources/{source['id']}/detect-chapters").json()[0]
+    confirm_res = client.post(f"/api/workbench/chapters/{chapter['id']}/confirm")
+    assert confirm_res.status_code == 200
+    return course, source, chapter
 
 
 def test_create_course_and_list(tmp_path):
@@ -207,6 +225,91 @@ def test_run_hybrid_requires_deepseek_settings(tmp_path):
 
     assert res.status_code == 400
     assert res.json()["detail"] == "deepseek api key not configured"
+
+
+def test_run_hybrid_missing_codex_returns_400_without_running_pipeline(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    calls = {"run_all": 0}
+
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
+    monkeypatch.setattr(
+        routes_workbench,
+        "resolve_codex_path",
+        lambda: (_ for _ in ()).throw(routes_workbench.CodexCliError("codex cli not found")),
+    )
+
+    def fake_run_all(self, chapter_id):
+        calls["run_all"] += 1
+
+    monkeypatch.setattr(routes_workbench.IntensiveReadingPipeline, "run_all", fake_run_all)
+
+    res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "codex cli not found"
+    assert calls["run_all"] == 0
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "CONFIRMED"
+
+
+def test_run_hybrid_pipeline_failure_marks_chapter_failed(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+
+    def fake_run_all(self, chapter_id):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(routes_workbench.IntensiveReadingPipeline, "run_all", fake_run_all)
+
+    res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+
+    assert res.status_code == 500
+    assert res.json()["detail"] == "boom"
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
+
+
+def test_run_hybrid_success_marks_chapter_completed(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    seen = {}
+
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+
+    def fake_run_all(self, chapter_id):
+        seen["chapter_id"] = chapter_id
+
+    monkeypatch.setattr(routes_workbench.IntensiveReadingPipeline, "run_all", fake_run_all)
+
+    res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+
+    assert res.status_code == 200
+    assert seen["chapter_id"] == chapter["id"]
+    assert res.json()["status"] == "COMPLETED"
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "COMPLETED"
+
+
+def test_run_hybrid_completed_chapter_returns_conflict(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+    monkeypatch.setattr(routes_workbench.IntensiveReadingPipeline, "run_all", lambda self, chapter_id: None)
+
+    first = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+    second = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["detail"] == "chapter must be CONFIRMED before intensive reading"
 
 
 def test_detect_chapters_replaces_old_chapters_after_source_changes(tmp_path):

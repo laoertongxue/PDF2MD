@@ -7,9 +7,20 @@ from parsing_core.workbench.codex_cli import CodexCliError, CodexCliExecutor, re
 
 def test_resolve_codex_path_prefers_env(monkeypatch):
     monkeypatch.setenv("CODEX_CLI_PATH", "/custom/codex")
+    monkeypatch.setattr("os.path.isfile", lambda path: path == "/custom/codex")
+    monkeypatch.setattr("os.access", lambda path, mode: path == "/custom/codex")
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/codex")
 
     assert resolve_codex_path() == "/custom/codex"
+
+
+def test_resolve_codex_path_rejects_missing_env_path(monkeypatch):
+    monkeypatch.setenv("CODEX_CLI_PATH", "/missing/codex")
+    monkeypatch.setattr("os.path.isfile", lambda path: False)
+    monkeypatch.setattr("os.access", lambda path, mode: False)
+
+    with pytest.raises(CodexCliError, match="codex cli not found"):
+        resolve_codex_path()
 
 
 def test_codex_cli_executor_reads_output_file(monkeypatch, tmp_path):

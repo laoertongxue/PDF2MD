@@ -8,9 +8,15 @@ class CodexCliError(RuntimeError):
     pass
 
 
+def _is_executable_file(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
 def resolve_codex_path() -> str:
     env_path = os.environ.get("CODEX_CLI_PATH")
     if env_path:
+        if not _is_executable_file(env_path):
+            raise CodexCliError("codex cli not found")
         return env_path
     found = shutil.which("codex")
     if not found:
