@@ -26,9 +26,7 @@ class CodexCliExecutor:
 
     def run(self, round_key: str, task_package: str) -> str:
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        input_path = self.run_dir / f"codex-{round_key}-input.md"
         output_path = self.run_dir / f"codex-{round_key}-output.md"
-        input_path.write_text(task_package, encoding="utf-8")
         if output_path.exists():
             output_path.unlink()
         cmd = [
@@ -44,7 +42,7 @@ class CodexCliExecutor:
         ]
         result = subprocess.run(
             cmd,
-            input=input_path.read_text(encoding="utf-8"),
+            input=task_package,
             text=True,
             capture_output=True,
             timeout=self.timeout,

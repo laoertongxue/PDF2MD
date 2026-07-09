@@ -34,6 +34,7 @@ def test_codex_cli_executor_reads_output_file(monkeypatch, tmp_path):
     assert seen["cmd"][seen["cmd"].index("--output-last-message") + 1] == str(
         tmp_path / "codex-round-1-output.md"
     )
+    assert not (tmp_path / "codex-round-1-input.md").exists()
     assert "flowchart TD" in output
 
 
