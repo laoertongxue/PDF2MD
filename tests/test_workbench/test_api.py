@@ -62,3 +62,24 @@ def test_confirm_chapter_then_run_pipeline(tmp_path):
     res = c.post(f"/api/workbench/chapters/{chapter_id}/run", json={"executor": "stub"})
     assert res.status_code == 200
     assert res.json()["status"] == "COMPLETED"
+
+
+def test_detect_chapters_uses_safe_single_level_source_dir(tmp_path):
+    c = client(tmp_path)
+    root_dir = tmp_path / "out"
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root_dir)},
+    ).json()
+    source_md = tmp_path / "source.md"
+    source_md.write_text("## 第一章/选择\\定位\n战略是选择。", encoding="utf-8")
+    source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"kind": "main", "file_path": str(source_md), "title": "战略/教材\\案例"},
+    ).json()
+
+    res = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters")
+
+    assert res.status_code == 200
+    assert not (root_dir / "战略").exists()
+    assert (root_dir / "战略-教材-案例" / "0-第一章_选择_定位.md").exists()

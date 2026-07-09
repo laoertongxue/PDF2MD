@@ -60,6 +60,10 @@ def _chapter_filename(seq: int, title: str) -> str:
     return f"{seq}-{safe_title}.md"
 
 
+def _safe_dir_name(name: str) -> str:
+    return name.replace("/", "-").replace("\\", "-")
+
+
 @router.post("/courses", response_model=CourseResponse)
 async def create_course(req: CourseCreateRequest, sch: SchedulerDep):
     course = _repo(sch).create_course(req.title, req.description, req.root_dir)
@@ -96,7 +100,7 @@ async def detect_source_chapters(source_id: str, sch: SchedulerDep):
     else:
         markdown = MarkItDownAdapter().parse(str(source_path))
 
-    out_dir = Path(course.root_dir) / source.title
+    out_dir = Path(course.root_dir) / _safe_dir_name(source.title)
     out_dir.mkdir(parents=True, exist_ok=True)
     chapters = []
     for candidate in detect_chapters(markdown):
