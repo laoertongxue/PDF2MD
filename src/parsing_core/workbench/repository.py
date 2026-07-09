@@ -2,7 +2,7 @@ import sqlite3
 import time
 from uuid import uuid4
 
-from parsing_core.workbench.models import Card, Chapter, Course, Source
+from parsing_core.workbench.models import Card, Chapter, Course, NoteBlock, Source
 
 
 def _now() -> int:
@@ -139,6 +139,43 @@ class WorkbenchRepository:
         )
         self.conn.commit()
 
+    def upsert_note_block(
+        self,
+        chapter_id: str,
+        kind: str,
+        title: str,
+        body: str,
+        seq: int,
+    ) -> NoteBlock:
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO wb_note_blocks
+              (id, chapter_id, kind, title, body, seq, updated_at)
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chapter_id, kind) DO UPDATE SET
+              title = excluded.title,
+              body = excluded.body,
+              seq = excluded.seq,
+              updated_at = excluded.updated_at
+            """,
+            (uuid4().hex, chapter_id, kind, title, body, seq, now),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT * FROM wb_note_blocks WHERE chapter_id = ? AND kind = ?",
+            (chapter_id, kind),
+        ).fetchone()
+        return NoteBlock(*row)
+
+    def list_note_blocks(self, chapter_id: str) -> list[NoteBlock]:
+        rows = self.conn.execute(
+            "SELECT * FROM wb_note_blocks WHERE chapter_id = ? ORDER BY seq",
+            (chapter_id,),
+        ).fetchall()
+        return [NoteBlock(*row) for row in rows]
+
     def create_card(
         self,
         course_id: str,
@@ -188,6 +225,17 @@ class WorkbenchRepository:
             ORDER BY favorite DESC, updated_at DESC
             """,
             (course_id,),
+        ).fetchall()
+        return [self._card(row) for row in rows]
+
+    def list_cards_by_chapter(self, chapter_id: str) -> list[Card]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM wb_cards
+            WHERE chapter_id = ?
+            ORDER BY updated_at DESC
+            """,
+            (chapter_id,),
         ).fetchall()
         return [self._card(row) for row in rows]
 
