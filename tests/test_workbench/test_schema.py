@@ -7,10 +7,7 @@ def test_apply_workbench_schema_creates_tables(tmp_path):
     apply_workbench_schema(conn)
 
     tables = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     }
 
     assert "wb_courses" in tables
@@ -27,8 +24,5 @@ def test_apply_workbench_schema_is_idempotent(tmp_path):
     apply_workbench_schema(conn)
     apply_workbench_schema(conn)
 
-    cols = {
-        r[1]
-        for r in conn.execute("PRAGMA table_info(wb_cards)").fetchall()
-    }
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(wb_cards)").fetchall()}
     assert {"id", "course_id", "chapter_id", "kind", "title", "body", "favorite"} <= cols

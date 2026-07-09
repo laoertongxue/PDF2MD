@@ -1,6 +1,5 @@
 import sqlite3
 
-
 WORKBENCH_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS wb_courses (
   id TEXT PRIMARY KEY,
