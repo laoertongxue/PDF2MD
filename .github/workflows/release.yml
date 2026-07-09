@@ -1,0 +1,42 @@
+name: Release Desktop App
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos-apple-silicon:
+    name: Build macOS Apple Silicon DMG
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: parsing-core-app/package-lock.json
+
+      - name: Check release sidecar
+        run: ./scripts/check-release-sidecar.sh
+
+      - name: Install frontend dependencies
+        working-directory: parsing-core-app
+        run: npm ci
+
+      - name: Build desktop app
+        working-directory: parsing-core-app
+        run: npm run tauri build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: parsing-core-app/src-tauri/target/release/bundle/dmg/*.dmg
+          fail_on_unmatched_files: true
