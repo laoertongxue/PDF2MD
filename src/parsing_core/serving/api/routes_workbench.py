@@ -9,20 +9,22 @@ from parsing_core.serving.models.api import (
     ChapterResponse,
     CourseCreateRequest,
     CourseResponse,
+    DeepSeekSettingsRequest,
     NoteBlockResponse,
     RunChapterRequest,
     SourceCreateRequest,
     SourceResponse,
+    WorkbenchSettingsResponse,
 )
 from parsing_core.workbench.codex_cli import CodexCliError, CodexCliExecutor, resolve_codex_path
 from parsing_core.workbench.chapter_detection import detect_chapters
-from parsing_core.workbench.deepseek import DeepSeekClient, DeepSeekExecutor
+from parsing_core.workbench.deepseek import DeepSeekClient, DeepSeekError, DeepSeekExecutor
 from parsing_core.workbench.executors import StubIntensiveReadingExecutor
 from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
-from parsing_core.workbench.keychain import KeychainError, read_secret
+from parsing_core.workbench.keychain import KeychainError, mask_secret, read_secret, save_secret
 from parsing_core.workbench.pipeline import IntensiveReadingPipeline
 from parsing_core.workbench.repository import WorkbenchRepository
-from parsing_core.workbench.settings import load_settings
+from parsing_core.workbench.settings import WorkbenchSettings, load_settings, save_settings
 
 router = APIRouter(prefix="/api/workbench", tags=["workbench"])
 KEYCHAIN_SERVICE = "pdf2md.deepseek"
@@ -35,6 +37,10 @@ def _repo(sch: SchedulerDep) -> WorkbenchRepository:
 
 def _workbench_base(sch: SchedulerDep) -> Path:
     return (Path(sch._query_orch.fs.base_dir) / "workbench-courses").resolve()
+
+
+def _settings_path(sch: SchedulerDep) -> Path:
+    return Path(sch._query_orch.fs.base_dir) / "workbench-settings.json"
 
 
 def _resolve_inside(path: str, base: Path, message: str) -> Path:
@@ -197,6 +203,48 @@ async def get_chapter(chapter_id: str, sch: SchedulerDep):
     return _chapter_response(chapter)
 
 
+@router.get("/settings", response_model=WorkbenchSettingsResponse)
+async def get_workbench_settings(sch: SchedulerDep):
+    settings = load_settings(_settings_path(sch))
+    masked = None
+    try:
+        masked = mask_secret(read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT))
+    except KeychainError:
+        pass
+    return WorkbenchSettingsResponse(
+        deepseek_model=settings.deepseek_model,
+        deepseek_key_masked=masked,
+    )
+
+
+@router.post("/settings/deepseek", response_model=WorkbenchSettingsResponse)
+async def save_deepseek_settings(req: DeepSeekSettingsRequest, sch: SchedulerDep):
+    try:
+        save_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, req.api_key)
+    except KeychainError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    settings = WorkbenchSettings(deepseek_model=req.model or "deepseek-chat")
+    save_settings(_settings_path(sch), settings)
+    return WorkbenchSettingsResponse(
+        deepseek_model=settings.deepseek_model,
+        deepseek_key_masked=mask_secret(req.api_key),
+    )
+
+
+@router.post("/settings/deepseek/test")
+async def test_deepseek_settings(sch: SchedulerDep):
+    settings = load_settings(_settings_path(sch))
+    try:
+        api_key = read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+    except KeychainError as exc:
+        raise HTTPException(400, "deepseek api key not configured") from exc
+    try:
+        DeepSeekClient(api_key, settings.deepseek_model).complete("请只回复 ok", timeout=30)
+    except DeepSeekError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"status": "ok"}
+
+
 @router.post("/chapters/{chapter_id}/confirm", response_model=ChapterResponse)
 async def confirm_chapter(chapter_id: str, sch: SchedulerDep):
     repo = _repo(sch)
@@ -257,8 +305,7 @@ async def run_chapter_hybrid(chapter_id: str, sch: SchedulerDep):
     except KeychainError as exc:
         raise HTTPException(400, "deepseek api key not configured") from exc
 
-    settings_path = Path(sch._query_orch.fs.base_dir) / "workbench-settings.json"
-    settings = load_settings(settings_path)
+    settings = load_settings(_settings_path(sch))
     run_dir = Path(sch._query_orch.fs.base_dir) / "workbench-runs"
 
     try:

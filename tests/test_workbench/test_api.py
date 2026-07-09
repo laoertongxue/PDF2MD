@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from parsing_core.llm.stub_client import StubLLMClient
@@ -8,6 +10,7 @@ from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
 from parsing_core.serving.api import routes_workbench
+from parsing_core.workbench.keychain import KeychainError
 from parsing_core.workbench.schema import apply_workbench_schema
 
 
@@ -405,3 +408,110 @@ def test_detect_chapters_falls_back_for_dot_dot_source_dir(tmp_path):
     assert res.status_code == 200
     assert (root_dir / "source" / "0-01-战略选择.md").exists()
     assert not (root_dir.parent / "0-01-战略选择.md").exists()
+
+
+def test_workbench_settings_save_and_get(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    saved = {}
+
+    def fake_save_secret(service, account, secret):
+        saved["service"] = service
+        saved["account"] = account
+        saved["secret"] = secret
+
+    def fake_read_secret(service, account):
+        assert service == routes_workbench.KEYCHAIN_SERVICE
+        assert account == routes_workbench.KEYCHAIN_ACCOUNT
+        return saved["secret"]
+
+    monkeypatch.setattr(routes_workbench, "save_secret", fake_save_secret)
+    monkeypatch.setattr(routes_workbench, "read_secret", fake_read_secret)
+
+    post_res = c.post(
+        "/api/workbench/settings/deepseek",
+        json={"api_key": "sk-abcdefghijklmnopqrstuvwxyz", "model": "deepseek-reasoner"},
+    )
+
+    assert post_res.status_code == 200
+    assert post_res.json() == {
+        "deepseek_model": "deepseek-reasoner",
+        "deepseek_key_masked": "sk-****wxyz",
+    }
+
+    get_res = c.get("/api/workbench/settings")
+
+    assert get_res.status_code == 200
+    assert get_res.json() == {
+        "deepseek_model": "deepseek-reasoner",
+        "deepseek_key_masked": "sk-****wxyz",
+    }
+
+    settings_path = tmp_path / "fs" / "workbench-settings.json"
+    settings_text = settings_path.read_text(encoding="utf-8")
+    assert "api_key" not in settings_text
+    assert "abcdefghijklmnopqrstuvwxyz" not in settings_text
+    assert json.loads(settings_text) == {"deepseek_model": "deepseek-reasoner"}
+
+
+def test_workbench_settings_get_without_key_returns_none(tmp_path, monkeypatch):
+    c = client(tmp_path)
+
+    def fake_read_secret(service, account):
+        raise KeychainError("missing")
+
+    monkeypatch.setattr(routes_workbench, "read_secret", fake_read_secret)
+
+    res = c.get("/api/workbench/settings")
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "deepseek_model": "deepseek-chat",
+        "deepseek_key_masked": None,
+    }
+
+
+def test_workbench_settings_test_connection(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    calls = {}
+    settings_path = tmp_path / "fs" / "workbench-settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps({"deepseek_model": "deepseek-reasoner"}), encoding="utf-8")
+
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test-12345678")
+
+    class FakeDeepSeekClient:
+        def __init__(self, api_key, model):
+            calls["api_key"] = api_key
+            calls["model"] = model
+
+        def complete(self, prompt, timeout):
+            calls["prompt"] = prompt
+            calls["timeout"] = timeout
+            return "ok"
+
+    monkeypatch.setattr(routes_workbench, "DeepSeekClient", FakeDeepSeekClient)
+
+    res = c.post("/api/workbench/settings/deepseek/test")
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "ok"}
+    assert calls == {
+        "api_key": "sk-test-12345678",
+        "model": "deepseek-reasoner",
+        "prompt": "请只回复 ok",
+        "timeout": 30,
+    }
+
+
+def test_workbench_settings_test_connection_requires_key(tmp_path, monkeypatch):
+    c = client(tmp_path)
+
+    def fake_read_secret(service, account):
+        raise KeychainError("missing")
+
+    monkeypatch.setattr(routes_workbench, "read_secret", fake_read_secret)
+
+    res = c.post("/api/workbench/settings/deepseek/test")
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "deepseek api key not configured"
