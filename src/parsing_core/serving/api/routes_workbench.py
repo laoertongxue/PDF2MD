@@ -5,9 +5,11 @@ from fastapi import APIRouter, HTTPException
 from parsing_core.parser.markitdown_adapter import MarkItDownAdapter
 from parsing_core.serving.api.deps import SchedulerDep
 from parsing_core.serving.models.api import (
+    CardResponse,
     ChapterResponse,
     CourseCreateRequest,
     CourseResponse,
+    NoteBlockResponse,
     RunChapterRequest,
     SourceCreateRequest,
     SourceResponse,
@@ -55,6 +57,29 @@ def _chapter_response(chapter) -> ChapterResponse:
     )
 
 
+def _card_response(card) -> CardResponse:
+    return CardResponse(
+        id=card.id,
+        course_id=card.course_id,
+        chapter_id=card.chapter_id,
+        kind=card.kind,
+        title=card.title,
+        body=card.body,
+        favorite=card.favorite,
+    )
+
+
+def _note_block_response(block) -> NoteBlockResponse:
+    return NoteBlockResponse(
+        id=block.id,
+        chapter_id=block.chapter_id,
+        kind=block.kind,
+        title=block.title,
+        body=block.body,
+        seq=block.seq,
+    )
+
+
 def _chapter_filename(seq: int, title: str) -> str:
     safe_title = title.replace("/", "_").replace("\\", "_")
     return f"{seq}-{safe_title}.md"
@@ -85,6 +110,14 @@ async def create_source(course_id: str, req: SourceCreateRequest, sch: Scheduler
         raise HTTPException(404, "course not found")
     source = repo.create_source(course_id, req.kind, req.file_path, req.title)
     return _source_response(source)
+
+
+@router.get("/courses/{course_id}/sources", response_model=list[SourceResponse])
+async def list_sources(course_id: str, sch: SchedulerDep):
+    repo = _repo(sch)
+    if repo.get_course(course_id) is None:
+        raise HTTPException(404, "course not found")
+    return [_source_response(source) for source in repo.list_sources(course_id)]
 
 
 @router.post("/sources/{source_id}/detect-chapters", response_model=list[ChapterResponse])
@@ -124,6 +157,14 @@ async def detect_source_chapters(source_id: str, sch: SchedulerDep):
     return [_chapter_response(chapter) for chapter in chapters]
 
 
+@router.get("/sources/{source_id}/chapters", response_model=list[ChapterResponse])
+async def list_chapters(source_id: str, sch: SchedulerDep):
+    repo = _repo(sch)
+    if repo.get_source(source_id) is None:
+        raise HTTPException(404, "source not found")
+    return [_chapter_response(chapter) for chapter in repo.list_chapters(source_id)]
+
+
 @router.post("/chapters/{chapter_id}/confirm", response_model=ChapterResponse)
 async def confirm_chapter(chapter_id: str, sch: SchedulerDep):
     repo = _repo(sch)
@@ -131,6 +172,22 @@ async def confirm_chapter(chapter_id: str, sch: SchedulerDep):
         raise HTTPException(404, "chapter not found")
     repo.update_chapter_status(chapter_id, "CONFIRMED")
     return _chapter_response(repo.get_chapter(chapter_id))
+
+
+@router.get("/courses/{course_id}/cards", response_model=list[CardResponse])
+async def list_cards(course_id: str, sch: SchedulerDep):
+    repo = _repo(sch)
+    if repo.get_course(course_id) is None:
+        raise HTTPException(404, "course not found")
+    return [_card_response(card) for card in repo.list_cards(course_id)]
+
+
+@router.get("/chapters/{chapter_id}/note-blocks", response_model=list[NoteBlockResponse])
+async def list_note_blocks(chapter_id: str, sch: SchedulerDep):
+    repo = _repo(sch)
+    if repo.get_chapter(chapter_id) is None:
+        raise HTTPException(404, "chapter not found")
+    return [_note_block_response(block) for block in repo.list_note_blocks(chapter_id)]
 
 
 @router.post("/chapters/{chapter_id}/run")

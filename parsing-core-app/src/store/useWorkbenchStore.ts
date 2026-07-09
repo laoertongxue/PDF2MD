@@ -1,15 +1,21 @@
 import { create } from "zustand";
 import * as api from "../api/workbench";
-import type { Chapter, Course, Source } from "../api/workbenchTypes";
+import type { Card, Chapter, Course, NoteBlock, Source } from "../api/workbenchTypes";
 
 interface WorkbenchState {
   courses: Course[];
   sources: Record<string, Source[]>;
   chapters: Record<string, Chapter[]>;
+  cardsByCourse: Record<string, Card[]>;
+  noteBlocksByChapter: Record<string, NoteBlock[]>;
   selectedCourseId: string | null;
 
   selectCourse: (courseId: string) => void;
   loadCourses: () => Promise<void>;
+  loadSources: (courseId: string) => Promise<Source[]>;
+  loadChapters: (sourceId: string) => Promise<Chapter[]>;
+  loadCourseCards: (courseId: string) => Promise<Card[]>;
+  loadChapterNoteBlocks: (chapterId: string) => Promise<NoteBlock[]>;
   createCourse: (title: string, description: string, rootDir: string) => Promise<Course>;
   addSource: (courseId: string, filePath: string, title: string, kind?: string) => Promise<Source>;
   detectChapters: (sourceId: string) => Promise<Chapter[]>;
@@ -17,10 +23,12 @@ interface WorkbenchState {
   runChapter: (chapterId: string) => Promise<void>;
 }
 
-export const useWorkbenchStore = create<WorkbenchState>((set) => ({
+export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   courses: [],
   sources: {},
   chapters: {},
+  cardsByCourse: {},
+  noteBlocksByChapter: {},
   selectedCourseId: null,
 
   selectCourse: (courseId) => set({ selectedCourseId: courseId }),
@@ -28,6 +36,30 @@ export const useWorkbenchStore = create<WorkbenchState>((set) => ({
   loadCourses: async () => {
     const courses = await api.listCourses();
     set((state) => ({ courses, selectedCourseId: state.selectedCourseId ?? courses[0]?.id ?? null }));
+  },
+
+  loadSources: async (courseId) => {
+    const sources = await api.listSources(courseId);
+    set((state) => ({ sources: { ...state.sources, [courseId]: sources } }));
+    return sources;
+  },
+
+  loadChapters: async (sourceId) => {
+    const chapters = await api.listChapters(sourceId);
+    set((state) => ({ chapters: { ...state.chapters, [sourceId]: chapters } }));
+    return chapters;
+  },
+
+  loadCourseCards: async (courseId) => {
+    const cards = await api.listCourseCards(courseId);
+    set((state) => ({ cardsByCourse: { ...state.cardsByCourse, [courseId]: cards } }));
+    return cards;
+  },
+
+  loadChapterNoteBlocks: async (chapterId) => {
+    const blocks = await api.listChapterNoteBlocks(chapterId);
+    set((state) => ({ noteBlocksByChapter: { ...state.noteBlocksByChapter, [chapterId]: blocks } }));
+    return blocks;
   },
 
   createCourse: async (title, description, rootDir) => {
@@ -61,5 +93,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set) => ({
 
   runChapter: async (chapterId) => {
     await api.runChapter(chapterId);
+    const blocks = await api.listChapterNoteBlocks(chapterId);
+    const chapter = Object.values(get().chapters).flat().find((item) => item.id === chapterId);
+    if (chapter) await get().loadCourseCards(chapter.course_id);
+    set((state) => ({ noteBlocksByChapter: { ...state.noteBlocksByChapter, [chapterId]: blocks } }));
   },
 }));

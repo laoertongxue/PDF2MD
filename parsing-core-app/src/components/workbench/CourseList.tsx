@@ -4,7 +4,7 @@ import { BookOpen, Loader2, PlusCircle } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 
 export default function CourseList() {
-  const { courses, createCourse, loadCourses, selectCourse, selectedCourseId } = useWorkbenchStore();
+  const { courses, createCourse, loadCourseCards, loadCourses, loadSources, selectCourse, selectedCourseId } = useWorkbenchStore();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [rootDir, setRootDir] = useState("");
@@ -15,6 +15,13 @@ export default function CourseList() {
   useEffect(() => {
     loadCourses().catch((e: unknown) => setError(e instanceof Error ? e.message : "加载失败")).finally(() => setLoading(false));
   }, [loadCourses]);
+
+  useEffect(() => {
+    if (!selectedCourseId) return;
+    Promise.all([loadSources(selectedCourseId), loadCourseCards(selectedCourseId)]).catch((e: unknown) =>
+      setError(e instanceof Error ? e.message : "课程数据加载失败"),
+    );
+  }, [loadCourseCards, loadSources, selectedCourseId]);
 
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();

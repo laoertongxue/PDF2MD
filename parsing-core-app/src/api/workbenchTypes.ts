@@ -42,3 +42,13 @@ export interface Card {
   created_at?: number;
   updated_at?: number;
 }
+
+export interface NoteBlock {
+  id: string;
+  chapter_id: string;
+  kind: string;
+  title: string;
+  body: string;
+  seq: number;
+  updated_at?: number;
+}

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { CheckCircle2, Loader2, PlayCircle } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
@@ -20,7 +20,7 @@ function confidenceLabel(chapter: ChapterWithMeta) {
 }
 
 export default function ChapterConfirm() {
-  const { chapters, confirmChapter, runChapter, selectedCourseId } = useWorkbenchStore();
+  const { chapters, confirmChapter, loadChapters, loadCourses, loadSources, runChapter, selectedCourseId, sources } = useWorkbenchStore();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,6 +28,25 @@ export default function ChapterConfirm() {
     () => Object.values(chapters).flat().filter((chapter) => !selectedCourseId || chapter.course_id === selectedCourseId),
     [chapters, selectedCourseId],
   );
+
+  useEffect(() => {
+    loadCourses().catch((err: unknown) => setError(err instanceof Error ? err.message : "课程加载失败"));
+  }, [loadCourses]);
+
+  useEffect(() => {
+    if (!selectedCourseId) return;
+    loadSources(selectedCourseId)
+      .then((items) => Promise.all(items.map((source) => loadChapters(source.id))))
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : "章节加载失败"));
+  }, [loadChapters, loadSources, selectedCourseId]);
+
+  useEffect(() => {
+    if (!selectedCourseId) return;
+    const items = sources[selectedCourseId] ?? [];
+    Promise.all(items.map((source) => loadChapters(source.id))).catch((err: unknown) =>
+      setError(err instanceof Error ? err.message : "章节加载失败"),
+    );
+  }, [loadChapters, selectedCourseId, sources]);
 
   const confirm = async (chapterId: string) => {
     setBusyId(chapterId);
@@ -87,6 +106,7 @@ export default function ChapterConfirm() {
           {visibleChapters.map((chapter) => {
             const meta = chapter as ChapterWithMeta;
             const busy = busyId === chapter.id;
+            const canRun = chapter.status === "CONFIRMED" || chapter.status === "COMPLETED";
             return (
               <div key={chapter.id} className="grid grid-cols-[1fr_80px_80px_100px_190px] items-center gap-3 border-b border-zinc-100 px-4 py-3 last:border-b-0">
                 <div className="min-w-0">
@@ -110,7 +130,8 @@ export default function ChapterConfirm() {
                   <button
                     type="button"
                     onClick={() => run(chapter.id)}
-                    disabled={busy}
+                    disabled={busy || !canRun}
+                    title={canRun ? undefined : "请先确认章节"}
                     className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
                   >
                     <PlayCircle size={14} />

@@ -85,5 +85,24 @@ class ChapterResponse(BaseModel):
     status: str
 
 
+class CardResponse(BaseModel):
+    id: str
+    course_id: str
+    chapter_id: str
+    kind: str
+    title: str
+    body: str
+    favorite: bool
+
+
+class NoteBlockResponse(BaseModel):
+    id: str
+    chapter_id: str
+    kind: str
+    title: str
+    body: str
+    seq: int
+
+
 class RunChapterRequest(BaseModel):
     executor: str = "stub"

@@ -97,6 +97,35 @@ def test_confirm_chapter_then_run_pipeline(tmp_path):
     assert res.status_code == 200
     assert res.json()["status"] == "COMPLETED"
 
+    res = c.get(f"/api/workbench/courses/{course['id']}/sources")
+    assert res.status_code == 200
+    assert [item["id"] for item in res.json()] == [source["id"]]
+
+    res = c.get(f"/api/workbench/sources/{source['id']}/chapters")
+    assert res.status_code == 200
+    assert [item["id"] for item in res.json()] == [chapter_id]
+
+    res = c.get(f"/api/workbench/courses/{course['id']}/cards")
+    assert res.status_code == 200
+    assert res.json()[0]["course_id"] == course["id"]
+    assert res.json()[0]["chapter_id"] == chapter_id
+    assert res.json()[0]["kind"] == "topic"
+
+    res = c.get(f"/api/workbench/chapters/{chapter_id}/note-blocks")
+    assert res.status_code == 200
+    blocks = {item["kind"]: item for item in res.json()}
+    assert blocks["knowledge_mermaid"]["body"].startswith("graph TD")
+    assert blocks["application_mermaid"]["body"].startswith("flowchart LR")
+
+
+def test_workbench_list_endpoints_return_not_found(tmp_path):
+    c = client(tmp_path)
+
+    assert c.get("/api/workbench/courses/missing/sources").status_code == 404
+    assert c.get("/api/workbench/sources/missing/chapters").status_code == 404
+    assert c.get("/api/workbench/courses/missing/cards").status_code == 404
+    assert c.get("/api/workbench/chapters/missing/note-blocks").status_code == 404
+
 
 def test_draft_chapter_run_returns_conflict(tmp_path):
     c = client(tmp_path)

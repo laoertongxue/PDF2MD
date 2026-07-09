@@ -1,4 +1,4 @@
-import type { Chapter, Course, Source } from "./workbenchTypes";
+import type { Card, Chapter, Course, NoteBlock, Source } from "./workbenchTypes";
 
 const BASE = "http://127.0.0.1:8000";
 
@@ -28,8 +28,16 @@ export function createSource(courseId: string, file_path: string, title: string,
   return post<Source>(`/api/workbench/courses/${courseId}/sources`, { kind, file_path, title });
 }
 
+export function listSources(courseId: string): Promise<Source[]> {
+  return request<Source[]>(`/api/workbench/courses/${courseId}/sources`);
+}
+
 export function detectChapters(sourceId: string): Promise<Chapter[]> {
   return post<Chapter[]>(`/api/workbench/sources/${sourceId}/detect-chapters`);
+}
+
+export function listChapters(sourceId: string): Promise<Chapter[]> {
+  return request<Chapter[]>(`/api/workbench/sources/${sourceId}/chapters`);
 }
 
 export function confirmChapter(chapterId: string): Promise<Chapter> {
@@ -38,4 +46,12 @@ export function confirmChapter(chapterId: string): Promise<Chapter> {
 
 export function runChapter(chapterId: string, executor = "stub"): Promise<{ chapter_id: string; status: string }> {
   return post<{ chapter_id: string; status: string }>(`/api/workbench/chapters/${chapterId}/run`, { executor });
+}
+
+export function listCourseCards(courseId: string): Promise<Card[]> {
+  return request<Card[]>(`/api/workbench/courses/${courseId}/cards`);
+}
+
+export function listChapterNoteBlocks(chapterId: string): Promise<NoteBlock[]> {
+  return request<NoteBlock[]>(`/api/workbench/chapters/${chapterId}/note-blocks`);
 }

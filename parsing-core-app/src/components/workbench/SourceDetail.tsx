@@ -1,10 +1,10 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, Loader2, Search } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 
 export default function SourceDetail() {
-  const { addSource, courses, detectChapters, selectedCourseId } = useWorkbenchStore();
+  const { addSource, courses, detectChapters, loadCourses, loadSources, selectedCourseId, sources } = useWorkbenchStore();
   const [title, setTitle] = useState("");
   const [filePath, setFilePath] = useState("");
   const [saving, setSaving] = useState(false);
@@ -12,6 +12,18 @@ export default function SourceDetail() {
   const navigate = useNavigate();
 
   const course = selectedCourseId ? courses.find((item) => item.id === selectedCourseId) : null;
+  const existingSources = selectedCourseId ? (sources[selectedCourseId] ?? []) : [];
+
+  useEffect(() => {
+    if (courses.length === 0) {
+      loadCourses().catch((err: unknown) => setError(err instanceof Error ? err.message : "课程加载失败"));
+    }
+  }, [courses.length, loadCourses]);
+
+  useEffect(() => {
+    if (!selectedCourseId) return;
+    loadSources(selectedCourseId).catch((err: unknown) => setError(err instanceof Error ? err.message : "资料加载失败"));
+  }, [loadSources, selectedCourseId]);
 
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -84,6 +96,18 @@ export default function SourceDetail() {
           识别章节
         </button>
       </form>
+
+      {existingSources.length > 0 && (
+        <section className="rounded-lg border border-zinc-200 bg-white">
+          <div className="border-b border-zinc-100 px-4 py-3 text-xs font-medium text-zinc-400">已有资料</div>
+          {existingSources.map((source) => (
+            <div key={source.id} className="border-b border-zinc-100 px-4 py-3 last:border-b-0">
+              <p className="text-sm font-medium text-zinc-900">{source.title}</p>
+              <p className="mt-1 truncate font-mono text-xs text-zinc-400">{source.file_path}</p>
+            </div>
+          ))}
+        </section>
+      )}
     </div>
   );
 }

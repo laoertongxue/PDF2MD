@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import MermaidBlock from "../MermaidBlock";
 
 interface MermaidEditorProps {
@@ -8,6 +8,10 @@ interface MermaidEditorProps {
 
 export default function MermaidEditor({ title, initial }: MermaidEditorProps) {
   const [code, setCode] = useState(initial);
+
+  useEffect(() => {
+    setCode(initial);
+  }, [initial]);
 
   return (
     <div className="space-y-3">
