@@ -44,6 +44,13 @@ async fn pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     }
 }
 
+#[tauri::command]
+async fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let folder = app.dialog().file().blocking_pick_folder();
+    Ok(folder.map(|p| p.as_path().unwrap().to_string_lossy().to_string()))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -70,7 +77,7 @@ fn main() {
             tauri::async_runtime::spawn(sidecar::health_loop(app.handle().clone(), s));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_status, start_service, stop_service, pick_files])
+        .invoke_handler(tauri::generate_handler![get_status, start_service, stop_service, pick_files, pick_directory])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

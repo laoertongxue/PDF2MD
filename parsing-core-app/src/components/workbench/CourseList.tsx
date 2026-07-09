@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { BookOpen, Loader2, PlusCircle } from "lucide-react";
+import { BookOpen, FolderOpen, Loader2, PlusCircle } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 
 export default function CourseList() {
@@ -37,6 +37,17 @@ export default function CourseList() {
       setError(err instanceof Error ? err.message : "创建失败");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const chooseRootDir = async () => {
+    setError(null);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const dir = await invoke<string | null>("pick_directory");
+      if (dir) setRootDir(dir);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "无法打开文件夹选择器");
     }
   };
 
@@ -84,12 +95,22 @@ export default function CourseList() {
         </div>
         <label className="block">
           <span className="text-xs text-zinc-500">本地目录</span>
-          <input
-            value={rootDir}
-            onChange={(e) => setRootDir(e.target.value)}
-            placeholder="~/.local/share/parsing-core/workbench-courses/战略管理"
-            className="mt-1 w-full rounded-md border border-zinc-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-200"
-          />
+          <div className="mt-1 flex gap-2">
+            <input
+              value={rootDir}
+              onChange={(e) => setRootDir(e.target.value)}
+              placeholder="选择或粘贴课程资料所在文件夹"
+              className="min-w-0 flex-1 rounded-md border border-zinc-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-200"
+            />
+            <button
+              type="button"
+              onClick={chooseRootDir}
+              className="inline-flex shrink-0 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+            >
+              <FolderOpen size={15} />
+              选择文件夹
+            </button>
+          </div>
         </label>
         {error && <p className="text-sm text-red-500">{error}</p>}
         <button
