@@ -85,6 +85,16 @@ class ChapterResponse(BaseModel):
     status: str
 
 
+class WorkbenchSettingsResponse(BaseModel):
+    deepseek_model: str
+    deepseek_key_masked: str | None = None
+
+
+class DeepSeekSettingsRequest(BaseModel):
+    api_key: str
+    model: str = "deepseek-chat"
+
+
 class CardResponse(BaseModel):
     id: str
     course_id: str

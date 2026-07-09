@@ -14,12 +14,19 @@ from parsing_core.serving.models.api import (
     SourceCreateRequest,
     SourceResponse,
 )
+from parsing_core.workbench.codex_cli import CodexCliError, CodexCliExecutor, resolve_codex_path
 from parsing_core.workbench.chapter_detection import detect_chapters
+from parsing_core.workbench.deepseek import DeepSeekClient, DeepSeekExecutor
 from parsing_core.workbench.executors import StubIntensiveReadingExecutor
+from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
+from parsing_core.workbench.keychain import KeychainError, read_secret
 from parsing_core.workbench.pipeline import IntensiveReadingPipeline
 from parsing_core.workbench.repository import WorkbenchRepository
+from parsing_core.workbench.settings import load_settings
 
 router = APIRouter(prefix="/api/workbench", tags=["workbench"])
+KEYCHAIN_SERVICE = "pdf2md.deepseek"
+KEYCHAIN_ACCOUNT = "api-key"
 
 
 def _repo(sch: SchedulerDep) -> WorkbenchRepository:
@@ -229,6 +236,42 @@ async def run_chapter(chapter_id: str, req: RunChapterRequest, sch: SchedulerDep
     run_dir = Path(sch._query_orch.fs.base_dir) / "workbench-runs"
     try:
         IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), run_dir).run_all(chapter_id)
+    except Exception as exc:
+        repo.update_chapter_status(chapter_id, "FAILED")
+        raise HTTPException(500, str(exc)) from exc
+    repo.update_chapter_status(chapter_id, "COMPLETED")
+    return _chapter_response(repo.get_chapter(chapter_id))
+
+
+@router.post("/chapters/{chapter_id}/run-hybrid", response_model=ChapterResponse)
+async def run_chapter_hybrid(chapter_id: str, sch: SchedulerDep):
+    repo = _repo(sch)
+    chapter = repo.get_chapter(chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "chapter not found")
+    if chapter.status != "CONFIRMED":
+        raise HTTPException(409, "chapter must be CONFIRMED before intensive reading")
+
+    try:
+        api_key = read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+    except KeychainError as exc:
+        raise HTTPException(400, "deepseek api key not configured") from exc
+
+    settings_path = Path(sch._query_orch.fs.base_dir) / "workbench-settings.json"
+    settings = load_settings(settings_path)
+    run_dir = Path(sch._query_orch.fs.base_dir) / "workbench-runs"
+
+    try:
+        codex_path = resolve_codex_path()
+    except CodexCliError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    deepseek_executor = DeepSeekExecutor(DeepSeekClient(api_key, settings.deepseek_model))
+    codex_executor = CodexCliExecutor(codex_path, run_dir)
+    executor = HybridIntensiveReadingExecutor(deepseek_executor, codex_executor)
+
+    try:
+        IntensiveReadingPipeline(repo, executor, run_dir).run_all(chapter_id)
     except Exception as exc:
         repo.update_chapter_status(chapter_id, "FAILED")
         raise HTTPException(500, str(exc)) from exc

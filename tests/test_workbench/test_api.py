@@ -187,6 +187,28 @@ def test_draft_chapter_run_returns_conflict(tmp_path):
     assert res.json()["detail"] == "chapter must be CONFIRMED before intensive reading"
 
 
+def test_run_hybrid_requires_deepseek_settings(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source_md = root / "source.md"
+    source_md.write_text("## 第一章\n战略是选择。", encoding="utf-8")
+    source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"kind": "main", "file_path": str(source_md), "title": "战略教材"},
+    ).json()
+    chapter = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters").json()[0]
+    c.post(f"/api/workbench/chapters/{chapter['id']}/confirm")
+
+    res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "deepseek api key not configured"
+
+
 def test_detect_chapters_replaces_old_chapters_after_source_changes(tmp_path):
     c = client(tmp_path)
     root = course_root(tmp_path)
