@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { HashRouter, Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout";
 import Dashboard from "./components/Dashboard";
 import BatchSubmit from "./components/BatchSubmit";
@@ -12,7 +12,7 @@ import Settings from "./components/workbench/Settings";
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<Dashboard />} />
@@ -26,6 +26,6 @@ export default function App() {
           <Route path="/doc/:taskId" element={<DocViewer />} />
         </Route>
       </Routes>
-    </BrowserRouter>
+    </HashRouter>
   );
 }

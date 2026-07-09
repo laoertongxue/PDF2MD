@@ -1,56 +1,136 @@
+import { useEffect } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { LayoutDashboard, PlusCircle, FileText, Terminal, BookOpen, Settings as SettingsIcon } from "lucide-react";
+import {
+  BookOpen,
+  ChevronDown,
+  FileText,
+  FolderOpen,
+  Home,
+  Library,
+  Plus,
+  Search,
+  Settings as SettingsIcon,
+  Sparkles,
+} from "lucide-react";
+import { useWorkbenchStore } from "../store/useWorkbenchStore";
 
 const nav = [
-  { to: "/", label: "仪表盘", icon: LayoutDashboard },
-  { to: "/submit", label: "新建批次", icon: PlusCircle },
-  { to: "/workbench", label: "课程精读", icon: BookOpen },
+  { to: "/", label: "开始", icon: Home },
+  { to: "/workbench", label: "课程精读", icon: Sparkles },
+  { to: "/submit", label: "资料导入", icon: Plus },
   { to: "/workbench/settings", label: "精读设置", icon: SettingsIcon },
 ];
 
 export default function Layout() {
   const { pathname } = useLocation();
+  const isWorkbench = pathname.startsWith("/workbench");
+  const {
+    chapters,
+    courses,
+    loadChapters,
+    loadCourses,
+    loadSources,
+    selectCourse,
+    selectedCourseId,
+    sources,
+  } = useWorkbenchStore();
+  const selectedCourse = courses.find((course) => course.id === selectedCourseId) ?? null;
+  const selectedSources = selectedCourseId ? (sources[selectedCourseId] ?? []) : [];
+  const selectedChapters = Object.values(chapters)
+    .flat()
+    .filter((chapter) => !selectedCourseId || chapter.course_id === selectedCourseId)
+    .sort((a, b) => a.seq - b.seq);
+
+  useEffect(() => {
+    loadCourses().catch(() => undefined);
+  }, [loadCourses]);
+
+  useEffect(() => {
+    if (!selectedCourseId) return;
+    loadSources(selectedCourseId)
+      .then((items) => Promise.all(items.map((source) => loadChapters(source.id))))
+      .catch(() => undefined);
+  }, [loadChapters, loadSources, selectedCourseId]);
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      {/* Sidebar */}
-      <aside className="w-56 shrink-0 flex flex-col border-r border-zinc-200 bg-white">
-        {/* Logo */}
-        <div className="h-14 flex items-center gap-2.5 px-5 border-b border-zinc-100">
-          <div className="flex h-7 w-7 items-center justify-center rounded-md bg-zinc-900 text-white">
-            <FileText size={15} strokeWidth={2} />
+    <div className="flex h-screen overflow-hidden bg-white text-zinc-900">
+      <aside className="flex w-[292px] shrink-0 flex-col border-r border-zinc-200 bg-zinc-50">
+        <div className="flex h-16 items-center gap-3 px-5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500 text-white shadow-sm shadow-emerald-200">
+            <BookOpen size={20} strokeWidth={2.2} />
           </div>
-          <span className="font-semibold text-sm text-zinc-900">PDF2MD</span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="truncate text-base font-semibold">PDF2MD</span>
+              <ChevronDown size={14} className="text-zinc-400" />
+            </div>
+            <p className="truncate text-xs text-zinc-500">MBA 课程精读工作台</p>
+          </div>
         </div>
 
-        {/* Nav */}
-        <nav className="flex-1 px-3 py-4 space-y-0.5">
+        <div className="px-4 pb-3">
+          <div className="flex h-10 items-center gap-2 rounded-lg bg-white px-3 text-sm text-zinc-400 shadow-sm ring-1 ring-zinc-200">
+            <Search size={16} />
+            <span>搜索课程、章节、卡片</span>
+          </div>
+        </div>
+
+        <nav className="space-y-1 px-3 py-2">
           {nav.map(({ to, label, icon: Icon }) => {
             const active = to === "/" ? pathname === to : pathname === to || pathname.startsWith(`${to}/`);
             return (
               <Link
                 key={to}
                 to={to}
-                className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors ${
+                className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-colors ${
                   active
-                    ? "bg-zinc-100 text-zinc-900 font-medium"
-                    : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-50"
+                    ? "bg-white font-medium text-zinc-900 shadow-sm ring-1 ring-zinc-200"
+                    : "text-zinc-600 hover:bg-white hover:text-zinc-900"
                 }`}
               >
-                <Icon size={17} strokeWidth={active ? 2 : 1.5} />
+                <Icon size={18} strokeWidth={active ? 2 : 1.6} />
                 {label}
               </Link>
             );
           })}
         </nav>
 
-        {/* Footer */}
-        <div className="px-4 py-3 border-t border-zinc-100">
+        <div className="mt-5 border-t border-zinc-200 px-4 py-4">
+          <div className="mb-3 flex items-center justify-between text-xs font-medium text-zinc-500">
+            <span>知识库</span>
+            <Link to="/workbench" className="rounded-md p-1 text-zinc-400 hover:bg-white hover:text-zinc-800" title="新建或选择课程">
+              <Plus size={15} />
+            </Link>
+          </div>
+          <div className="space-y-1">
+            {courses.length === 0 ? (
+              <Link to="/workbench" className="block rounded-lg border border-dashed border-zinc-300 bg-white px-3 py-3 text-sm text-zinc-500">
+                创建 MBA 课程库
+              </Link>
+            ) : (
+              courses.map((course) => (
+                <button
+                  key={course.id}
+                  type="button"
+                  onClick={() => selectCourse(course.id)}
+                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                    course.id === selectedCourseId ? "bg-white font-medium text-zinc-900 shadow-sm ring-1 ring-zinc-200" : "text-zinc-600 hover:bg-white"
+                  }`}
+                >
+                  <Library size={16} className="shrink-0 text-blue-500" />
+                  <span className="min-w-0 truncate">{course.title}</span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="mt-auto px-4 py-3">
           <a
             href="http://127.0.0.1:8000/health"
             target="_blank"
             rel="noopener"
-            className="flex items-center gap-2 text-xs text-zinc-400 hover:text-zinc-600 transition-colors"
+            className="flex items-center gap-2 text-xs text-zinc-500 transition-colors hover:text-zinc-700"
           >
             <span className="relative flex h-2 w-2">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
@@ -61,19 +141,115 @@ export default function Layout() {
         </div>
       </aside>
 
-      {/* Main content area */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Top bar */}
-        <header className="h-14 shrink-0 border-b border-zinc-200 bg-white/80 backdrop-blur-sm flex items-center px-6">
-          <div className="flex items-center gap-2 text-sm text-zinc-500">
-            <Terminal size={15} />
-            <span className="font-mono text-xs">parsing-core</span>
+      {isWorkbench && (
+        <aside className="flex w-[330px] shrink-0 flex-col border-r border-zinc-200 bg-white">
+          <div className="flex h-16 items-center justify-between border-b border-zinc-100 px-5">
+            <div className="min-w-0">
+              <p className="text-xs text-zinc-400">资料库</p>
+              <h2 className="truncate text-base font-semibold">{selectedCourse?.title ?? "课程精读"}</h2>
+            </div>
+            <Link to="/workbench/source" className="rounded-lg bg-emerald-500 p-2 text-white shadow-sm hover:bg-emerald-600" title="导入资料">
+              <Plus size={18} />
+            </Link>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-4 py-4">
+            <div className="mb-5 space-y-1">
+              <Link
+                to="/workbench"
+                className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${
+                  pathname === "/workbench" ? "bg-zinc-100 font-medium text-zinc-900" : "text-zinc-600 hover:bg-zinc-50"
+                }`}
+              >
+                <Home size={16} /> 首页
+              </Link>
+              <Link
+                to="/workbench/chapters"
+                className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${
+                  pathname === "/workbench/chapters" ? "bg-zinc-100 font-medium text-zinc-900" : "text-zinc-600 hover:bg-zinc-50"
+                }`}
+              >
+                <FolderOpen size={16} /> 目录
+              </Link>
+              <Link
+                to="/workbench/cards"
+                className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${
+                  pathname === "/workbench/cards" ? "bg-zinc-100 font-medium text-zinc-900" : "text-zinc-600 hover:bg-zinc-50"
+                }`}
+              >
+                <FileText size={16} /> 卡片池
+              </Link>
+            </div>
+
+            <div className="mb-5">
+              <div className="mb-2 flex items-center justify-between text-xs font-medium text-zinc-400">
+                <span>教材资料</span>
+                <span>{selectedSources.length}</span>
+              </div>
+              <div className="space-y-1">
+                {selectedSources.length === 0 ? (
+                  <Link to="/workbench/source" className="block rounded-lg border border-dashed border-zinc-300 px-3 py-3 text-sm text-zinc-500">
+                    导入 PDF / Word / PPT
+                  </Link>
+                ) : (
+                  selectedSources.map((source) => (
+                    <div key={source.id} className="rounded-lg px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50">
+                      <p className="truncate font-medium">{source.title}</p>
+                      <p className="mt-0.5 truncate text-xs text-zinc-400">{source.status}</p>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between text-xs font-medium text-zinc-400">
+                <span>章节</span>
+                <span>{selectedChapters.length}</span>
+              </div>
+              <div className="space-y-1">
+                {selectedChapters.length === 0 ? (
+                  <Link to="/workbench/chapters" className="block rounded-lg border border-dashed border-zinc-300 px-3 py-3 text-sm text-zinc-500">
+                    识别并确认章节
+                  </Link>
+                ) : (
+                  selectedChapters.map((chapter) => (
+                    <Link
+                      key={chapter.id}
+                      to={`/workbench/chapter?chapterId=${chapter.id}`}
+                      className="block rounded-lg px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50"
+                    >
+                      <p className="truncate">
+                        {chapter.seq + 1}. {chapter.title}
+                      </p>
+                      <p className="mt-0.5 text-xs text-zinc-400">{chapter.status}</p>
+                    </Link>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </aside>
+      )}
+
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
+        <header className="flex h-16 shrink-0 items-center justify-between border-b border-zinc-200 px-7">
+          <div className="min-w-0">
+            <p className="text-xs text-zinc-400">{isWorkbench ? "精读文档" : "文档解析"}</p>
+            <h1 className="truncate text-sm font-semibold">{isWorkbench ? selectedCourse?.title ?? "课程精读" : "PDF2MD"}</h1>
+          </div>
+          <div className="flex items-center gap-2">
+            <Link to="/workbench/chapter" className="rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50">
+              打开精读
+            </Link>
+            <Link to="/workbench/source" className="rounded-lg bg-emerald-500 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-600">
+              导入资料
+            </Link>
           </div>
         </header>
 
-        {/* Page */}
-        <main className="flex-1 overflow-y-auto">
-          <div className="max-w-4xl mx-auto px-8 py-8">
+        <main className="min-h-0 flex-1 overflow-y-auto">
+          <div className={`${isWorkbench ? "mx-auto max-w-5xl px-8 py-8" : "mx-auto max-w-4xl px-8 py-8"}`}>
             <Outlet />
           </div>
         </main>

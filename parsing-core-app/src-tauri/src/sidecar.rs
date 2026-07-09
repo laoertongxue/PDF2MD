@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use std::fs::{create_dir_all, OpenOptions};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +22,21 @@ pub async fn start_sidecar(_app: &tauri::AppHandle, state: Arc<Mutex<AppState>>)
         .parent()
         .ok_or_else(|| "missing app executable directory".to_string())?
         .join("python3");
+    let log_dir = dirs::home_dir()
+        .ok_or_else(|| "missing home directory".to_string())?
+        .join("Library")
+        .join("Logs")
+        .join("PDF2MD");
+    create_dir_all(&log_dir).map_err(|e| format!("failed to create log dir {}: {}", log_dir.display(), e))?;
+    let log_path = log_dir.join("sidecar.log");
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("failed to open {}: {}", log_path.display(), e))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|e| format!("failed to clone {}: {}", log_path.display(), e))?;
     let child = Command::new(&python)
         .args([
             "--port",
@@ -31,15 +47,15 @@ pub async fn start_sidecar(_app: &tauri::AppHandle, state: Arc<Mutex<AppState>>)
             "127.0.0.1",
         ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|e| format!("failed to start {}: {}", python.display(), e))?;
 
     {
         let mut s = state.lock().map_err(|e| e.to_string())?;
         s.sidecar_child = Some(child);
-        s.logs.push(format!("[sidecar] started on port {}", port));
+        s.logs.push(format!("[sidecar] started on port {}, log {}", port, log_path.display()));
     }
 
     Ok(())
