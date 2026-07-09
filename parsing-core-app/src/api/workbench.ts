@@ -4,7 +4,10 @@ const BASE = "http://127.0.0.1:8000";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail ?? `HTTP ${res.status}`);
+  }
   return res.json();
 }
 
@@ -40,12 +43,16 @@ export function listChapters(sourceId: string): Promise<Chapter[]> {
   return request<Chapter[]>(`/api/workbench/sources/${sourceId}/chapters`);
 }
 
+export function getChapter(chapterId: string): Promise<Chapter> {
+  return request<Chapter>(`/api/workbench/chapters/${chapterId}`);
+}
+
 export function confirmChapter(chapterId: string): Promise<Chapter> {
   return post<Chapter>(`/api/workbench/chapters/${chapterId}/confirm`);
 }
 
-export function runChapter(chapterId: string, executor = "stub"): Promise<{ chapter_id: string; status: string }> {
-  return post<{ chapter_id: string; status: string }>(`/api/workbench/chapters/${chapterId}/run`, { executor });
+export function runChapter(chapterId: string, executor = "stub"): Promise<Chapter> {
+  return post<Chapter>(`/api/workbench/chapters/${chapterId}/run`, { executor });
 }
 
 export function listCourseCards(courseId: string): Promise<Card[]> {

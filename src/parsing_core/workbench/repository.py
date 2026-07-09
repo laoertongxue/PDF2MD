@@ -132,6 +132,10 @@ class WorkbenchRepository:
         ).fetchall()
         return [Chapter(*row) for row in rows]
 
+    def delete_chapters_by_source(self, source_id: str) -> None:
+        self.conn.execute("DELETE FROM wb_chapters WHERE source_id = ?", (source_id,))
+        self.conn.commit()
+
     def get_chapter(self, chapter_id: str) -> Chapter | None:
         row = self.conn.execute(
             "SELECT * FROM wb_chapters WHERE id = ?",

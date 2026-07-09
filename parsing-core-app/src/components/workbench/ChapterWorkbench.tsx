@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import MermaidEditor from "./MermaidEditor";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 
@@ -15,6 +15,8 @@ export default function ChapterWorkbench() {
   } = useWorkbenchStore();
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedChapterId = searchParams.get("chapterId");
 
   const courseChapters = useMemo(
     () => Object.values(chapters).flat().filter((chapter) => !selectedCourseId || chapter.course_id === selectedCourseId),
@@ -42,6 +44,13 @@ export default function ChapterWorkbench() {
     async function chooseChapter() {
       if (courseChapters.length === 0) {
         setActiveChapterId(null);
+        return;
+      }
+
+      const requested = requestedChapterId ? courseChapters.find((chapter) => chapter.id === requestedChapterId) : null;
+      if (requested) {
+        await loadChapterNoteBlocks(requested.id);
+        if (!cancelled) setActiveChapterId(requested.id);
         return;
       }
 
@@ -74,7 +83,13 @@ export default function ChapterWorkbench() {
     return () => {
       cancelled = true;
     };
-  }, [courseChapters, loadChapterNoteBlocks]);
+  }, [courseChapters, loadChapterNoteBlocks, requestedChapterId]);
+
+  const chooseChapter = (chapterId: string) => {
+    setActiveChapterId(chapterId);
+    setSearchParams({ chapterId });
+    loadChapterNoteBlocks(chapterId).catch((err: unknown) => setError(err instanceof Error ? err.message : "精读结果加载失败"));
+  };
 
   return (
     <div className="space-y-6 animate-in">
@@ -89,6 +104,26 @@ export default function ChapterWorkbench() {
       </div>
 
       {error && <p className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-600">{error}</p>}
+
+      {courseChapters.length > 0 && (
+        <label className="block max-w-xl">
+          <span className="text-xs text-zinc-500">选择章节</span>
+          <select
+            value={activeChapterId ?? ""}
+            onChange={(event) => chooseChapter(event.target.value)}
+            className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-200"
+          >
+            <option value="" disabled>
+              选择一个章节
+            </option>
+            {courseChapters.map((chapter) => (
+              <option key={chapter.id} value={chapter.id}>
+                {chapter.seq + 1}. {chapter.title}（{chapter.status}）
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       {!knowledge && !application ? (
         <div className="rounded-lg border border-dashed border-zinc-300 bg-white px-8 py-12 text-center">

@@ -1,3 +1,5 @@
+import pytest
+
 from parsing_core.storage.schema import init_db
 from parsing_core.workbench.executors import StubIntensiveReadingExecutor
 from parsing_core.workbench.pipeline import IntensiveReadingPipeline
@@ -67,6 +69,23 @@ flowchart LR
     assert "StrategyChoice[战略选择]" in note
     assert "ScenarioScan[场景扫描]" in note
     assert "A[概念] --> B[结构]" not in note
+
+
+def test_pipeline_marks_round_failed_when_mermaid_output_is_incomplete(tmp_path):
+    class BrokenMermaidExecutor(StubIntensiveReadingExecutor):
+        def run(self, round_key: str, task_package: str) -> str:
+            if round_key == "mermaid":
+                return "没有 Mermaid 图"
+            return super().run(round_key, task_package)
+
+    repo, chapter = setup_chapter(tmp_path)
+    pipeline = IntensiveReadingPipeline(repo, BrokenMermaidExecutor(), tmp_path / "runs")
+
+    with pytest.raises(ValueError):
+        pipeline.run_all(chapter.id)
+
+    mermaid_run = [run for run in repo.list_runs(chapter.id) if run.round_key == "mermaid"][0]
+    assert mermaid_run.status == "FAILED"
 
 
 def test_rerun_marks_later_rounds_stale(tmp_path):

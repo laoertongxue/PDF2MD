@@ -27,11 +27,18 @@ def client(tmp_path):
     return TestClient(build_app(factory))
 
 
+def course_root(tmp_path):
+    root = tmp_path / "fs" / "workbench-courses" / "out"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def test_create_course_and_list(tmp_path):
     c = client(tmp_path)
+    root = course_root(tmp_path)
     res = c.post(
         "/api/workbench/courses",
-        json={"title": "战略管理", "description": "MBA", "root_dir": str(tmp_path / "out")},
+        json={"title": "战略管理", "description": "MBA", "root_dir": str(root)},
     )
     assert res.status_code == 200
     course_id = res.json()["id"]
@@ -39,6 +46,35 @@ def test_create_course_and_list(tmp_path):
     res = c.get("/api/workbench/courses")
     assert res.status_code == 200
     assert res.json()[0]["id"] == course_id
+
+
+def test_create_course_rejects_root_outside_workbench_base(tmp_path):
+    c = client(tmp_path)
+
+    res = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "MBA", "root_dir": str(tmp_path / "outside")},
+    )
+
+    assert res.status_code == 400
+
+
+def test_create_source_rejects_file_outside_course_root(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    outside = tmp_path / "outside.md"
+    outside.write_text("## 第一章\n战略是选择。", encoding="utf-8")
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"kind": "main", "file_path": str(outside), "title": "战略教材"},
+    )
+
+    assert res.status_code == 400
 
 
 def test_cors_allows_local_app_origins_but_not_wildcard(tmp_path):
@@ -67,11 +103,12 @@ def test_cors_allows_local_app_origins_but_not_wildcard(tmp_path):
 
 def test_confirm_chapter_then_run_pipeline(tmp_path):
     c = client(tmp_path)
+    root = course_root(tmp_path)
     course = c.post(
         "/api/workbench/courses",
-        json={"title": "战略管理", "description": "", "root_dir": str(tmp_path / "out")},
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
     ).json()
-    source_md = tmp_path / "source.md"
+    source_md = root / "source.md"
     source_md.write_text("## 第一章\n战略是选择。", encoding="utf-8")
     source = c.post(
         f"/api/workbench/courses/{course['id']}/sources",
@@ -96,6 +133,7 @@ def test_confirm_chapter_then_run_pipeline(tmp_path):
     res = c.post(f"/api/workbench/chapters/{chapter_id}/run", json={"executor": "stub"})
     assert res.status_code == 200
     assert res.json()["status"] == "COMPLETED"
+    assert res.json()["id"] == chapter_id
 
     res = c.get(f"/api/workbench/courses/{course['id']}/sources")
     assert res.status_code == 200
@@ -104,6 +142,7 @@ def test_confirm_chapter_then_run_pipeline(tmp_path):
     res = c.get(f"/api/workbench/sources/{source['id']}/chapters")
     assert res.status_code == 200
     assert [item["id"] for item in res.json()] == [chapter_id]
+    assert res.json()[0]["status"] == "COMPLETED"
 
     res = c.get(f"/api/workbench/courses/{course['id']}/cards")
     assert res.status_code == 200
@@ -129,11 +168,12 @@ def test_workbench_list_endpoints_return_not_found(tmp_path):
 
 def test_draft_chapter_run_returns_conflict(tmp_path):
     c = client(tmp_path)
+    root = course_root(tmp_path)
     course = c.post(
         "/api/workbench/courses",
-        json={"title": "战略管理", "description": "", "root_dir": str(tmp_path / "out")},
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
     ).json()
-    source_md = tmp_path / "source.md"
+    source_md = root / "source.md"
     source_md.write_text("## 第一章\n战略是选择。", encoding="utf-8")
     source = c.post(
         f"/api/workbench/courses/{course['id']}/sources",
@@ -147,13 +187,14 @@ def test_draft_chapter_run_returns_conflict(tmp_path):
     assert res.json()["detail"] == "chapter must be CONFIRMED before intensive reading"
 
 
-def test_detect_chapters_is_idempotent_for_source(tmp_path):
+def test_detect_chapters_replaces_old_chapters_after_source_changes(tmp_path):
     c = client(tmp_path)
+    root = course_root(tmp_path)
     course = c.post(
         "/api/workbench/courses",
-        json={"title": "战略管理", "description": "", "root_dir": str(tmp_path / "out")},
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
     ).json()
-    source_md = tmp_path / "source.md"
+    source_md = root / "source.md"
     source_md.write_text("## 第一章\n战略是选择。\n## 第二章\n战略要落地。", encoding="utf-8")
     source = c.post(
         f"/api/workbench/courses/{course['id']}/sources",
@@ -161,22 +202,47 @@ def test_detect_chapters_is_idempotent_for_source(tmp_path):
     ).json()
 
     first = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters")
+    source_md.write_text("## 修正后的第一章\n战略是选择。", encoding="utf-8")
     second = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters")
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert [ch["id"] for ch in second.json()] == [ch["id"] for ch in first.json()]
-    assert [ch["title"] for ch in second.json()] == ["第一章", "第二章"]
+    assert [ch["title"] for ch in second.json()] == ["修正后的第一章"]
+
+
+def test_detect_chapters_refuses_to_replace_confirmed_chapters(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source_md = root / "source.md"
+    source_md.write_text("## 第一章\n战略是选择。", encoding="utf-8")
+    source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"kind": "main", "file_path": str(source_md), "title": "战略教材"},
+    ).json()
+    chapter = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters").json()[0]
+    c.post(f"/api/workbench/chapters/{chapter['id']}/confirm")
+    source_md.write_text("## 修正后的第一章\n战略是选择。", encoding="utf-8")
+
+    res = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters")
+
+    assert res.status_code == 409
+    assert res.json()["detail"] == "source has confirmed or generated chapters"
+    chapters = c.get(f"/api/workbench/sources/{source['id']}/chapters").json()
+    assert [item["title"] for item in chapters] == ["第一章"]
 
 
 def test_detect_chapters_uses_safe_single_level_source_dir(tmp_path):
     c = client(tmp_path)
-    root_dir = tmp_path / "out"
+    root_dir = course_root(tmp_path)
     course = c.post(
         "/api/workbench/courses",
         json={"title": "战略管理", "description": "", "root_dir": str(root_dir)},
     ).json()
-    source_md = tmp_path / "source.md"
+    source_md = root_dir / "source.md"
     source_md.write_text("## 第一章/选择\\定位\n战略是选择。", encoding="utf-8")
     source = c.post(
         f"/api/workbench/courses/{course['id']}/sources",
@@ -192,12 +258,12 @@ def test_detect_chapters_uses_safe_single_level_source_dir(tmp_path):
 
 def test_detect_chapters_falls_back_for_dot_dot_source_dir(tmp_path):
     c = client(tmp_path)
-    root_dir = tmp_path / "out"
+    root_dir = course_root(tmp_path)
     course = c.post(
         "/api/workbench/courses",
         json={"title": "战略管理", "description": "", "root_dir": str(root_dir)},
     ).json()
-    source_md = tmp_path / "source.md"
+    source_md = root_dir / "source.md"
     source_md.write_text("## 01-战略选择\n战略是选择。", encoding="utf-8")
     source = c.post(
         f"/api/workbench/courses/{course['id']}/sources",

@@ -44,21 +44,34 @@ class IntensiveReadingPipeline:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         package = build_task_package(self.repo, chapter_id, round_key)
         input_path = write_task_package(package, self.run_dir)
-        output = self.executor.run(round_key, package.content)
         output_path = self.run_dir / f"{chapter_id}-{round_key}-output.md"
-        output_path.write_text(output, encoding="utf-8")
-
-        self.repo.upsert_run(
-            chapter_id=chapter_id,
-            round_key=round_key,
-            executor=type(self.executor).__name__,
-            status="DONE",
-            input_path=input_path,
-            output_path=str(output_path),
-            output=output,
-            stale=False,
-        )
-        self._materialize_round(chapter_id, round_key, output)
+        output = ""
+        try:
+            output = self.executor.run(round_key, package.content)
+            output_path.write_text(output, encoding="utf-8")
+            self._materialize_round(chapter_id, round_key, output)
+            self.repo.upsert_run(
+                chapter_id=chapter_id,
+                round_key=round_key,
+                executor=type(self.executor).__name__,
+                status="DONE",
+                input_path=input_path,
+                output_path=str(output_path),
+                output=output,
+                stale=False,
+            )
+        except Exception as exc:
+            self.repo.upsert_run(
+                chapter_id=chapter_id,
+                round_key=round_key,
+                executor=type(self.executor).__name__,
+                status="FAILED",
+                input_path=input_path,
+                output_path=str(output_path),
+                output=output or str(exc),
+                stale=False,
+            )
+            raise
 
     def _materialize_round(self, chapter_id: str, round_key: str, output: str) -> None:
         chapter = self.repo.get_chapter(chapter_id)

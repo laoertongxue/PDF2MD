@@ -26,6 +26,17 @@ def _repo(sch: SchedulerDep) -> WorkbenchRepository:
     return WorkbenchRepository(sch._query_orch.repo.conn)
 
 
+def _workbench_base(sch: SchedulerDep) -> Path:
+    return (Path(sch._query_orch.fs.base_dir) / "workbench-courses").resolve()
+
+
+def _resolve_inside(path: str, base: Path, message: str) -> Path:
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_relative_to(base):
+        raise HTTPException(400, message)
+    return resolved
+
+
 def _course_response(course) -> CourseResponse:
     return CourseResponse(
         id=course.id,
@@ -94,7 +105,9 @@ def _safe_dir_name(name: str) -> str:
 
 @router.post("/courses", response_model=CourseResponse)
 async def create_course(req: CourseCreateRequest, sch: SchedulerDep):
-    course = _repo(sch).create_course(req.title, req.description, req.root_dir)
+    root_dir = _resolve_inside(req.root_dir, _workbench_base(sch), "root_dir must be inside workbench-courses")
+    root_dir.mkdir(parents=True, exist_ok=True)
+    course = _repo(sch).create_course(req.title, req.description, str(root_dir))
     return _course_response(course)
 
 
@@ -106,9 +119,13 @@ async def list_courses(sch: SchedulerDep):
 @router.post("/courses/{course_id}/sources", response_model=SourceResponse)
 async def create_source(course_id: str, req: SourceCreateRequest, sch: SchedulerDep):
     repo = _repo(sch)
-    if repo.get_course(course_id) is None:
+    course = repo.get_course(course_id)
+    if course is None:
         raise HTTPException(404, "course not found")
-    source = repo.create_source(course_id, req.kind, req.file_path, req.title)
+    file_path = _resolve_inside(req.file_path, Path(course.root_dir).resolve(), "file_path must be inside course root_dir")
+    if not file_path.is_file():
+        raise HTTPException(400, "file_path must be an existing file")
+    source = repo.create_source(course_id, req.kind, str(file_path), req.title)
     return _source_response(source)
 
 
@@ -129,16 +146,16 @@ async def detect_source_chapters(source_id: str, sch: SchedulerDep):
     course = repo.get_course(source.course_id)
     if course is None:
         raise HTTPException(404, "course not found")
-    existing_chapters = repo.list_chapters(source.id)
-    if existing_chapters:
-        return [_chapter_response(chapter) for chapter in existing_chapters]
-
     source_path = Path(source.file_path)
     if source_path.suffix.lower() in {".md", ".txt"}:
         markdown = source_path.read_text(encoding="utf-8")
     else:
         markdown = MarkItDownAdapter().parse(str(source_path))
 
+    existing_chapters = repo.list_chapters(source.id)
+    if any(chapter.status != "DRAFT" for chapter in existing_chapters):
+        raise HTTPException(409, "source has confirmed or generated chapters")
+    repo.delete_chapters_by_source(source.id)
     out_dir = Path(course.root_dir) / _safe_dir_name(source.title)
     out_dir.mkdir(parents=True, exist_ok=True)
     chapters = []
@@ -163,6 +180,14 @@ async def list_chapters(source_id: str, sch: SchedulerDep):
     if repo.get_source(source_id) is None:
         raise HTTPException(404, "source not found")
     return [_chapter_response(chapter) for chapter in repo.list_chapters(source_id)]
+
+
+@router.get("/chapters/{chapter_id}", response_model=ChapterResponse)
+async def get_chapter(chapter_id: str, sch: SchedulerDep):
+    chapter = _repo(sch).get_chapter(chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "chapter not found")
+    return _chapter_response(chapter)
 
 
 @router.post("/chapters/{chapter_id}/confirm", response_model=ChapterResponse)
@@ -190,7 +215,7 @@ async def list_note_blocks(chapter_id: str, sch: SchedulerDep):
     return [_note_block_response(block) for block in repo.list_note_blocks(chapter_id)]
 
 
-@router.post("/chapters/{chapter_id}/run")
+@router.post("/chapters/{chapter_id}/run", response_model=ChapterResponse)
 async def run_chapter(chapter_id: str, req: RunChapterRequest, sch: SchedulerDep):
     if req.executor != "stub":
         raise HTTPException(400, "unsupported executor")
@@ -202,5 +227,10 @@ async def run_chapter(chapter_id: str, req: RunChapterRequest, sch: SchedulerDep
         raise HTTPException(409, "chapter must be CONFIRMED before intensive reading")
 
     run_dir = Path(sch._query_orch.fs.base_dir) / "workbench-runs"
-    IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), run_dir).run_all(chapter_id)
-    return {"chapter_id": chapter_id, "status": "COMPLETED"}
+    try:
+        IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), run_dir).run_all(chapter_id)
+    except Exception as exc:
+        repo.update_chapter_status(chapter_id, "FAILED")
+        raise HTTPException(500, str(exc)) from exc
+    repo.update_chapter_status(chapter_id, "COMPLETED")
+    return _chapter_response(repo.get_chapter(chapter_id))

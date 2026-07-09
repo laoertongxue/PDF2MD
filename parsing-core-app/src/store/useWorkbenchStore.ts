@@ -23,64 +23,77 @@ interface WorkbenchState {
   runChapter: (chapterId: string) => Promise<void>;
 }
 
-export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
-  courses: [],
-  sources: {},
-  chapters: {},
-  cardsByCourse: {},
-  noteBlocksByChapter: {},
-  selectedCourseId: null,
+export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
+  const updateChapter = (chapter: Chapter) =>
+    set((state) => {
+      const chapters = state.chapters[chapter.source_id] ?? [];
+      const exists = chapters.some((item) => item.id === chapter.id);
+      return {
+        chapters: {
+          ...state.chapters,
+          [chapter.source_id]: exists ? chapters.map((item) => (item.id === chapter.id ? chapter : item)) : [...chapters, chapter],
+        },
+      };
+    });
 
-  selectCourse: (courseId) => set({ selectedCourseId: courseId }),
+  return {
+    courses: [],
+    sources: {},
+    chapters: {},
+    cardsByCourse: {},
+    noteBlocksByChapter: {},
+    selectedCourseId: null,
 
-  loadCourses: async () => {
-    const courses = await api.listCourses();
-    set((state) => ({ courses, selectedCourseId: state.selectedCourseId ?? courses[0]?.id ?? null }));
-  },
+    selectCourse: (courseId) => set({ selectedCourseId: courseId }),
 
-  loadSources: async (courseId) => {
-    const sources = await api.listSources(courseId);
-    set((state) => ({ sources: { ...state.sources, [courseId]: sources } }));
-    return sources;
-  },
+    loadCourses: async () => {
+      const courses = await api.listCourses();
+      set((state) => ({ courses, selectedCourseId: state.selectedCourseId ?? courses[0]?.id ?? null }));
+    },
 
-  loadChapters: async (sourceId) => {
-    const chapters = await api.listChapters(sourceId);
-    set((state) => ({ chapters: { ...state.chapters, [sourceId]: chapters } }));
-    return chapters;
-  },
+    loadSources: async (courseId) => {
+      const sources = await api.listSources(courseId);
+      set((state) => ({ sources: { ...state.sources, [courseId]: sources } }));
+      return sources;
+    },
 
-  loadCourseCards: async (courseId) => {
-    const cards = await api.listCourseCards(courseId);
-    set((state) => ({ cardsByCourse: { ...state.cardsByCourse, [courseId]: cards } }));
-    return cards;
-  },
+    loadChapters: async (sourceId) => {
+      const chapters = await api.listChapters(sourceId);
+      set((state) => ({ chapters: { ...state.chapters, [sourceId]: chapters } }));
+      return chapters;
+    },
 
-  loadChapterNoteBlocks: async (chapterId) => {
-    const blocks = await api.listChapterNoteBlocks(chapterId);
-    set((state) => ({ noteBlocksByChapter: { ...state.noteBlocksByChapter, [chapterId]: blocks } }));
-    return blocks;
-  },
+    loadCourseCards: async (courseId) => {
+      const cards = await api.listCourseCards(courseId);
+      set((state) => ({ cardsByCourse: { ...state.cardsByCourse, [courseId]: cards } }));
+      return cards;
+    },
 
-  createCourse: async (title, description, rootDir) => {
-    const course = await api.createCourse(title, description, rootDir);
-    set((state) => ({ courses: [course, ...state.courses], selectedCourseId: course.id }));
-    return course;
-  },
+    loadChapterNoteBlocks: async (chapterId) => {
+      const blocks = await api.listChapterNoteBlocks(chapterId);
+      set((state) => ({ noteBlocksByChapter: { ...state.noteBlocksByChapter, [chapterId]: blocks } }));
+      return blocks;
+    },
 
-  addSource: async (courseId, filePath, title, kind = "main") => {
-    const source = await api.createSource(courseId, filePath, title, kind);
-    set((state) => ({ sources: { ...state.sources, [courseId]: [source, ...(state.sources[courseId] ?? [])] } }));
-    return source;
-  },
+    createCourse: async (title, description, rootDir) => {
+      const course = await api.createCourse(title, description, rootDir);
+      set((state) => ({ courses: [course, ...state.courses], selectedCourseId: course.id }));
+      return course;
+    },
 
-  detectChapters: async (sourceId) => {
-    const chapters = await api.detectChapters(sourceId);
-    set((state) => ({ chapters: { ...state.chapters, [sourceId]: chapters } }));
-    return chapters;
-  },
+    addSource: async (courseId, filePath, title, kind = "main") => {
+      const source = await api.createSource(courseId, filePath, title, kind);
+      set((state) => ({ sources: { ...state.sources, [courseId]: [source, ...(state.sources[courseId] ?? [])] } }));
+      return source;
+    },
 
-  confirmChapter: async (chapterId) => {
+    detectChapters: async (sourceId) => {
+      const chapters = await api.detectChapters(sourceId);
+      set((state) => ({ chapters: { ...state.chapters, [sourceId]: chapters } }));
+      return chapters;
+    },
+
+    confirmChapter: async (chapterId) => {
     const chapter = await api.confirmChapter(chapterId);
     set((state) => ({
       chapters: {
@@ -89,13 +102,22 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       },
     }));
     return chapter;
-  },
+    },
 
-  runChapter: async (chapterId) => {
-    await api.runChapter(chapterId);
-    const blocks = await api.listChapterNoteBlocks(chapterId);
-    const chapter = Object.values(get().chapters).flat().find((item) => item.id === chapterId);
-    if (chapter) await get().loadCourseCards(chapter.course_id);
-    set((state) => ({ noteBlocksByChapter: { ...state.noteBlocksByChapter, [chapterId]: blocks } }));
-  },
-}));
+    runChapter: async (chapterId) => {
+      let updated: Chapter | null = null;
+      try {
+        updated = await api.runChapter(chapterId);
+      } catch (error) {
+        updated = await api.getChapter(chapterId).catch(() => null);
+        if (updated) updateChapter(updated);
+        throw error;
+      }
+      updateChapter(updated);
+      const blocks = await api.listChapterNoteBlocks(chapterId);
+      const chapter = Object.values(get().chapters).flat().find((item) => item.id === chapterId) ?? updated;
+      await get().loadCourseCards(chapter.course_id);
+      set((state) => ({ noteBlocksByChapter: { ...state.noteBlocksByChapter, [chapterId]: blocks } }));
+    },
+  };
+});

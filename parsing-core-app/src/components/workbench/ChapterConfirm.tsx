@@ -96,7 +96,7 @@ export default function ChapterConfirm() {
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white">
-          <div className="grid grid-cols-[1fr_80px_80px_100px_190px] gap-3 border-b border-zinc-100 px-4 py-3 text-xs font-medium text-zinc-400">
+          <div className="grid grid-cols-[1fr_80px_80px_100px_240px] gap-3 border-b border-zinc-100 px-4 py-3 text-xs font-medium text-zinc-400">
             <span>章节</span>
             <span>页码</span>
             <span>置信度</span>
@@ -108,7 +108,7 @@ export default function ChapterConfirm() {
             const busy = busyId === chapter.id;
             const canRun = chapter.status === "CONFIRMED" || chapter.status === "COMPLETED";
             return (
-              <div key={chapter.id} className="grid grid-cols-[1fr_80px_80px_100px_190px] items-center gap-3 border-b border-zinc-100 px-4 py-3 last:border-b-0">
+              <div key={chapter.id} className="grid grid-cols-[1fr_80px_80px_100px_240px] items-center gap-3 border-b border-zinc-100 px-4 py-3 last:border-b-0">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium text-zinc-900">
                     {chapter.seq + 1}. {chapter.title}
@@ -118,6 +118,12 @@ export default function ChapterConfirm() {
                 <span className="text-xs text-zinc-500">{confidenceLabel(meta)}</span>
                 <span className="text-xs text-zinc-500">{chapter.status}</span>
                 <div className="flex justify-end gap-2">
+                  <Link
+                    to={`/workbench/chapter?chapterId=${chapter.id}`}
+                    className="inline-flex items-center rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-zinc-300"
+                  >
+                    查看
+                  </Link>
                   <button
                     type="button"
                     onClick={() => confirm(chapter.id)}

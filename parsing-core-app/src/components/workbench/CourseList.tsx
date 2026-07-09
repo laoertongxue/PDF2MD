@@ -87,7 +87,7 @@ export default function CourseList() {
           <input
             value={rootDir}
             onChange={(e) => setRootDir(e.target.value)}
-            placeholder="/Users/你的名字/Documents/PDF2MD-Workbench/战略管理"
+            placeholder="~/.local/share/parsing-core/workbench-courses/战略管理"
             className="mt-1 w-full rounded-md border border-zinc-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-200"
           />
         </label>

@@ -82,7 +82,7 @@ export default function SourceDetail() {
           <input
             value={filePath}
             onChange={(e) => setFilePath(e.target.value)}
-            placeholder="/Users/你的名字/Documents/course/strategy.pdf"
+            placeholder="~/.local/share/parsing-core/workbench-courses/战略管理/strategy.pdf"
             className="mt-1 w-full rounded-md border border-zinc-200 px-3 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-zinc-200"
           />
         </label>
