@@ -24,7 +24,7 @@ export default function Settings() {
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!model.trim()) return;
+    if (!apiKey.trim() || !model.trim()) return;
     setSaving(true);
     setError(null);
     setMessage(null);
@@ -98,7 +98,7 @@ export default function Settings() {
         <div className="flex flex-wrap gap-2">
           <button
             type="submit"
-            disabled={loading || saving || testing || !model.trim()}
+            disabled={loading || saving || testing || !apiKey.trim() || !model.trim()}
             className="inline-flex items-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
           >
             {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}

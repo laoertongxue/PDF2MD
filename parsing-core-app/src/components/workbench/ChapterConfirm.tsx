@@ -108,72 +108,74 @@ export default function ChapterConfirm() {
           </Link>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white">
-          <div className="grid grid-cols-[minmax(0,1fr)_80px_80px_100px_320px] gap-3 border-b border-zinc-100 px-4 py-3 text-xs font-medium text-zinc-400">
-            <span>章节</span>
-            <span>页码</span>
-            <span>置信度</span>
-            <span>状态</span>
-            <span className="text-right">操作</span>
+        <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-white">
+          <div className="min-w-[760px]">
+            <div className="grid grid-cols-[minmax(0,1fr)_80px_80px_100px_320px] gap-3 border-b border-zinc-100 px-4 py-3 text-xs font-medium text-zinc-400">
+              <span>章节</span>
+              <span>页码</span>
+              <span>置信度</span>
+              <span>状态</span>
+              <span className="text-right">操作</span>
+            </div>
+            {visibleChapters.map((chapter) => {
+              const meta = chapter as ChapterWithMeta;
+              const busy = busyId === chapter.id;
+              const canRun = chapter.status === "CONFIRMED" || chapter.status === "COMPLETED";
+              const canRunHybrid = chapter.status === "CONFIRMED" || chapter.status === "FAILED";
+              return (
+                <div
+                  key={chapter.id}
+                  className="grid grid-cols-[minmax(0,1fr)_80px_80px_100px_320px] items-center gap-3 border-b border-zinc-100 px-4 py-3 last:border-b-0"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-zinc-900">
+                      {chapter.seq + 1}. {chapter.title}
+                    </p>
+                  </div>
+                  <span className="text-xs text-zinc-500">{pageLabel(meta)}</span>
+                  <span className="text-xs text-zinc-500">{confidenceLabel(meta)}</span>
+                  <span className="text-xs text-zinc-500">{chapter.status}</span>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Link
+                      to={`/workbench/chapter?chapterId=${chapter.id}`}
+                      className="inline-flex items-center rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-zinc-300"
+                    >
+                      查看
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => confirm(chapter.id)}
+                      disabled={busy}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-zinc-300 disabled:opacity-50"
+                    >
+                      {busy ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                      确认
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => run(chapter.id)}
+                      disabled={busy || !canRun}
+                      title={canRun ? undefined : "请先确认章节"}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
+                    >
+                      <PlayCircle size={14} />
+                      运行精读
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => runHybrid(chapter.id)}
+                      disabled={busy || !canRunHybrid}
+                      title={canRunHybrid ? undefined : "仅支持已确认或失败章节"}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-200 disabled:opacity-50"
+                    >
+                      {busy ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                      混合精读
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-          {visibleChapters.map((chapter) => {
-            const meta = chapter as ChapterWithMeta;
-            const busy = busyId === chapter.id;
-            const canRun = chapter.status === "CONFIRMED" || chapter.status === "COMPLETED";
-            const canRunHybrid = chapter.status === "CONFIRMED" || chapter.status === "FAILED";
-            return (
-              <div
-                key={chapter.id}
-                className="grid grid-cols-[minmax(0,1fr)_80px_80px_100px_320px] items-center gap-3 border-b border-zinc-100 px-4 py-3 last:border-b-0"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-zinc-900">
-                    {chapter.seq + 1}. {chapter.title}
-                  </p>
-                </div>
-                <span className="text-xs text-zinc-500">{pageLabel(meta)}</span>
-                <span className="text-xs text-zinc-500">{confidenceLabel(meta)}</span>
-                <span className="text-xs text-zinc-500">{chapter.status}</span>
-                <div className="flex flex-wrap justify-end gap-2">
-                  <Link
-                    to={`/workbench/chapter?chapterId=${chapter.id}`}
-                    className="inline-flex items-center rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-zinc-300"
-                  >
-                    查看
-                  </Link>
-                  <button
-                    type="button"
-                    onClick={() => confirm(chapter.id)}
-                    disabled={busy}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-zinc-300 disabled:opacity-50"
-                  >
-                    {busy ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                    确认
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => run(chapter.id)}
-                    disabled={busy || !canRun}
-                    title={canRun ? undefined : "请先确认章节"}
-                    className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
-                  >
-                    <PlayCircle size={14} />
-                    运行精读
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => runHybrid(chapter.id)}
-                    disabled={busy || !canRunHybrid}
-                    title={canRunHybrid ? undefined : "仅支持已确认或失败章节"}
-                    className="inline-flex items-center gap-1.5 rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-200 disabled:opacity-50"
-                  >
-                    {busy ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                    混合精读
-                  </button>
-                </div>
-              </div>
-            );
-          })}
         </div>
       )}
     </div>
