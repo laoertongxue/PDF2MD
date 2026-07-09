@@ -11,3 +11,4 @@ appData/
 .superpowers/
 parsing-core-app/src-tauri/target/
 parsing-core-app/node_modules/
+.worktrees/
