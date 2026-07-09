@@ -8,6 +8,7 @@ interface WorkbenchState {
   chapters: Record<string, Chapter[]>;
   selectedCourseId: string | null;
 
+  selectCourse: (courseId: string) => void;
   loadCourses: () => Promise<void>;
   createCourse: (title: string, description: string, rootDir: string) => Promise<Course>;
   addSource: (courseId: string, filePath: string, title: string, kind?: string) => Promise<Source>;
@@ -21,6 +22,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set) => ({
   sources: {},
   chapters: {},
   selectedCourseId: null,
+
+  selectCourse: (courseId) => set({ selectedCourseId: courseId }),
 
   loadCourses: async () => {
     const courses = await api.listCourses();

@@ -3,10 +3,10 @@ import { BookOpen, Loader2, PlusCircle } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 
 export default function CourseList() {
-  const { courses, createCourse, loadCourses } = useWorkbenchStore();
+  const { courses, createCourse, loadCourses, selectCourse, selectedCourseId } = useWorkbenchStore();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [rootDir, setRootDir] = useState(() => `/tmp/pdf2md-workbench-${Date.now()}`);
+  const [rootDir, setRootDir] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,7 +24,7 @@ export default function CourseList() {
       await createCourse(title.trim(), description.trim(), rootDir.trim());
       setTitle("");
       setDescription("");
-      setRootDir(`/tmp/pdf2md-workbench-${Date.now()}`);
+      setRootDir("");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "创建失败");
     } finally {
@@ -65,6 +65,7 @@ export default function CourseList() {
           <input
             value={rootDir}
             onChange={(e) => setRootDir(e.target.value)}
+            placeholder="/Users/你的名字/Documents/PDF2MD-Workbench/战略管理"
             className="mt-1 w-full rounded-md border border-zinc-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-200"
           />
         </label>
@@ -95,20 +96,35 @@ export default function CourseList() {
           </div>
         )}
 
-        {courses.map((course) => (
-          <div key={course.id} className="rounded-lg border border-zinc-200 bg-white p-5">
-            <div className="flex items-start gap-3">
-              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-zinc-100 text-zinc-600">
-                <BookOpen size={17} strokeWidth={1.5} />
+        {courses.map((course) => {
+          const selected = course.id === selectedCourseId;
+          return (
+            <button
+              key={course.id}
+              type="button"
+              onClick={() => selectCourse(course.id)}
+              className={`block w-full rounded-lg border p-5 text-left transition-colors ${
+                selected ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white hover:border-zinc-300"
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <div
+                  className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${
+                    selected ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-600"
+                  }`}
+                >
+                  <BookOpen size={17} strokeWidth={1.5} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-sm font-medium text-zinc-900 truncate">{course.title}</h2>
+                  {course.description && <p className="text-sm text-zinc-500 mt-1">{course.description}</p>}
+                  <p className="text-xs font-mono text-zinc-400 mt-2 truncate">{course.root_dir}</p>
+                </div>
+                {selected && <span className="shrink-0 rounded-full bg-zinc-900 px-2 py-0.5 text-xs font-medium text-white">已选择</span>}
               </div>
-              <div className="min-w-0">
-                <h2 className="text-sm font-medium text-zinc-900 truncate">{course.title}</h2>
-                {course.description && <p className="text-sm text-zinc-500 mt-1">{course.description}</p>}
-                <p className="text-xs font-mono text-zinc-400 mt-2 truncate">{course.root_dir}</p>
-              </div>
-            </div>
-          </div>
-        ))}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
