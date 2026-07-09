@@ -20,6 +20,17 @@ from parsing_core.serving.config import (
 )
 from parsing_core.serving.scheduler import Scheduler
 
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
+    "tauri://localhost",
+]
+
+
+def allowed_cors_origins() -> list[str]:
+    extra = os.environ.get("PARSING_CORE_CORS_ORIGINS", "")
+    return DEFAULT_CORS_ORIGINS + [origin.strip() for origin in extra.split(",") if origin.strip()]
+
 
 def build_app(
     orch_factory: Callable,
@@ -28,7 +39,7 @@ def build_app(
     app = FastAPI(title="parsing-core-serving")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_cors_origins(),
         allow_methods=["*"],
         allow_headers=["*"],
     )

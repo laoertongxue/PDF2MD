@@ -96,6 +96,9 @@ async def detect_source_chapters(source_id: str, sch: SchedulerDep):
     course = repo.get_course(source.course_id)
     if course is None:
         raise HTTPException(404, "course not found")
+    existing_chapters = repo.list_chapters(source.id)
+    if existing_chapters:
+        return [_chapter_response(chapter) for chapter in existing_chapters]
 
     source_path = Path(source.file_path)
     if source_path.suffix.lower() in {".md", ".txt"}:
@@ -135,8 +138,11 @@ async def run_chapter(chapter_id: str, req: RunChapterRequest, sch: SchedulerDep
     if req.executor != "stub":
         raise HTTPException(400, "unsupported executor")
     repo = _repo(sch)
-    if repo.get_chapter(chapter_id) is None:
+    chapter = repo.get_chapter(chapter_id)
+    if chapter is None:
         raise HTTPException(404, "chapter not found")
+    if chapter.status != "CONFIRMED":
+        raise HTTPException(409, "chapter must be CONFIRMED before intensive reading")
 
     run_dir = Path(sch._query_orch.fs.base_dir) / "workbench-runs"
     IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), run_dir).run_all(chapter_id)
