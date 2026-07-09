@@ -1,7 +1,7 @@
 {
-  "productName": "parsing-core",
+  "productName": "PDF2MD",
   "version": "0.1.0",
-  "identifier": "com.parsingcore.app",
+  "identifier": "com.pdf2md.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "parsing-core",
+        "title": "PDF2MD",
         "width": 520,
         "height": 480,
         "resizable": true
@@ -24,8 +24,12 @@
   },
   "bundle": {
     "active": true,
-    "icon": ["icons/icon.png"],
-    "externalBin": ["binaries/python3"]
+    "icon": [
+      "icons/icon.png"
+    ],
+    "externalBin": [
+      "binaries/python3"
+    ]
   },
   "plugins": {
     "shell": {

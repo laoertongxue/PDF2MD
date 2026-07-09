@@ -51,12 +51,23 @@ fn main() {
         .setup(|app| {
             let s = SharedState::new(Mutex::new(AppState {
                 port: 8000,
-                running: true,
-                logs: vec!["[init] connecting to 127.0.0.1:8000".into()],
+                running: false,
+                logs: vec!["[init] starting local service on 127.0.0.1:8000".into()],
                 health_failures: 0,
                 sidecar_child: None,
             }));
-            app.manage(s);
+            app.manage(s.clone());
+            let app_handle = app.handle().clone();
+            let state = s.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = sidecar::start_sidecar(&app_handle, state.clone()).await {
+                    if let Ok(mut s) = state.lock() {
+                        s.running = false;
+                        s.logs.push(format!("[sidecar] failed to start: {}", err));
+                    }
+                }
+            });
+            tauri::async_runtime::spawn(sidecar::health_loop(app.handle().clone(), s));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![get_status, start_service, stop_service, pick_files])
