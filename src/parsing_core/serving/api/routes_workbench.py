@@ -219,12 +219,15 @@ async def get_workbench_settings(sch: SchedulerDep):
 
 @router.post("/settings/deepseek", response_model=WorkbenchSettingsResponse)
 async def save_deepseek_settings(req: DeepSeekSettingsRequest, sch: SchedulerDep):
+    settings = WorkbenchSettings(deepseek_model=req.model or "deepseek-chat")
+    try:
+        save_settings(_settings_path(sch), settings)
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc
     try:
         save_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, req.api_key)
     except KeychainError as exc:
         raise HTTPException(500, str(exc)) from exc
-    settings = WorkbenchSettings(deepseek_model=req.model or "deepseek-chat")
-    save_settings(_settings_path(sch), settings)
     return WorkbenchSettingsResponse(
         deepseek_model=settings.deepseek_model,
         deepseek_key_masked=mask_secret(req.api_key),

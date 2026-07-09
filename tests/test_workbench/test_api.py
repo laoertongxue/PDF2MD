@@ -470,6 +470,30 @@ def test_workbench_settings_get_without_key_returns_none(tmp_path, monkeypatch):
     }
 
 
+def test_workbench_settings_save_failure_does_not_touch_keychain(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    calls = {"save_secret": 0}
+
+    def fake_save_settings(path, settings):
+        raise OSError("disk full")
+
+    def fake_save_secret(service, account, secret):
+        calls["save_secret"] += 1
+
+    monkeypatch.setattr(routes_workbench, "save_settings", fake_save_settings)
+    monkeypatch.setattr(routes_workbench, "save_secret", fake_save_secret)
+
+    res = c.post(
+        "/api/workbench/settings/deepseek",
+        json={"api_key": "sk-abcdefghijklmnopqrstuvwxyz", "model": "deepseek-reasoner"},
+    )
+
+    assert res.status_code == 500
+    assert calls["save_secret"] == 0
+    settings_path = tmp_path / "fs" / "workbench-settings.json"
+    assert not settings_path.exists()
+
+
 def test_workbench_settings_test_connection(tmp_path, monkeypatch):
     c = client(tmp_path)
     calls = {}
