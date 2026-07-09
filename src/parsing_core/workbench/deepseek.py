@@ -42,7 +42,9 @@ class DeepSeekClient:
                 data = json.loads(res.read().decode())
         except (HTTPError, URLError, TimeoutError) as exc:
             raise DeepSeekError(str(exc)) from exc
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        choices = data.get("choices") or []
+        message = choices[0].get("message", {}) if choices else {}
+        content = message.get("content", "")
         if not content.strip():
             raise DeepSeekError("deepseek returned empty content")
         return content

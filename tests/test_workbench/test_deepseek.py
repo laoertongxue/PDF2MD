@@ -42,6 +42,17 @@ def test_deepseek_client_raises_on_http_error(monkeypatch):
         client.complete("hello")
 
 
+def test_deepseek_client_raises_on_empty_choices(monkeypatch):
+    def fake_urlopen(req, timeout):
+        return FakeResponse({"choices": []})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = DeepSeekClient(api_key="sk-test", model="deepseek-chat")
+    with pytest.raises(DeepSeekError, match="deepseek returned empty content"):
+        client.complete("hello")
+
+
 def test_deepseek_executor_uses_client():
     class Client:
         def complete(self, prompt: str) -> str:
