@@ -2,7 +2,7 @@ import sqlite3
 import time
 from uuid import uuid4
 
-from parsing_core.workbench.models import Card, Chapter, Course, NoteBlock, Source
+from parsing_core.workbench.models import Card, Chapter, Course, NoteBlock, RunRecord, Source
 
 
 def _now() -> int:
@@ -176,6 +176,78 @@ class WorkbenchRepository:
         ).fetchall()
         return [NoteBlock(*row) for row in rows]
 
+    def upsert_run(
+        self,
+        chapter_id: str,
+        round_key: str,
+        executor: str,
+        status: str,
+        input_path: str,
+        output_path: str,
+        output: str,
+        stale: bool = False,
+    ) -> RunRecord:
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO wb_runs
+              (
+                id, chapter_id, round_key, executor, status, input_path,
+                output_path, output, stale, created_at, updated_at
+              )
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chapter_id, round_key) DO UPDATE SET
+              executor = excluded.executor,
+              status = excluded.status,
+              input_path = excluded.input_path,
+              output_path = excluded.output_path,
+              output = excluded.output,
+              stale = excluded.stale,
+              updated_at = excluded.updated_at
+            """,
+            (
+                uuid4().hex,
+                chapter_id,
+                round_key,
+                executor,
+                status,
+                input_path,
+                output_path,
+                output,
+                int(stale),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT * FROM wb_runs WHERE chapter_id = ? AND round_key = ?",
+            (chapter_id, round_key),
+        ).fetchone()
+        return self._run(row)
+
+    def list_runs(self, chapter_id: str) -> list[RunRecord]:
+        rows = self.conn.execute(
+            "SELECT * FROM wb_runs WHERE chapter_id = ? ORDER BY created_at",
+            (chapter_id,),
+        ).fetchall()
+        return [self._run(row) for row in rows]
+
+    def mark_runs_stale(self, chapter_id: str, round_keys: list[str]) -> None:
+        if not round_keys:
+            return
+        placeholders = ", ".join("?" for _ in round_keys)
+        self.conn.execute(
+            f"""
+            UPDATE wb_runs
+            SET stale = 1, updated_at = ?
+            WHERE chapter_id = ? AND round_key IN ({placeholders})
+            """,
+            (_now(), chapter_id, *round_keys),
+        )
+        self.conn.commit()
+
     def create_card(
         self,
         course_id: str,
@@ -257,3 +329,8 @@ class WorkbenchRepository:
         values = list(row)
         values[6] = bool(values[6])
         return Card(*values)
+
+    def _run(self, row: sqlite3.Row | tuple) -> RunRecord:
+        values = list(row)
+        values[8] = bool(values[8])
+        return RunRecord(*values)
