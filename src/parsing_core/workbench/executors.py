@@ -9,14 +9,18 @@ class StubIntensiveReadingExecutor:
     def run(self, round_key: str, task_package: str) -> str:
         if round_key == "mermaid":
             return """\
+## 知识结构图
+
 ```mermaid
 graph TD
-  A[概念] --> B[结构]
+  CoreConcept[核心概念] --> ChapterStructure[章节结构]
 ```
+
+## 应用流程图
 
 ```mermaid
 flowchart LR
-  A[案例] --> B[应用]
+  ScenarioCase[应用场景] --> ActionStep[行动步骤]
 ```
 """
         if round_key == "cards":

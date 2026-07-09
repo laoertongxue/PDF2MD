@@ -1,7 +1,10 @@
+import re
 from pathlib import Path
 
 from parsing_core.workbench.models import Card, Chapter, NoteBlock
 from parsing_core.workbench.repository import WorkbenchRepository
+
+MERMAID_FENCE_RE = re.compile(r"^\s*```mermaid\s*\n(.*?)```\s*$", re.DOTALL | re.IGNORECASE)
 
 
 def sync_chapter_markdown(repo: WorkbenchRepository, chapter_id: str) -> dict[str, str]:
@@ -48,10 +51,17 @@ def _render_note(chapter: Chapter, blocks: list[NoteBlock]) -> str:
     for block in blocks:
         lines.extend([f"## {block.title}", ""])
         if block.kind.endswith("_mermaid"):
-            lines.extend(["```mermaid", block.body, "```", ""])
+            lines.extend(["```mermaid", _pure_mermaid(block.body), "```", ""])
         else:
             lines.extend([block.body, ""])
     return "\n".join(lines)
+
+
+def _pure_mermaid(body: str) -> str:
+    match = MERMAID_FENCE_RE.match(body)
+    if match:
+        return match.group(1).strip()
+    return body.strip()
 
 
 def _render_cards(chapter: Chapter, cards: list[Card]) -> str:

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from parsing_core.workbench.executors import IntensiveReadingExecutor
@@ -6,6 +7,7 @@ from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.task_package import build_task_package, write_task_package
 
 ROUNDS = ["structure", "concepts", "plain_explain", "application", "mermaid", "cards", "review"]
+MERMAID_FENCE_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 class IntensiveReadingPipeline:
@@ -72,18 +74,19 @@ class IntensiveReadingPipeline:
         elif round_key == "application":
             self.repo.upsert_note_block(chapter_id, "application", "应用场景", output, 3)
         elif round_key == "mermaid":
+            diagrams = _extract_mermaid_diagrams(output)
             self.repo.upsert_note_block(
                 chapter_id,
                 "knowledge_mermaid",
                 "知识结构图",
-                "flowchart TD\n  A[概念] --> B[结构]",
+                diagrams[0],
                 4,
             )
             self.repo.upsert_note_block(
                 chapter_id,
                 "application_mermaid",
                 "应用流程图",
-                "flowchart LR\n  A[场景] --> B[行动]",
+                diagrams[1],
                 5,
             )
         elif round_key == "cards":
@@ -97,3 +100,10 @@ class IntensiveReadingPipeline:
             )
         elif round_key == "review":
             self.repo.upsert_note_block(chapter_id, "reflection", "复盘反思", output, 6)
+
+
+def _extract_mermaid_diagrams(output: str) -> list[str]:
+    diagrams = [match.strip() for match in MERMAID_FENCE_RE.findall(output) if match.strip()]
+    if len(diagrams) < 2:
+        raise ValueError("mermaid round must output knowledge and application diagrams")
+    return diagrams[:2]

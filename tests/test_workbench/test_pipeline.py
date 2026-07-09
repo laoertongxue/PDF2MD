@@ -36,6 +36,39 @@ def test_pipeline_creates_blocks_cards_and_runs(tmp_path):
     assert len(runs) == 7
 
 
+def test_pipeline_materializes_generated_mermaid_output(tmp_path):
+    class CustomMermaidExecutor(StubIntensiveReadingExecutor):
+        def run(self, round_key: str, task_package: str) -> str:
+            if round_key == "mermaid":
+                return """\
+## 知识结构图
+
+```mermaid
+flowchart TD
+  StrategyChoice[战略选择] --> TradeoffMap[取舍地图]
+```
+
+## 应用流程图
+
+```mermaid
+flowchart LR
+  ScenarioScan[场景扫描] --> ActionLoop[行动闭环]
+```
+"""
+            return super().run(round_key, task_package)
+
+    repo, chapter = setup_chapter(tmp_path)
+    pipeline = IntensiveReadingPipeline(repo, CustomMermaidExecutor(), tmp_path / "runs")
+
+    pipeline.run_all(chapter.id)
+
+    note_path = tmp_path / "out" / "01-第一章" / "intensive-note.md"
+    note = note_path.read_text(encoding="utf-8")
+    assert "StrategyChoice[战略选择]" in note
+    assert "ScenarioScan[场景扫描]" in note
+    assert "A[概念] --> B[结构]" not in note
+
+
 def test_rerun_marks_later_rounds_stale(tmp_path):
     repo, chapter = setup_chapter(tmp_path)
     pipeline = IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "runs")
