@@ -85,6 +85,13 @@ class WorkbenchRepository:
         title: str,
         source_md_path: str,
     ) -> Chapter:
+        source = self.conn.execute(
+            "SELECT course_id FROM wb_sources WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+        if source is None or source[0] != course_id:
+            raise ValueError("source does not belong to course")
+
         row = {
             "id": uuid4().hex,
             "source_id": source_id,
@@ -140,6 +147,13 @@ class WorkbenchRepository:
         title: str,
         body: str,
     ) -> Card:
+        chapter = self.conn.execute(
+            "SELECT course_id FROM wb_chapters WHERE id = ?",
+            (chapter_id,),
+        ).fetchone()
+        if chapter is None or chapter[0] != course_id:
+            raise ValueError("chapter does not belong to course")
+
         row = {
             "id": uuid4().hex,
             "course_id": course_id,

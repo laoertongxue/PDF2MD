@@ -1,3 +1,5 @@
+import pytest
+
 from parsing_core.storage.schema import init_db
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
@@ -34,3 +36,26 @@ def test_cards_can_be_edited_and_favorited(tmp_path):
     cards = r.list_cards(course.id)
     assert cards[0].title == "定位是取舍"
     assert cards[0].favorite is True
+
+
+def test_chapter_source_must_belong_to_course(tmp_path):
+    r = repo(tmp_path)
+    course_a = r.create_course("战略管理", "", str(tmp_path / "a"))
+    course_b = r.create_course("营销管理", "", str(tmp_path / "b"))
+    source_a = r.create_source(course_a.id, "main", "/tmp/a.pdf", "战略教材")
+
+    with pytest.raises(ValueError):
+        r.create_chapter(course_b.id, source_a.id, 0, "第一章", "/tmp/ch1.md")
+
+
+def test_card_chapter_must_belong_to_course(tmp_path):
+    r = repo(tmp_path)
+    course_a = r.create_course("战略管理", "", str(tmp_path / "a"))
+    course_b = r.create_course("营销管理", "", str(tmp_path / "b"))
+    source_a = r.create_source(course_a.id, "main", "/tmp/a.pdf", "战略教材")
+    source_b = r.create_source(course_b.id, "main", "/tmp/b.pdf", "营销教材")
+    r.create_chapter(course_a.id, source_a.id, 0, "第一章", "/tmp/a-ch1.md")
+    chapter_b = r.create_chapter(course_b.id, source_b.id, 0, "第一章", "/tmp/b-ch1.md")
+
+    with pytest.raises(ValueError):
+        r.create_card(course_a.id, chapter_b.id, "viewpoint", "定位", "定位是选择。")
