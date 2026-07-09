@@ -108,3 +108,13 @@ def test_rerun_cards_does_not_duplicate_cards(tmp_path):
     pipeline.rerun(chapter.id, "cards")
 
     assert len(repo.list_cards_by_chapter(chapter.id)) == 1
+
+
+def test_pipeline_allows_failed_chapter_rerun(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+    repo.update_chapter_status(chapter.id, "FAILED")
+    pipeline = IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "runs")
+
+    pipeline.run_all(chapter.id)
+
+    assert len(repo.list_runs(chapter.id)) == 7

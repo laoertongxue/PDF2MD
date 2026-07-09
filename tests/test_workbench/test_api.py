@@ -273,25 +273,30 @@ def test_run_hybrid_pipeline_failure_marks_chapter_failed(tmp_path, monkeypatch)
     assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
 
 
-def test_run_hybrid_success_marks_chapter_completed(tmp_path, monkeypatch):
+def test_run_hybrid_failed_chapter_can_rerun_to_completed(tmp_path, monkeypatch):
     c = client(tmp_path)
     root = course_root(tmp_path)
     _, _, chapter = confirmed_chapter(c, root)
-    seen = {}
+    calls = {"count": 0}
 
     monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
     monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
 
     def fake_run_all(self, chapter_id):
-        seen["chapter_id"] = chapter_id
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("boom")
+        assert chapter_id == chapter["id"]
 
     monkeypatch.setattr(routes_workbench.IntensiveReadingPipeline, "run_all", fake_run_all)
 
-    res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+    first = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
 
-    assert res.status_code == 200
-    assert seen["chapter_id"] == chapter["id"]
-    assert res.json()["status"] == "COMPLETED"
+    assert first.status_code == 500
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
+    second = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+    assert second.status_code == 200
+    assert second.json()["status"] == "COMPLETED"
     assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "COMPLETED"
 
 
@@ -309,7 +314,7 @@ def test_run_hybrid_completed_chapter_returns_conflict(tmp_path, monkeypatch):
 
     assert first.status_code == 200
     assert second.status_code == 409
-    assert second.json()["detail"] == "chapter must be CONFIRMED before intensive reading"
+    assert second.json()["detail"] == "chapter must be CONFIRMED or FAILED before hybrid reading"
 
 
 def test_detect_chapters_replaces_old_chapters_after_source_changes(tmp_path):

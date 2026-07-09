@@ -249,8 +249,8 @@ async def run_chapter_hybrid(chapter_id: str, sch: SchedulerDep):
     chapter = repo.get_chapter(chapter_id)
     if chapter is None:
         raise HTTPException(404, "chapter not found")
-    if chapter.status != "CONFIRMED":
-        raise HTTPException(409, "chapter must be CONFIRMED before intensive reading")
+    if chapter.status not in {"CONFIRMED", "FAILED"}:
+        raise HTTPException(409, "chapter must be CONFIRMED or FAILED before hybrid reading")
 
     try:
         api_key = read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)

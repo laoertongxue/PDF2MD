@@ -25,8 +25,8 @@ class IntensiveReadingPipeline:
         chapter = self.repo.get_chapter(chapter_id)
         if chapter is None:
             raise ValueError("chapter not found")
-        if chapter.status != "CONFIRMED":
-            raise ValueError("chapter must be CONFIRMED before intensive reading")
+        if chapter.status not in {"CONFIRMED", "FAILED"}:
+            raise ValueError("chapter must be CONFIRMED or FAILED before intensive reading")
 
         for round_key in ROUNDS:
             self._run_round(chapter_id, round_key)
