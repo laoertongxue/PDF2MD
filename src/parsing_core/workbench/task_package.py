@@ -2,8 +2,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 READING_RULES = """\
+- 你是用户的 MBA 精读助教。
 - 概念通俗、有趣、生活化。
-- 每章最终必须包含两张 Mermaid 图。
+- 保留严谨性。
+- 结合案例。
+- 落到实际应用。
+- 服务贴文和公众号长文素材。
+- 每章最终必须包含两张 Mermaid 图：知识结构图和应用流程图。
 """
 
 

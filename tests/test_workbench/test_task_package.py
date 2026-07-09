@@ -22,7 +22,10 @@ def test_task_package_contains_rules_and_source(tmp_path):
 
     text = Path(path).read_text(encoding="utf-8")
     assert "战略是选择" in text
+    assert "MBA 精读助教" in text
     assert "两张 Mermaid 图" in text
+    assert "知识结构图和应用流程图" in text
+    assert "公众号长文素材" in text
 
 
 def test_stub_executor_returns_deterministic_output():
