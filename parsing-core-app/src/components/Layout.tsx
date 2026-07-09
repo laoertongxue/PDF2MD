@@ -1,9 +1,10 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { LayoutDashboard, PlusCircle, FileText, Terminal } from "lucide-react";
+import { LayoutDashboard, PlusCircle, FileText, Terminal, BookOpen } from "lucide-react";
 
 const nav = [
   { to: "/", label: "仪表盘", icon: LayoutDashboard },
   { to: "/submit", label: "新建批次", icon: PlusCircle },
+  { to: "/workbench", label: "课程精读", icon: BookOpen },
 ];
 
 export default function Layout() {
