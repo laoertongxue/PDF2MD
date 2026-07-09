@@ -311,6 +311,13 @@ class WorkbenchRepository:
         ).fetchall()
         return [self._card(row) for row in rows]
 
+    def delete_cards_by_chapter_and_kind(self, chapter_id: str, kind: str) -> None:
+        self.conn.execute(
+            "DELETE FROM wb_cards WHERE chapter_id = ? AND kind = ?",
+            (chapter_id, kind),
+        )
+        self.conn.commit()
+
     def update_card(self, card_id: str, title: str, body: str) -> None:
         self.conn.execute(
             "UPDATE wb_cards SET title = ?, body = ?, updated_at = ? WHERE id = ?",

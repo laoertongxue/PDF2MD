@@ -87,6 +87,7 @@ class IntensiveReadingPipeline:
                 5,
             )
         elif round_key == "cards":
+            self.repo.delete_cards_by_chapter_and_kind(chapter_id, "topic")
             self.repo.create_card(
                 chapter.course_id,
                 chapter_id,

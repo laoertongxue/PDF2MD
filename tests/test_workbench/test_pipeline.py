@@ -45,3 +45,14 @@ def test_rerun_marks_later_rounds_stale(tmp_path):
 
     stale = {r.round_key for r in repo.list_runs(chapter.id) if r.stale}
     assert {"plain_explain", "application", "mermaid", "cards", "review"} <= stale
+
+
+def test_rerun_cards_does_not_duplicate_cards(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+    pipeline = IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "runs")
+    pipeline.run_all(chapter.id)
+    assert len(repo.list_cards_by_chapter(chapter.id)) == 1
+
+    pipeline.rerun(chapter.id, "cards")
+
+    assert len(repo.list_cards_by_chapter(chapter.id)) == 1
