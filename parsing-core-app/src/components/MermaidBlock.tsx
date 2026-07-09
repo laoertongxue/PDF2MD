@@ -7,10 +7,22 @@ export default function MermaidBlock({ code }: { code: string }) {
 
   useEffect(() => {
     let c = false;
+    setError(false);
+    setSvg("");
     import("mermaid").then((m) => {
       m.default.render(`mm-${Math.random().toString(36).slice(2, 8)}`, code)
-        .then(({ svg }) => { if (!c) setSvg(svg); })
-        .catch(() => { if (!c) setError(true); });
+        .then(({ svg }) => {
+          if (!c) {
+            setError(false);
+            setSvg(svg);
+          }
+        })
+        .catch(() => {
+          if (!c) {
+            setSvg("");
+            setError(true);
+          }
+        });
     });
     return () => { c = true; };
   }, [code]);
