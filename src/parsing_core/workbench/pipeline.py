@@ -7,6 +7,7 @@ from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.task_package import build_task_package, write_task_package
 
 ROUNDS = ["structure", "concepts", "plain_explain", "application", "mermaid", "cards", "review"]
+CODEX_ROUNDS = {"mermaid", "review"}
 MERMAID_FENCE_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
@@ -43,7 +44,9 @@ class IntensiveReadingPipeline:
     def _run_round(self, chapter_id: str, round_key: str) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         package = build_task_package(self.repo, chapter_id, round_key)
-        input_path = write_task_package(package, self.run_dir)
+        input_path = ""
+        if round_key not in CODEX_ROUNDS:
+            input_path = write_task_package(package, self.run_dir)
         output_path = self.run_dir / f"{chapter_id}-{round_key}-output.md"
         output = ""
         try:

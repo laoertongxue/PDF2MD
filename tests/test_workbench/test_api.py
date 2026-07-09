@@ -230,6 +230,75 @@ def test_run_hybrid_requires_deepseek_settings(tmp_path):
     assert res.json()["detail"] == "deepseek api key not configured"
 
 
+def test_save_deepseek_settings_rejects_empty_api_key_without_writing(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    save_calls = {"count": 0}
+    settings_path = tmp_path / "fs" / "workbench-settings.json"
+
+    def fake_save_secret(service, account, api_key):
+        save_calls["count"] += 1
+
+    monkeypatch.setattr(routes_workbench, "save_secret", fake_save_secret)
+
+    res = c.post(
+        "/api/workbench/settings/deepseek",
+        json={"api_key": "", "model": "deepseek-chat"},
+    )
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "deepseek api key cannot be empty"
+    assert save_calls["count"] == 0
+    assert not settings_path.exists()
+
+
+def test_save_deepseek_settings_allows_model_only_update_with_existing_key(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    save_calls = {"count": 0}
+    settings_path = tmp_path / "fs" / "workbench-settings.json"
+
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-existing-key")
+
+    def fake_save_secret(service, account, api_key):
+        save_calls["count"] += 1
+
+    monkeypatch.setattr(routes_workbench, "save_secret", fake_save_secret)
+
+    res = c.post(
+        "/api/workbench/settings/deepseek",
+        json={"model": "deepseek-reasoner"},
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "deepseek_model": "deepseek-reasoner",
+        "deepseek_key_masked": "sk-****-key",
+    }
+    assert save_calls["count"] == 0
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == {
+        "deepseek_model": "deepseek-reasoner"
+    }
+
+
+def test_run_hybrid_rejects_blank_deepseek_key_without_running_pipeline(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    calls = {"run_all": 0}
+
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "")
+
+    def fake_run_all(self, chapter_id):
+        calls["run_all"] += 1
+
+    monkeypatch.setattr(routes_workbench.IntensiveReadingPipeline, "run_all", fake_run_all)
+
+    res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "deepseek api key not configured"
+    assert calls["run_all"] == 0
+
+
 def test_run_hybrid_missing_codex_returns_400_without_running_pipeline(tmp_path, monkeypatch):
     c = client(tmp_path)
     root = course_root(tmp_path)

@@ -43,6 +43,24 @@ def _settings_path(sch: SchedulerDep) -> Path:
     return Path(sch._query_orch.fs.base_dir) / "workbench-settings.json"
 
 
+def _read_configured_deepseek_key() -> str:
+    try:
+        api_key = read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+    except KeychainError as exc:
+        raise HTTPException(400, "deepseek api key not configured") from exc
+    if not api_key.strip():
+        raise HTTPException(400, "deepseek api key not configured")
+    return api_key.strip()
+
+
+def _read_masked_deepseek_key() -> str | None:
+    try:
+        api_key = read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+    except KeychainError:
+        return None
+    return mask_secret(api_key.strip()) if api_key.strip() else None
+
+
 def _resolve_inside(path: str, base: Path, message: str) -> Path:
     resolved = Path(path).expanduser().resolve()
     if not resolved.is_relative_to(base):
@@ -206,41 +224,40 @@ async def get_chapter(chapter_id: str, sch: SchedulerDep):
 @router.get("/settings", response_model=WorkbenchSettingsResponse)
 async def get_workbench_settings(sch: SchedulerDep):
     settings = load_settings(_settings_path(sch))
-    masked = None
-    try:
-        masked = mask_secret(read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT))
-    except KeychainError:
-        pass
     return WorkbenchSettingsResponse(
         deepseek_model=settings.deepseek_model,
-        deepseek_key_masked=masked,
+        deepseek_key_masked=_read_masked_deepseek_key(),
     )
 
 
 @router.post("/settings/deepseek", response_model=WorkbenchSettingsResponse)
 async def save_deepseek_settings(req: DeepSeekSettingsRequest, sch: SchedulerDep):
+    if req.api_key is not None and not req.api_key.strip():
+        raise HTTPException(400, "deepseek api key cannot be empty")
     settings = WorkbenchSettings(deepseek_model=req.model or "deepseek-chat")
     try:
         save_settings(_settings_path(sch), settings)
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
-    try:
-        save_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, req.api_key)
-    except KeychainError as exc:
-        raise HTTPException(500, str(exc)) from exc
+    if req.api_key is not None:
+        api_key = req.api_key.strip()
+        try:
+            save_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, api_key)
+        except KeychainError as exc:
+            raise HTTPException(500, str(exc)) from exc
+        masked_key = mask_secret(api_key)
+    else:
+        masked_key = _read_masked_deepseek_key()
     return WorkbenchSettingsResponse(
         deepseek_model=settings.deepseek_model,
-        deepseek_key_masked=mask_secret(req.api_key),
+        deepseek_key_masked=masked_key,
     )
 
 
 @router.post("/settings/deepseek/test")
 async def test_deepseek_settings(sch: SchedulerDep):
     settings = load_settings(_settings_path(sch))
-    try:
-        api_key = read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-    except KeychainError as exc:
-        raise HTTPException(400, "deepseek api key not configured") from exc
+    api_key = _read_configured_deepseek_key()
     try:
         DeepSeekClient(api_key, settings.deepseek_model).complete("请只回复 ok", timeout=30)
     except DeepSeekError as exc:
@@ -303,10 +320,7 @@ async def run_chapter_hybrid(chapter_id: str, sch: SchedulerDep):
     if chapter.status not in {"CONFIRMED", "FAILED"}:
         raise HTTPException(409, "chapter must be CONFIRMED or FAILED before hybrid reading")
 
-    try:
-        api_key = read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-    except KeychainError as exc:
-        raise HTTPException(400, "deepseek api key not configured") from exc
+    api_key = _read_configured_deepseek_key()
 
     settings = load_settings(_settings_path(sch))
     run_dir = Path(sch._query_orch.fs.base_dir) / "workbench-runs"

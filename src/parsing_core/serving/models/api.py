@@ -91,7 +91,7 @@ class WorkbenchSettingsResponse(BaseModel):
 
 
 class DeepSeekSettingsRequest(BaseModel):
-    api_key: str
+    api_key: str | None = None
     model: str = "deepseek-chat"
 
 

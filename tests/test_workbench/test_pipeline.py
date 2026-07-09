@@ -2,6 +2,7 @@ import pytest
 
 from parsing_core.storage.schema import init_db
 from parsing_core.workbench.executors import StubIntensiveReadingExecutor
+from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
 from parsing_core.workbench.pipeline import IntensiveReadingPipeline
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
@@ -118,3 +119,31 @@ def test_pipeline_allows_failed_chapter_rerun(tmp_path):
     pipeline.run_all(chapter.id)
 
     assert len(repo.list_runs(chapter.id)) == 7
+
+
+def test_pipeline_skips_codex_task_files_for_mermaid_and_review_rounds(tmp_path):
+    class FakeDeepSeekExecutor(StubIntensiveReadingExecutor):
+        pass
+
+    class FakeCodexExecutor(StubIntensiveReadingExecutor):
+        pass
+
+    repo, chapter = setup_chapter(tmp_path)
+    pipeline = IntensiveReadingPipeline(
+        repo,
+        HybridIntensiveReadingExecutor(FakeDeepSeekExecutor(), FakeCodexExecutor()),
+        tmp_path / "runs",
+    )
+
+    pipeline.run_all(chapter.id)
+
+    run_dir = tmp_path / "runs"
+    assert not (run_dir / f"{chapter.id}-mermaid-task.md").exists()
+    assert not (run_dir / f"{chapter.id}-review-task.md").exists()
+    assert (run_dir / f"{chapter.id}-structure-task.md").exists()
+    assert (run_dir / f"{chapter.id}-cards-task.md").exists()
+
+    runs = {run.round_key: run for run in repo.list_runs(chapter.id)}
+    assert runs["mermaid"].input_path == ""
+    assert runs["review"].input_path == ""
+    assert runs["structure"].input_path.endswith(f"{chapter.id}-structure-task.md")

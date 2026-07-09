@@ -24,12 +24,14 @@ export default function Settings() {
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!apiKey.trim() || !model.trim()) return;
+    const trimmedModel = model.trim();
+    const trimmedKey = apiKey.trim();
+    if (!trimmedModel || (!maskedKey && !trimmedKey)) return;
     setSaving(true);
     setError(null);
     setMessage(null);
     try {
-      const settings = await saveDeepSeekSettings(apiKey.trim(), model.trim());
+      const settings = await saveDeepSeekSettings(trimmedKey || null, trimmedModel);
       setMaskedKey(settings.deepseek_key_masked);
       setModel(settings.deepseek_model);
       setApiKey("");
@@ -98,7 +100,7 @@ export default function Settings() {
         <div className="flex flex-wrap gap-2">
           <button
             type="submit"
-            disabled={loading || saving || testing || !apiKey.trim() || !model.trim()}
+            disabled={loading || saving || testing || !model.trim() || (!maskedKey && !apiKey.trim())}
             className="inline-flex items-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
           >
             {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}

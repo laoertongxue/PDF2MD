@@ -59,8 +59,12 @@ export function getWorkbenchSettings(): Promise<WorkbenchSettings> {
   return request<WorkbenchSettings>("/api/workbench/settings");
 }
 
-export function saveDeepSeekSettings(api_key: string, model: string): Promise<WorkbenchSettings> {
-  return post<WorkbenchSettings>("/api/workbench/settings/deepseek", { api_key, model });
+export function saveDeepSeekSettings(api_key: string | null, model: string): Promise<WorkbenchSettings> {
+  const payload: { model: string; api_key?: string } = { model };
+  if (api_key?.trim()) {
+    payload.api_key = api_key.trim();
+  }
+  return post<WorkbenchSettings>("/api/workbench/settings/deepseek", payload);
 }
 
 export function testDeepSeekSettings(): Promise<{ status: string }> {
