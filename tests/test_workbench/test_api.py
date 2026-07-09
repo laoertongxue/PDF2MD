@@ -93,3 +93,24 @@ def test_detect_chapters_uses_safe_single_level_source_dir(tmp_path):
     assert res.status_code == 200
     assert not (root_dir / "战略").exists()
     assert (root_dir / "战略-教材-案例" / "0-第一章_选择_定位.md").exists()
+
+
+def test_detect_chapters_falls_back_for_dot_dot_source_dir(tmp_path):
+    c = client(tmp_path)
+    root_dir = tmp_path / "out"
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root_dir)},
+    ).json()
+    source_md = tmp_path / "source.md"
+    source_md.write_text("## 01-战略选择\n战略是选择。", encoding="utf-8")
+    source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"kind": "main", "file_path": str(source_md), "title": ".."},
+    ).json()
+
+    res = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters")
+
+    assert res.status_code == 200
+    assert (root_dir / "source" / "0-01-战略选择.md").exists()
+    assert not (root_dir.parent / "0-01-战略选择.md").exists()

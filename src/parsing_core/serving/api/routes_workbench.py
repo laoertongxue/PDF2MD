@@ -61,7 +61,10 @@ def _chapter_filename(seq: int, title: str) -> str:
 
 
 def _safe_dir_name(name: str) -> str:
-    return name.replace("/", "-").replace("\\", "-")
+    safe_name = name.replace("/", "-").replace("\\", "-").strip()
+    if safe_name in {"", ".", ".."}:
+        return "source"
+    return safe_name
 
 
 @router.post("/courses", response_model=CourseResponse)
