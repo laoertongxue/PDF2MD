@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { BookOpen, Loader2, PlusCircle } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 
@@ -37,6 +38,20 @@ export default function CourseList() {
       <div>
         <h1 className="text-xl font-semibold text-zinc-900">课程精读</h1>
         <p className="text-sm text-zinc-500 mt-0.5">管理课程工作台入口</p>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <Link
+          to="/workbench/source"
+          className={`rounded-md px-3 py-2 text-sm font-medium ${
+            selectedCourseId ? "bg-zinc-900 text-white hover:bg-zinc-800" : "pointer-events-none bg-zinc-100 text-zinc-400"
+          }`}
+        >
+          导入资料
+        </Link>
+        <Link to="/workbench/cards" className="rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:border-zinc-300">
+          卡片池
+        </Link>
       </div>
 
       <form onSubmit={submit} className="rounded-lg border border-zinc-200 bg-white p-5 space-y-4">
