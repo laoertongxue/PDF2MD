@@ -21,6 +21,7 @@ interface WorkbenchState {
   detectChapters: (sourceId: string) => Promise<Chapter[]>;
   confirmChapter: (chapterId: string) => Promise<Chapter>;
   runChapter: (chapterId: string) => Promise<void>;
+  runHybridChapter: (chapterId: string) => Promise<void>;
 }
 
 export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
@@ -35,6 +36,22 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
         },
       };
     });
+
+  const refreshChapterArtifacts = async (chapter: Chapter) => {
+    updateChapter(chapter);
+    await Promise.all([get().loadChapterNoteBlocks(chapter.id), get().loadCourseCards(chapter.course_id)]);
+  };
+
+  const runChapterWith = async (chapterId: string, runner: (chapterId: string) => Promise<Chapter>) => {
+    try {
+      const updated = await runner(chapterId);
+      await refreshChapterArtifacts(updated);
+    } catch (error) {
+      const updated = await api.getChapter(chapterId).catch(() => null);
+      if (updated) updateChapter(updated);
+      throw error;
+    }
+  };
 
   return {
     courses: [],
@@ -94,30 +111,17 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
     },
 
     confirmChapter: async (chapterId) => {
-    const chapter = await api.confirmChapter(chapterId);
-    set((state) => ({
-      chapters: {
-        ...state.chapters,
-        [chapter.source_id]: (state.chapters[chapter.source_id] ?? []).map((item) => (item.id === chapter.id ? chapter : item)),
-      },
-    }));
-    return chapter;
+      const chapter = await api.confirmChapter(chapterId);
+      updateChapter(chapter);
+      return chapter;
     },
 
     runChapter: async (chapterId) => {
-      let updated: Chapter | null = null;
-      try {
-        updated = await api.runChapter(chapterId);
-      } catch (error) {
-        updated = await api.getChapter(chapterId).catch(() => null);
-        if (updated) updateChapter(updated);
-        throw error;
-      }
-      updateChapter(updated);
-      const blocks = await api.listChapterNoteBlocks(chapterId);
-      const chapter = Object.values(get().chapters).flat().find((item) => item.id === chapterId) ?? updated;
-      await get().loadCourseCards(chapter.course_id);
-      set((state) => ({ noteBlocksByChapter: { ...state.noteBlocksByChapter, [chapterId]: blocks } }));
+      await runChapterWith(chapterId, (id) => api.runChapter(id));
+    },
+
+    runHybridChapter: async (chapterId) => {
+      await runChapterWith(chapterId, api.runHybridChapter);
     },
   };
 });

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { Loader2, Sparkles } from "lucide-react";
 import MermaidEditor from "./MermaidEditor";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 
@@ -11,10 +12,12 @@ export default function ChapterWorkbench() {
     loadCourses,
     loadSources,
     noteBlocksByChapter,
+    runHybridChapter,
     selectedCourseId,
   } = useWorkbenchStore();
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [runningHybrid, setRunningHybrid] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedChapterId = searchParams.get("chapterId");
 
@@ -91,6 +94,21 @@ export default function ChapterWorkbench() {
     loadChapterNoteBlocks(chapterId).catch((err: unknown) => setError(err instanceof Error ? err.message : "精读结果加载失败"));
   };
 
+  const canRunHybrid = activeChapter?.status === "CONFIRMED" || activeChapter?.status === "FAILED";
+
+  const runHybrid = async () => {
+    if (!activeChapterId) return;
+    setRunningHybrid(true);
+    setError(null);
+    try {
+      await runHybridChapter(activeChapterId);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "混合精读启动失败");
+    } finally {
+      setRunningHybrid(false);
+    }
+  };
+
   return (
     <div className="space-y-6 animate-in">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -98,9 +116,20 @@ export default function ChapterWorkbench() {
           <h1 className="text-xl font-semibold text-zinc-900">章节精读工作台</h1>
           <p className="mt-1 text-sm text-zinc-500">{activeChapter ? activeChapter.title : "查看已生成的章节精读结果"}</p>
         </div>
-        <Link to="/workbench/cards" className="rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-700 hover:border-zinc-300">
-          查看卡片池
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={runHybrid}
+            disabled={!activeChapterId || !canRunHybrid || runningHybrid}
+            className="inline-flex items-center gap-2 rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
+          >
+            {runningHybrid ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+            混合精读
+          </button>
+          <Link to="/workbench/cards" className="rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-700 hover:border-zinc-300">
+            查看卡片池
+          </Link>
+        </div>
       </div>
 
       {error && <p className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-600">{error}</p>}
@@ -122,6 +151,7 @@ export default function ChapterWorkbench() {
               </option>
             ))}
           </select>
+          <span className="mt-1 block text-xs text-zinc-400">仅 CONFIRMED 或 FAILED 章节可执行混合精读。</span>
         </label>
       )}
 

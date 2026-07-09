@@ -1,4 +1,4 @@
-import type { Card, Chapter, Course, NoteBlock, Source } from "./workbenchTypes";
+import type { Card, Chapter, Course, NoteBlock, Source, WorkbenchSettings } from "./workbenchTypes";
 
 const BASE = "http://127.0.0.1:8000";
 
@@ -53,6 +53,22 @@ export function confirmChapter(chapterId: string): Promise<Chapter> {
 
 export function runChapter(chapterId: string, executor = "stub"): Promise<Chapter> {
   return post<Chapter>(`/api/workbench/chapters/${chapterId}/run`, { executor });
+}
+
+export function getWorkbenchSettings(): Promise<WorkbenchSettings> {
+  return request<WorkbenchSettings>("/api/workbench/settings");
+}
+
+export function saveDeepSeekSettings(api_key: string, model: string): Promise<WorkbenchSettings> {
+  return post<WorkbenchSettings>("/api/workbench/settings/deepseek", { api_key, model });
+}
+
+export function testDeepSeekSettings(): Promise<{ status: string }> {
+  return post<{ status: string }>("/api/workbench/settings/deepseek/test");
+}
+
+export function runHybridChapter(chapterId: string): Promise<Chapter> {
+  return post<Chapter>(`/api/workbench/chapters/${chapterId}/run-hybrid`);
 }
 
 export function listCourseCards(courseId: string): Promise<Card[]> {

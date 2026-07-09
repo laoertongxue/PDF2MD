@@ -52,3 +52,8 @@ export interface NoteBlock {
   seq: number;
   updated_at?: number;
 }
+
+export interface WorkbenchSettings {
+  deepseek_model: string;
+  deepseek_key_masked: string | null;
+}

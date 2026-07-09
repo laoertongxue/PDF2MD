@@ -1,10 +1,11 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { LayoutDashboard, PlusCircle, FileText, Terminal, BookOpen } from "lucide-react";
+import { LayoutDashboard, PlusCircle, FileText, Terminal, BookOpen, Settings as SettingsIcon } from "lucide-react";
 
 const nav = [
   { to: "/", label: "仪表盘", icon: LayoutDashboard },
   { to: "/submit", label: "新建批次", icon: PlusCircle },
   { to: "/workbench", label: "课程精读", icon: BookOpen },
+  { to: "/workbench/settings", label: "精读设置", icon: SettingsIcon },
 ];
 
 export default function Layout() {
@@ -25,7 +26,7 @@ export default function Layout() {
         {/* Nav */}
         <nav className="flex-1 px-3 py-4 space-y-0.5">
           {nav.map(({ to, label, icon: Icon }) => {
-            const active = pathname === to || (to !== "/" && pathname.startsWith(to));
+            const active = to === "/" ? pathname === to : pathname === to || pathname.startsWith(`${to}/`);
             return (
               <Link
                 key={to}
