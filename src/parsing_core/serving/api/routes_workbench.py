@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from starlette.concurrency import run_in_threadpool
 
 from parsing_core.parser.markitdown_adapter import MarkItDownAdapter
 from parsing_core.serving.api.deps import SchedulerDep
@@ -13,6 +14,8 @@ from parsing_core.serving.models.api import (
     NoteBlockResponse,
     RunChapterRequest,
     SourceCreateRequest,
+    SourceImportRequest,
+    SourceImportResponse,
     SourceResponse,
     WorkbenchSettingsResponse,
 )
@@ -25,6 +28,13 @@ from parsing_core.workbench.keychain import KeychainError, mask_secret, read_sec
 from parsing_core.workbench.pipeline import ChapterMarkdownSyncError, IntensiveReadingPipeline
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.settings import WorkbenchSettings, load_settings, save_settings
+from parsing_core.workbench.source_import import (
+    AtomicImportUnsupportedError,
+    CourseStorageChangedError,
+    CourseStorageError,
+    SourceImportInputError,
+    TextbookImportBatch,
+)
 
 router = APIRouter(prefix="/api/workbench", tags=["workbench"])
 KEYCHAIN_SERVICE = "pdf2md.deepseek"
@@ -92,6 +102,52 @@ def _source_response(source) -> SourceResponse:
         file_path=source.file_path,
         title=source.title,
         status=source.status,
+    )
+
+
+class _CourseNotFoundError(Exception):
+    pass
+
+
+class _SourceSaveError(Exception):
+    pass
+
+
+def _import_sources_sync(course_id: str, paths: list[str], sch: SchedulerDep):
+    repo = _repo(sch)
+    course = repo.get_course(course_id)
+    if course is None:
+        raise _CourseNotFoundError
+
+    with TextbookImportBatch(
+        Path(course.root_dir),
+        repo.source_file_paths_for_root(course.root_dir),
+    ) as batch:
+        imported_textbooks = [batch.import_file(Path(path)) for path in paths]
+        try:
+            sources = repo.create_sources_guarded(
+                course_id,
+                [
+                    ("main", str(imported.stored_path), imported.title)
+                    for imported in imported_textbooks
+                ],
+                batch.verify_path_identity,
+            )
+        except CourseStorageChangedError:
+            raise
+        except Exception as exc:
+            raise _SourceSaveError from exc
+        batch.commit()
+
+    return SourceImportResponse(
+        items=[
+            {
+                "source_id": source.id,
+                "title": source.title,
+                "stored_path": source.file_path,
+            }
+            for source in sources
+        ]
     )
 
 
@@ -172,6 +228,27 @@ async def create_source(course_id: str, req: SourceCreateRequest, sch: Scheduler
         raise HTTPException(400, "file_path must be an existing file")
     source = repo.create_source(course_id, req.kind, str(file_path), req.title)
     return _source_response(source)
+
+
+@router.post(
+    "/courses/{course_id}/sources/import",
+    response_model=SourceImportResponse,
+)
+async def import_sources(course_id: str, req: SourceImportRequest, sch: SchedulerDep):
+    try:
+        return await run_in_threadpool(_import_sources_sync, course_id, req.paths, sch)
+    except _CourseNotFoundError as exc:
+        raise HTTPException(404, "course not found") from exc
+    except SourceImportInputError as exc:
+        raise HTTPException(400, "textbook file could not be imported") from exc
+    except AtomicImportUnsupportedError as exc:
+        raise HTTPException(507, "course storage does not support atomic imports") from exc
+    except CourseStorageChangedError as exc:
+        raise HTTPException(500, "course storage changed during import") from exc
+    except CourseStorageError as exc:
+        raise HTTPException(507, "course storage could not complete import") from exc
+    except _SourceSaveError as exc:
+        raise HTTPException(500, "textbook sources could not be saved") from exc
 
 
 @router.get("/courses/{course_id}/sources", response_model=list[SourceResponse])

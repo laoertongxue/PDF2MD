@@ -1,11 +1,18 @@
+import asyncio
+import errno
 import json
+import threading
+import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from parsing_core.llm.stub_client import StubLLMClient
 from parsing_core.orchestrator import Orchestrator
 from parsing_core.serving.api import routes_workbench
+from parsing_core.serving.api.deps import get_scheduler
 from parsing_core.serving.serve import build_app
 from parsing_core.storage.fs_layout import FsLayout
 from parsing_core.storage.repository import Repository
@@ -15,6 +22,7 @@ from parsing_core.workbench import pipeline as workbench_pipeline
 from parsing_core.workbench.keychain import KeychainError
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
+from parsing_core.workbench.source_import import CourseStorageError, TextbookImportBatch
 
 
 def client(tmp_path, *, raise_server_exceptions=True):
@@ -153,6 +161,822 @@ def test_create_source_rejects_file_outside_course_root(tmp_path):
     )
 
     assert res.status_code == 400
+
+
+def test_import_multiple_textbooks_creates_independent_sources(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    first = tmp_path / "战略管理.pdf"
+    second = tmp_path / "案例集.DOCX"
+    first.write_bytes(b"main-book")
+    second.write_bytes(b"case-book")
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(first), str(second)]},
+    )
+
+    assert res.status_code == 200
+    assert [item["title"] for item in res.json()["items"]] == ["战略管理", "案例集"]
+    assert len({item["source_id"] for item in res.json()["items"]}) == 2
+    stored_paths = [Path(item["stored_path"]) for item in res.json()["items"]]
+    assert [path.read_bytes() for path in stored_paths] == [b"main-book", b"case-book"]
+    sources = c.get(f"/api/workbench/courses/{course['id']}/sources").json()
+    assert [source["kind"] for source in sources] == ["main", "main"]
+    assert {source["file_path"] for source in sources} == {str(path) for path in stored_paths}
+
+
+def test_import_same_source_twice_creates_two_files_and_sources(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source = tmp_path / "book.pdf"
+    source.write_bytes(b"book")
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source), str(source)]},
+    )
+
+    assert res.status_code == 200
+    items = res.json()["items"]
+    assert [Path(item["stored_path"]).name for item in items] == ["book.pdf", "book-2.pdf"]
+    assert len({item["source_id"] for item in items}) == 2
+
+
+def test_import_textbooks_returns_404_before_reading_paths_for_unknown_course(tmp_path):
+    c = client(tmp_path)
+
+    res = c.post(
+        "/api/workbench/courses/missing/sources/import",
+        json={"paths": [str(tmp_path / "missing.pdf")]},
+    )
+
+    assert res.status_code == 404
+    assert res.json()["detail"] == "course not found"
+
+
+@pytest.mark.parametrize("payload", [{}, {"paths": []}, {"paths": "book.pdf"}])
+def test_import_textbooks_rejects_structurally_invalid_requests(tmp_path, payload):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+
+    res = c.post(f"/api/workbench/courses/{course['id']}/sources/import", json=payload)
+
+    assert res.status_code == 422
+
+
+def test_import_textbooks_rejects_more_than_fifty_paths(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(tmp_path / "missing.pdf")] * 51},
+    )
+
+    assert res.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_import_copy_does_not_block_health_on_same_event_loop(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    source = tmp_path / "book.pdf"
+    source.write_bytes(b"book")
+    copy_started = threading.Event()
+    release_copy = threading.Event()
+    real_copyfileobj = __import__("shutil").copyfileobj
+
+    def paused_copy(source_file, target_file, *args, **kwargs):
+        copy_started.set()
+        assert release_copy.wait(timeout=3)
+        return real_copyfileobj(source_file, target_file, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "parsing_core.workbench.source_import.shutil.copyfileobj",
+        paused_copy,
+    )
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+        course = (
+            await async_client.post(
+                "/api/workbench/courses",
+                json={"title": "战略管理", "description": "", "root_dir": str(root)},
+            )
+        ).json()
+        started_at = time.monotonic()
+        import_request = asyncio.create_task(
+            async_client.post(
+                f"/api/workbench/courses/{course['id']}/sources/import",
+                json={"paths": [str(source)]},
+            )
+        )
+        try:
+            assert await asyncio.to_thread(copy_started.wait, 3)
+            health = await asyncio.wait_for(async_client.get("/health"), timeout=0.5)
+            assert time.monotonic() - started_at < 0.5
+            assert health.status_code == 200
+            assert health.json() == {"status": "ok"}
+        finally:
+            release_copy.set()
+        import_response = await import_request
+
+    assert import_response.status_code == 200
+
+
+def test_import_textbooks_maps_invalid_input_to_400_without_leaking_path(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    invalid = tmp_path / "secret" / "missing.pdf"
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(invalid)]},
+    )
+
+    assert res.status_code == 400
+    assert str(invalid) not in res.text
+
+
+def test_import_textbooks_maps_storage_exhaustion_to_507(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source = tmp_path / "book.pdf"
+    source.write_bytes(b"book")
+
+    def fail_fsync(file_descriptor):
+        raise OSError(errno.ENOSPC, "private target path")
+
+    monkeypatch.setattr("parsing_core.workbench.source_import.os.fsync", fail_fsync)
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source)]},
+    )
+
+    assert res.status_code == 507
+    assert res.json()["detail"] == "course storage could not complete import"
+    assert "private target path" not in res.text
+    assert list((root / "教材原文件").iterdir()) == []
+    assert c.get(f"/api/workbench/courses/{course['id']}/sources").json() == []
+
+
+def test_import_textbooks_rejects_storage_without_hardlinks(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source = tmp_path / "book.pdf"
+    source.write_bytes(b"book")
+
+    def fail_link(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hardlinks disabled")
+
+    monkeypatch.setattr("parsing_core.workbench.source_import.os.link", fail_link)
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source)]},
+    )
+
+    assert res.status_code == 507
+    assert res.json()["detail"] == "course storage does not support atomic imports"
+    assert list((root / "教材原文件").iterdir()) == []
+    assert c.get(f"/api/workbench/courses/{course['id']}/sources").json() == []
+
+
+def test_import_rolls_back_through_directory_fd_when_target_path_is_replaced(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    target_dir = root / "教材原文件"
+    target_dir.mkdir()
+    detached_dir = root / "detached-textbooks"
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    victim = outside_dir / "book.pdf"
+    victim.write_bytes(b"victim")
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source = tmp_path / "book.pdf"
+    source.write_bytes(b"new-book")
+    real_copyfileobj = __import__("shutil").copyfileobj
+    replaced = False
+
+    def replace_directory_after_copy(source_file, target_file, *args, **kwargs):
+        nonlocal replaced
+        result = real_copyfileobj(source_file, target_file, *args, **kwargs)
+        if not replaced:
+            replaced = True
+            target_dir.rename(detached_dir)
+            target_dir.symlink_to(outside_dir, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(
+        "parsing_core.workbench.source_import.shutil.copyfileobj",
+        replace_directory_after_copy,
+    )
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source)]},
+    )
+
+    assert res.status_code == 500
+    assert res.json()["detail"] == "course storage changed during import"
+    assert victim.read_bytes() == b"victim"
+    assert {path.name for path in outside_dir.iterdir()} == {"book.pdf"}
+    assert list(detached_dir.iterdir()) == []
+    assert c.get(f"/api/workbench/courses/{course['id']}/sources").json() == []
+
+
+def test_next_import_recovers_file_published_before_database_commit(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    crashed_source = tmp_path / "crashed" / "book.pdf"
+    replacement_source = tmp_path / "replacement" / "book.pdf"
+    crashed_source.parent.mkdir()
+    replacement_source.parent.mkdir()
+    crashed_source.write_bytes(b"orphan")
+    replacement_source.write_bytes(b"replacement")
+
+    batch = TextbookImportBatch(root)
+    batch.import_file(crashed_source)
+    target_dir = root / "教材原文件"
+    assert len(list(target_dir.glob(".*.import-journal"))) == 1
+    batch._close()
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(replacement_source)]},
+    )
+
+    assert res.status_code == 200
+    stored_path = Path(res.json()["items"][0]["stored_path"])
+    assert stored_path.name == "book.pdf"
+    assert stored_path.read_bytes() == b"replacement"
+    assert list(target_dir.glob(".*.import-journal")) == []
+    assert len(c.get(f"/api/workbench/courses/{course['id']}/sources").json()) == 1
+
+
+def test_recovery_keeps_file_committed_before_journal_cleanup(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    first.write_bytes(b"committed")
+    second.write_bytes(b"second")
+
+    batch = TextbookImportBatch(root)
+    imported = batch.import_file(first)
+    repo = routes_workbench._repo(get_scheduler())
+    repo.create_sources(course["id"], [("main", str(imported.stored_path), imported.title)])
+    target_dir = root / "教材原文件"
+    assert len(list(target_dir.glob(".*.import-journal"))) == 1
+    batch._close()
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(second)]},
+    )
+
+    assert res.status_code == 200
+    assert imported.stored_path.read_bytes() == b"committed"
+    assert list(target_dir.glob(".*.import-journal")) == []
+    assert len(c.get(f"/api/workbench/courses/{course['id']}/sources").json()) == 2
+
+
+def test_recovery_keeps_committed_file_from_another_course_with_shared_root(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course_a = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    course_b = c.post(
+        "/api/workbench/courses",
+        json={"title": "组织行为", "description": "", "root_dir": str(root)},
+    ).json()
+    source_a = tmp_path / "strategy.pdf"
+    source_b = tmp_path / "organization.pdf"
+    source_a.write_bytes(b"committed-a")
+    source_b.write_bytes(b"course-b")
+
+    batch = TextbookImportBatch(root)
+    imported_a = batch.import_file(source_a)
+    routes_workbench._repo(get_scheduler()).create_sources(
+        course_a["id"],
+        [("main", str(imported_a.stored_path), imported_a.title)],
+    )
+    batch._close()
+    target_dir = root / "教材原文件"
+    assert len(list(target_dir.glob(".*.import-journal"))) == 1
+
+    res = c.post(
+        f"/api/workbench/courses/{course_b['id']}/sources/import",
+        json={"paths": [str(source_b)]},
+    )
+
+    assert res.status_code == 200
+    assert imported_a.stored_path.read_bytes() == b"committed-a"
+    assert list(target_dir.glob(".*.import-journal")) == []
+    assert len(c.get(f"/api/workbench/courses/{course_a['id']}/sources").json()) == 1
+    assert len(c.get(f"/api/workbench/courses/{course_b['id']}/sources").json()) == 1
+
+
+@pytest.mark.parametrize("cleanup_failure", ["unlink", "fsync"])
+def test_committed_import_succeeds_when_journal_cleanup_is_deferred(
+    tmp_path, monkeypatch, cleanup_failure
+):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    real_unlink = TextbookImportBatch._unlink
+    real_fsync = TextbookImportBatch._fsync_directory
+
+    def defer_journal_cleanup(batch, name, original_error=None):
+        if name.endswith(".import-journal"):
+            return False
+        return real_unlink(batch, name, original_error)
+
+    fsync_calls = 0
+
+    def fail_commit_fsync(batch):
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 2:
+            raise CourseStorageError("directory fsync failed")
+        return real_fsync(batch)
+
+    if cleanup_failure == "unlink":
+        monkeypatch.setattr(TextbookImportBatch, "_unlink", defer_journal_cleanup)
+    else:
+        monkeypatch.setattr(TextbookImportBatch, "_fsync_directory", fail_commit_fsync)
+
+    first_res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(first)]},
+    )
+
+    target_dir = root / "教材原文件"
+    assert first_res.status_code == 200
+    assert len(c.get(f"/api/workbench/courses/{course['id']}/sources").json()) == 1
+    assert len(list(target_dir.glob(".*.import-journal"))) == 1
+
+    monkeypatch.setattr(TextbookImportBatch, "_unlink", real_unlink)
+    monkeypatch.setattr(TextbookImportBatch, "_fsync_directory", real_fsync)
+    second_res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(second)]},
+    )
+
+    assert second_res.status_code == 200
+    assert list(target_dir.glob(".*.import-journal")) == []
+    sources = c.get(f"/api/workbench/courses/{course['id']}/sources").json()
+    assert len(sources) == 2
+    assert {source["title"] for source in sources} == {"first", "second"}
+
+
+def test_failed_orphan_cleanup_keeps_journal_for_next_recovery(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    orphan_source = tmp_path / "orphan" / "book.pdf"
+    new_source = tmp_path / "new" / "new.pdf"
+    orphan_source.parent.mkdir()
+    new_source.parent.mkdir()
+    orphan_source.write_bytes(b"orphan")
+    new_source.write_bytes(b"new")
+
+    batch = TextbookImportBatch(root)
+    orphan = batch.import_file(orphan_source)
+    batch._close()
+    target_dir = root / "教材原文件"
+    journal = next(target_dir.glob(".*.import-journal"))
+    real_unlink = TextbookImportBatch._unlink
+
+    def fail_orphan_unlink(import_batch, name, original_error=None):
+        if name == "book.pdf":
+            return False
+        return real_unlink(import_batch, name, original_error)
+
+    monkeypatch.setattr(TextbookImportBatch, "_unlink", fail_orphan_unlink)
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(new_source)]},
+    )
+
+    assert res.status_code == 507
+    assert orphan.stored_path.read_bytes() == b"orphan"
+    assert journal.exists()
+    assert c.get(f"/api/workbench/courses/{course['id']}/sources").json() == []
+
+
+@pytest.mark.parametrize("register_source", [False, True])
+def test_mark_failure_with_final_cleanup_failure_is_recovered(
+    tmp_path, monkeypatch, register_source
+):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source = tmp_path / "book.pdf"
+    next_source = tmp_path / "next.pdf"
+    source.write_bytes(b"published-before-failure")
+    next_source.write_bytes(b"next")
+    real_mark = TextbookImportBatch._mark_journal_published
+    real_unlink = TextbookImportBatch._unlink
+
+    def fail_mark(import_batch, record):
+        raise CourseStorageError("journal mark failed")
+
+    def fail_final_unlink(import_batch, name, original_error=None):
+        if name == "book.pdf":
+            return False
+        return real_unlink(import_batch, name, original_error)
+
+    monkeypatch.setattr(TextbookImportBatch, "_mark_journal_published", fail_mark)
+    monkeypatch.setattr(TextbookImportBatch, "_unlink", fail_final_unlink)
+
+    failed = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source)]},
+    )
+
+    target_dir = root / "教材原文件"
+    published = target_dir / "book.pdf"
+    journals = list(target_dir.glob(".*.import-journal"))
+    assert failed.status_code == 507
+    assert published.read_bytes() == b"published-before-failure"
+    assert len(journals) == 1
+
+    if register_source:
+        routes_workbench._repo(get_scheduler()).create_sources(
+            course["id"],
+            [("main", str(published), "book")],
+        )
+
+    monkeypatch.setattr(TextbookImportBatch, "_mark_journal_published", real_mark)
+    monkeypatch.setattr(TextbookImportBatch, "_unlink", real_unlink)
+
+    recovered = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(next_source)]},
+    )
+
+    assert recovered.status_code == 200
+    assert list(target_dir.glob(".*.import-journal")) == []
+    if register_source:
+        assert published.read_bytes() == b"published-before-failure"
+        assert len(c.get(f"/api/workbench/courses/{course['id']}/sources").json()) == 2
+    else:
+        assert not published.exists()
+        assert len(c.get(f"/api/workbench/courses/{course['id']}/sources").json()) == 1
+
+
+@pytest.mark.parametrize("replace_after_insert", [1, 2])
+def test_directory_replacement_during_insert_rolls_back_database_and_stable_directory(
+    tmp_path, replace_after_insert
+):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    target_dir = root / "教材原文件"
+    detached_dir = root / "detached-textbooks"
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    victim = outside_dir / "first.pdf"
+    victim.write_bytes(b"victim")
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    sources = [tmp_path / "first.pdf", tmp_path / "second.pdf"]
+    for source in sources:
+        source.write_bytes(source.stem.encode())
+    repo = routes_workbench._repo(get_scheduler())
+    replaced = False
+
+    def replace_target_directory():
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            target_dir.rename(detached_dir)
+            target_dir.symlink_to(outside_dir, target_is_directory=True)
+        return 0
+
+    repo.conn.create_function("replace_target_directory", 0, replace_target_directory)
+    repo.conn.executescript(
+        f"""
+        CREATE TRIGGER replace_target_during_source_insert
+        AFTER INSERT ON wb_sources
+        WHEN (
+          SELECT COUNT(*) FROM wb_sources WHERE course_id = NEW.course_id
+        ) = {replace_after_insert}
+        BEGIN
+          SELECT replace_target_directory();
+        END;
+        """
+    )
+    repo.conn.commit()
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source) for source in sources]},
+    )
+
+    assert res.status_code == 500
+    assert res.json()["detail"] == "course storage changed during import"
+    assert replaced
+    assert c.get(f"/api/workbench/courses/{course['id']}/sources").json() == []
+    assert list(detached_dir.iterdir()) == []
+    assert list(detached_dir.glob(".*.import-journal")) == []
+    assert victim.read_bytes() == b"victim"
+    assert {path.name for path in outside_dir.iterdir()} == {"first.pdf"}
+
+
+@pytest.mark.parametrize(
+    "journal_content",
+    [
+        b'{"version": 1, "final_name": ',
+        json.dumps(
+            {
+                "version": 1,
+                "final_name": "../victim.pdf",
+                "temporary_name": ".book.tmp",
+                "device": 1,
+                "inode": 1,
+            }
+        ).encode(),
+    ],
+)
+def test_recovery_does_not_delete_files_for_invalid_journal(tmp_path, journal_content):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    target_dir = root / "教材原文件"
+    target_dir.mkdir()
+    journal = target_dir / ".invalid.import-journal"
+    journal.write_bytes(journal_content)
+    victim = root / "victim.pdf"
+    victim.write_bytes(b"victim")
+    source = tmp_path / "new.pdf"
+    source.write_bytes(b"new")
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source)]},
+    )
+
+    assert res.status_code == 507
+    assert res.json()["detail"] == "course storage could not complete import"
+    assert victim.read_bytes() == b"victim"
+    assert journal.read_bytes() == journal_content
+    assert c.get(f"/api/workbench/courses/{course['id']}/sources").json() == []
+
+
+def test_second_copy_failure_removes_first_file_and_creates_no_sources(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    sources = [tmp_path / "first.pdf", tmp_path / "second.pdf"]
+    for source in sources:
+        source.write_bytes(source.stem.encode())
+    real_import = routes_workbench.TextbookImportBatch.import_file
+    calls = 0
+
+    def fail_second(batch, source_path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise CourseStorageError("course storage could not complete import")
+        return real_import(batch, source_path)
+
+    monkeypatch.setattr(routes_workbench.TextbookImportBatch, "import_file", fail_second)
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source) for source in sources]},
+    )
+
+    assert res.status_code == 507
+    assert list((root / "教材原文件").iterdir()) == []
+    assert c.get(f"/api/workbench/courses/{course['id']}/sources").json() == []
+
+
+def test_second_database_insert_failure_rolls_back_files_and_sources(tmp_path):
+    c = client(tmp_path, raise_server_exceptions=False)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    sources = [tmp_path / "first.pdf", tmp_path / "second.pdf"]
+    for source in sources:
+        source.write_bytes(source.stem.encode())
+    repo = routes_workbench._repo(get_scheduler())
+    repo.conn.executescript(
+        """
+        CREATE TRIGGER fail_second_source
+        BEFORE INSERT ON wb_sources
+        WHEN (SELECT COUNT(*) FROM wb_sources) = 1
+        BEGIN
+          SELECT RAISE(ABORT, 'private database failure');
+        END;
+        """
+    )
+    repo.conn.commit()
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source) for source in sources]},
+    )
+
+    assert res.status_code == 500
+    assert "private database failure" not in res.text
+    assert list((root / "教材原文件").iterdir()) == []
+    assert c.get(f"/api/workbench/courses/{course['id']}/sources").json() == []
+
+
+def test_cleanup_failure_does_not_mask_database_error_and_attempts_remaining_files(
+    tmp_path, monkeypatch
+):
+    c = client(tmp_path, raise_server_exceptions=False)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    sources = [tmp_path / "first.pdf", tmp_path / "second.pdf"]
+    for source in sources:
+        source.write_bytes(source.stem.encode())
+
+    def fail_database(self, course_id, source_specs, guard):
+        raise RuntimeError("original database error")
+
+    real_unlink = routes_workbench.TextbookImportBatch._unlink
+    attempted = []
+
+    def fail_first_unlink(batch, name, original_error=None):
+        if name.endswith(".pdf"):
+            attempted.append(name)
+        if name == "first.pdf":
+            if original_error is not None:
+                original_error.add_note("cleanup failed")
+            return False
+        return real_unlink(batch, name, original_error)
+
+    monkeypatch.setattr(
+        routes_workbench.WorkbenchRepository,
+        "create_sources_guarded",
+        fail_database,
+    )
+    monkeypatch.setattr(routes_workbench.TextbookImportBatch, "_unlink", fail_first_unlink)
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source) for source in sources]},
+    )
+
+    assert res.status_code == 500
+    assert "original database error" not in res.text
+    assert attempted == ["second.pdf", "first.pdf"]
+    assert (root / "教材原文件" / "first.pdf").exists()
+    assert not (root / "教材原文件" / "second.pdf").exists()
+    assert len(list((root / "教材原文件").glob(".*.import-journal"))) == 1
+
+
+def test_import_preserves_preexisting_same_name_file_when_batch_rolls_back(tmp_path, monkeypatch):
+    c = client(tmp_path, raise_server_exceptions=False)
+    root = course_root(tmp_path)
+    target_dir = root / "教材原文件"
+    target_dir.mkdir()
+    existing = target_dir / "book.pdf"
+    existing.write_bytes(b"existing")
+    source = tmp_path / "book.pdf"
+    source.write_bytes(b"new")
+
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+
+    def fail_database(self, course_id, source_specs, guard):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(
+        routes_workbench.WorkbenchRepository,
+        "create_sources_guarded",
+        fail_database,
+    )
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source)]},
+    )
+
+    assert res.status_code == 500
+    assert existing.read_bytes() == b"existing"
+    assert not (target_dir / "book-2.pdf").exists()
+
+
+def test_concurrent_import_requests_with_same_name_do_not_overwrite(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    first = tmp_path / "a" / "book.pdf"
+    second = tmp_path / "b" / "book.pdf"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"first-content")
+    second.write_bytes(b"second-content")
+    barrier = threading.Barrier(2)
+    real_import = routes_workbench.TextbookImportBatch.import_file
+
+    def synchronized_import(batch, source_path):
+        barrier.wait()
+        return real_import(batch, source_path)
+
+    monkeypatch.setattr(routes_workbench.TextbookImportBatch, "import_file", synchronized_import)
+    responses = []
+
+    def request(source):
+        responses.append(
+            c.post(
+                f"/api/workbench/courses/{course['id']}/sources/import",
+                json={"paths": [str(source)]},
+            )
+        )
+
+    threads = [threading.Thread(target=request, args=(source,)) for source in (first, second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert [response.status_code for response in responses] == [200, 200]
+    items = [response.json()["items"][0] for response in responses]
+    assert len({item["stored_path"] for item in items}) == 2
+    assert {Path(item["stored_path"]).read_bytes() for item in items} == {
+        b"first-content",
+        b"second-content",
+    }
 
 
 @pytest.mark.parametrize("write_operation", ["mkdir", "write_text"])

@@ -76,6 +76,20 @@ class SourceResponse(BaseModel):
     status: str
 
 
+class SourceImportRequest(BaseModel):
+    paths: list[str] = Field(..., min_length=1, max_length=50)
+
+
+class ImportedSourceResponse(BaseModel):
+    source_id: str
+    title: str
+    stored_path: str
+
+
+class SourceImportResponse(BaseModel):
+    items: list[ImportedSourceResponse]
+
+
 class ChapterResponse(BaseModel):
     id: str
     source_id: str

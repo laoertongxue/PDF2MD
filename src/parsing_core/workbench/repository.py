@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from uuid import uuid4
 
@@ -630,12 +630,101 @@ class WorkbenchRepository:
         self.conn.commit()
         return Source(**row)
 
+    def create_sources(
+        self,
+        course_id: str,
+        source_specs: list[tuple[str, str, str]],
+    ) -> list[Source]:
+        rows = self._source_rows(course_id, source_specs)
+        with self._atomic():
+            self._insert_source_rows(rows)
+        return [Source(**row) for row in rows]
+
+    def create_sources_guarded(
+        self,
+        course_id: str,
+        source_specs: list[tuple[str, str, str]],
+        guard: Callable[[], None],
+    ) -> list[Source]:
+        rows = self._source_rows(course_id, source_specs)
+        with self._atomic(immediate=True):
+            course = self.conn.execute(
+                "SELECT 1 FROM wb_courses WHERE id = ?",
+                (course_id,),
+            ).fetchone()
+            if course is None:
+                raise ValueError("course not found")
+            # These guards detect identity changes at the transaction boundaries;
+            # the batch's stable directory fd confines later cleanup after a rename.
+            guard()
+            self._insert_source_rows(rows)
+            guard()
+        return [Source(**row) for row in rows]
+
+    def _source_rows(
+        self,
+        course_id: str,
+        source_specs: list[tuple[str, str, str]],
+    ) -> list[dict]:
+        now = _now()
+        return [
+            {
+                "id": uuid4().hex,
+                "course_id": course_id,
+                "kind": kind,
+                "file_path": file_path,
+                "title": title,
+                "markdown_path": None,
+                "status": "IMPORTED",
+                "created_at": now,
+                "updated_at": now,
+            }
+            for kind, file_path, title in source_specs
+        ]
+
+    def _insert_source_rows(self, rows: list[dict]) -> None:
+        for row in rows:
+            self.conn.execute(
+                """
+                INSERT INTO wb_sources
+                  (
+                    id, course_id, kind, file_path, title, markdown_path,
+                    status, created_at, updated_at
+                  )
+                VALUES
+                  (
+                    :id, :course_id, :kind, :file_path, :title, :markdown_path,
+                    :status, :created_at, :updated_at
+                  )
+                """,
+                row,
+            )
+
     def list_sources(self, course_id: str) -> list[Source]:
         rows = self.conn.execute(
             "SELECT * FROM wb_sources WHERE course_id = ? ORDER BY created_at, id",
             (course_id,),
         ).fetchall()
         return [Source(*row) for row in rows]
+
+    def source_file_paths(self, course_id: str) -> set[str]:
+        rows = self.conn.execute(
+            "SELECT file_path FROM wb_sources WHERE course_id = ?",
+            (course_id,),
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    def source_file_paths_for_root(self, root_dir: str) -> set[str]:
+        rows = self.conn.execute(
+            """
+            SELECT sources.file_path
+            FROM wb_sources AS sources
+            JOIN wb_courses AS courses ON courses.id = sources.course_id
+            WHERE courses.root_dir = ?
+            """,
+            (root_dir,),
+        ).fetchall()
+        return {row[0] for row in rows}
 
     def get_source(self, source_id: str) -> Source | None:
         row = self.conn.execute(
