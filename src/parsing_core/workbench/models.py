@@ -85,3 +85,57 @@ class RunRecord:
     stale: bool
     created_at: int
     updated_at: int
+
+
+@dataclass(frozen=True)
+class CourseTopic:
+    id: str
+    course_id: str
+    seq: int
+    title: str
+    description: str
+    status: str
+    confirmed: bool
+    stale_reason: str
+    created_at: int
+    updated_at: int
+
+
+@dataclass(frozen=True)
+class TopicChapterLink:
+    topic_id: str
+    chapter_id: str
+    created_at: int
+
+
+@dataclass(frozen=True)
+class TopicNoteBlock:
+    id: str
+    topic_id: str
+    kind: str
+    content: str
+    updated_at: int
+
+
+@dataclass(frozen=True)
+class TopicCard:
+    id: str
+    topic_id: str
+    card_type: str
+    title: str
+    content: str
+    source_refs_json: str
+    created_at: int
+
+
+@dataclass(frozen=True)
+class TopicRunRecord:
+    id: str
+    topic_id: str
+    round_key: str
+    status: str
+    input_fingerprint: str
+    output: str
+    error: str
+    started_at: int
+    finished_at: int | None

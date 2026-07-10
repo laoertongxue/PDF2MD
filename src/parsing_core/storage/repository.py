@@ -2,8 +2,30 @@ import sqlite3
 import time
 
 from parsing_core.models.dataclasses import AIArtifact, Section, Task
+from parsing_core.storage.connection_lock import (
+    atomic_repository_methods,
+    lock_repository_methods,
+    register_connection_lock,
+)
+
+_WRITE_METHODS = (
+    "create_task",
+    "update_task_status",
+    "delete_task",
+    "create_section",
+    "update_section_ai_status",
+    "create_artifact",
+    "increment_retry",
+    "create_batch",
+    "update_batch_status",
+    "increment_batch_completed",
+    "finish_batch",
+    "set_task_batch_id",
+)
 
 
+@lock_repository_methods
+@atomic_repository_methods(_WRITE_METHODS)
 class Repository:
     """封装 tasks/sections/ai_artifacts 三表的 CRUD。
 
@@ -12,7 +34,14 @@ class Repository:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
-        self._has_batch_id = "batch_id" in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        self._connection_lock, self._connection_lock_finalizer = register_connection_lock(
+            self,
+            conn,
+        )
+        with self._connection_lock:
+            self._has_batch_id = "batch_id" in {
+                row[1] for row in conn.execute("PRAGMA table_info(tasks)")
+            }
 
     # --- tasks ---
     def create_task(self, t: Task) -> None:
@@ -50,7 +79,6 @@ class Repository:
                     t.error_msg,
                 ),
             )
-        self.conn.commit()
 
     def get_task(self, task_id: str) -> Task | None:
         sql = (
@@ -81,7 +109,6 @@ class Repository:
             "UPDATE tasks SET status = ?, updated_at = ?, error_msg = ? WHERE id = ?",
             (status, int(time.time()), error_msg, task_id),
         )
-        self.conn.commit()
 
     def find_completed_task_by_file_sha256(self, sha: str) -> Task | None:
         sql = (
@@ -157,7 +184,6 @@ class Repository:
 
     def delete_task(self, task_id: str) -> None:
         self.conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        self.conn.commit()
 
     # --- sections ---
     def create_section(self, s: Section) -> None:
@@ -175,7 +201,6 @@ class Repository:
                 s.created_at,
             ),
         )
-        self.conn.commit()
 
     def list_sections(self, task_id: str) -> list[Section]:
         cur = self.conn.execute(
@@ -219,7 +244,6 @@ class Repository:
 
     def update_section_ai_status(self, section_id: str, status: str) -> None:
         self.conn.execute("UPDATE sections SET ai_status = ? WHERE id = ?", (status, section_id))
-        self.conn.commit()
 
     # --- ai_artifacts ---
     def create_artifact(self, a: AIArtifact) -> None:
@@ -238,7 +262,6 @@ class Repository:
                 a.created_at,
             ),
         )
-        self.conn.commit()
 
     def get_artifact_by_section(self, section_id: str) -> AIArtifact | None:
         cur = self.conn.execute(
@@ -267,7 +290,6 @@ class Repository:
             "UPDATE ai_artifacts SET retry_count = retry_count + 1 WHERE id = ?",
             (artifact_id,),
         )
-        self.conn.commit()
 
     def find_completed_artifact_by_section_sha256(self, sha: str) -> AIArtifact | None:
         cur = self.conn.execute(
@@ -311,7 +333,6 @@ class Repository:
                 b["finished_at"],
             ),
         )
-        self.conn.commit()
 
     def get_batch(self, batch_id: str) -> dict | None:
         cur = self.conn.execute(
@@ -378,22 +399,18 @@ class Repository:
 
     def update_batch_status(self, batch_id: str, status: str) -> None:
         self.conn.execute("UPDATE batches SET status = ? WHERE id = ?", (status, batch_id))
-        self.conn.commit()
 
     def increment_batch_completed(self, batch_id: str) -> None:
         self.conn.execute(
             "UPDATE batches SET completed_tasks = completed_tasks + 1 WHERE id = ?",
             (batch_id,),
         )
-        self.conn.commit()
 
     def finish_batch(self, batch_id: str, status: str) -> None:
         self.conn.execute(
             "UPDATE batches SET status = ?, finished_at = ? WHERE id = ?",
             (status, int(time.time()), batch_id),
         )
-        self.conn.commit()
 
     def set_task_batch_id(self, task_id: str, batch_id: str) -> None:
         self.conn.execute("UPDATE tasks SET batch_id = ? WHERE id = ?", (batch_id, task_id))
-        self.conn.commit()
