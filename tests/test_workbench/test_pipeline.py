@@ -139,7 +139,9 @@ def test_pipeline_wraps_markdown_sync_filesystem_errors(tmp_path, monkeypatch, o
 
 @pytest.mark.parametrize("operation", ["run_all", "rerun"])
 @pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
-def test_pipeline_preserves_markdown_sync_business_errors(tmp_path, monkeypatch, operation, error_type):
+def test_pipeline_preserves_markdown_sync_business_errors(
+    tmp_path, monkeypatch, operation, error_type
+):
     repo, chapter = setup_chapter(tmp_path)
     pipeline = IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "runs")
 

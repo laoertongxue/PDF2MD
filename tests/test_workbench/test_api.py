@@ -156,7 +156,9 @@ def test_create_source_rejects_file_outside_course_root(tmp_path):
 
 
 @pytest.mark.parametrize("write_operation", ["mkdir", "write_text"])
-def test_detect_chapters_maps_course_directory_write_errors_to_400(tmp_path, monkeypatch, write_operation):
+def test_detect_chapters_maps_course_directory_write_errors_to_400(
+    tmp_path, monkeypatch, write_operation
+):
     c = client(tmp_path, raise_server_exceptions=False)
     root = tmp_path / "external-course"
     course = c.post(
@@ -510,7 +512,11 @@ def test_run_hybrid_completed_chapter_returns_conflict(tmp_path, monkeypatch):
 
     monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
     monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
-    monkeypatch.setattr(routes_workbench.IntensiveReadingPipeline, "run_all", lambda self, chapter_id: None)
+    monkeypatch.setattr(
+        routes_workbench.IntensiveReadingPipeline,
+        "run_all",
+        lambda self, chapter_id: None,
+    )
 
     first = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
     second = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
@@ -701,7 +707,11 @@ def test_workbench_settings_test_connection(tmp_path, monkeypatch):
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps({"deepseek_model": "deepseek-reasoner"}), encoding="utf-8")
 
-    monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test-12345678")
+    monkeypatch.setattr(
+        routes_workbench,
+        "read_secret",
+        lambda service, account: "sk-test-12345678",
+    )
 
     class FakeDeepSeekClient:
         def __init__(self, api_key, model):

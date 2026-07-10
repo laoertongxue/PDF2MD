@@ -1,5 +1,5 @@
-from dataclasses import asdict, dataclass
 import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
@@ -19,4 +19,7 @@ def load_settings(path: str | Path) -> WorkbenchSettings:
 def save_settings(path: str | Path, settings: WorkbenchSettings) -> None:
     settings_path = Path(path)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(json.dumps(asdict(settings), ensure_ascii=False, indent=2), encoding="utf-8")
+    settings_path.write_text(
+        json.dumps(asdict(settings), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )

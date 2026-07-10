@@ -16,8 +16,8 @@ from parsing_core.serving.models.api import (
     SourceResponse,
     WorkbenchSettingsResponse,
 )
-from parsing_core.workbench.codex_cli import CodexCliError, CodexCliExecutor, resolve_codex_path
 from parsing_core.workbench.chapter_detection import detect_chapters
+from parsing_core.workbench.codex_cli import CodexCliError, CodexCliExecutor, resolve_codex_path
 from parsing_core.workbench.deepseek import DeepSeekClient, DeepSeekError, DeepSeekExecutor
 from parsing_core.workbench.executors import StubIntensiveReadingExecutor
 from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
@@ -163,7 +163,11 @@ async def create_source(course_id: str, req: SourceCreateRequest, sch: Scheduler
     course = repo.get_course(course_id)
     if course is None:
         raise HTTPException(404, "course not found")
-    file_path = _resolve_inside(req.file_path, Path(course.root_dir).resolve(), "file_path must be inside course root_dir")
+    file_path = _resolve_inside(
+        req.file_path,
+        Path(course.root_dir).resolve(),
+        "file_path must be inside course root_dir",
+    )
     if not file_path.is_file():
         raise HTTPException(400, "file_path must be an existing file")
     source = repo.create_source(course_id, req.kind, str(file_path), req.title)

@@ -41,7 +41,9 @@ def test_hybrid_routes_codex_rounds(round_key):
 
 
 def test_hybrid_rejects_unknown_round():
-    executor = HybridIntensiveReadingExecutor(RecordingExecutor("deepseek"), RecordingExecutor("codex"))
+    executor = HybridIntensiveReadingExecutor(
+        RecordingExecutor("deepseek"), RecordingExecutor("codex")
+    )
 
     with pytest.raises(ValueError, match="unsupported round: unknown"):
         executor.run("unknown", "# task")
