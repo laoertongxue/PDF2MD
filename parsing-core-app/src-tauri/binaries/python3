@@ -13,6 +13,13 @@ else
 fi
 
 export PYTHONPATH="${PDF2MD_PYTHONPATH:-$default_pythonpath}"
-python_bin="${PDF2MD_PYTHON:-python3}"
+
+if [[ -n "${PDF2MD_PYTHON:-}" ]]; then
+  python_bin="$PDF2MD_PYTHON"
+elif [[ -x "$HOME/Documents/PDF2MD/.venv/bin/python3" ]]; then
+  python_bin="$HOME/Documents/PDF2MD/.venv/bin/python3"
+else
+  python_bin="python3"
+fi
 
 exec "$python_bin" -m parsing_core.serving.serve "$@"
