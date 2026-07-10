@@ -40,3 +40,4 @@ jobs:
         with:
           files: parsing-core-app/src-tauri/target/release/bundle/dmg/*.dmg
           fail_on_unmatched_files: true
+          generate_release_notes: true
