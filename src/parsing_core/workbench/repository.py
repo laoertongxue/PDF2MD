@@ -40,6 +40,13 @@ def _normalize_source_refs_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
 
 
+def _normalize_stale_reason(reason: str) -> str:
+    reason = reason.strip()
+    if not reason or "\n" in reason or "\r" in reason:
+        raise ValueError("reason must be a nonempty single line")
+    return reason
+
+
 def _temporary_topic_sequences(existing: list[object], count: int) -> list[int]:
     sqlite_min = -(2**63)
     sqlite_max = 2**63 - 1
@@ -262,6 +269,168 @@ class WorkbenchRepository:
             (topic_id,),
         ).fetchall()
         return [Chapter(*row) for row in rows]
+
+    def list_topics_for_chapter(self, chapter_id: str) -> list[CourseTopic]:
+        rows = self.conn.execute(
+            """
+            SELECT t.*
+            FROM wb_topics t
+            JOIN wb_topic_chapters tc ON tc.topic_id = t.id
+            WHERE tc.chapter_id = ?
+            ORDER BY t.seq, t.id
+            """,
+            (chapter_id,),
+        ).fetchall()
+        return [self._topic(row) for row in rows]
+
+    def list_topic_chapter_reviews(
+        self,
+        topic_id: str,
+    ) -> list[tuple[str, str | None, bool]]:
+        rows = self.conn.execute(
+            """
+            SELECT c.id, r.status, COALESCE(r.stale, 0)
+            FROM wb_chapters c
+            JOIN wb_topic_chapters tc ON tc.chapter_id = c.id
+            LEFT JOIN wb_runs r
+              ON r.chapter_id = c.id AND r.round_key = 'review'
+            WHERE tc.topic_id = ?
+            ORDER BY c.source_id, c.seq, c.id
+            """,
+            (topic_id,),
+        ).fetchall()
+        return [(row[0], row[1], bool(row[2])) for row in rows]
+
+    def has_published_topic_output(self, topic_id: str) -> bool:
+        return self._has_published_topic_output(topic_id)
+
+    def _has_published_topic_output(self, topic_id: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT
+              EXISTS(SELECT 1 FROM wb_topic_note_blocks WHERE topic_id = ?)
+              OR EXISTS(SELECT 1 FROM wb_topic_cards WHERE topic_id = ?)
+              OR EXISTS(
+                SELECT 1 FROM wb_topic_runs
+                WHERE topic_id = ? AND status = 'COMPLETED'
+              )
+            """,
+            (topic_id, topic_id, topic_id),
+        ).fetchone()
+        return bool(row[0])
+
+    def invalidate_chapter_dependencies(
+        self,
+        chapter_id: str,
+        round_keys: list[str],
+        reason: str,
+    ) -> list[CourseTopic]:
+        reason = _normalize_stale_reason(reason)
+
+        with self._atomic(immediate=True):
+            if round_keys:
+                placeholders = ", ".join("?" for _ in round_keys)
+                self.conn.execute(
+                    f"""
+                    UPDATE wb_runs
+                    SET stale = 1, updated_at = ?
+                    WHERE chapter_id = ? AND round_key IN ({placeholders})
+                    """,
+                    (_now(), chapter_id, *round_keys),
+                )
+            rows = self.conn.execute(
+                """
+                SELECT t.*
+                FROM wb_topics t
+                JOIN wb_topic_chapters tc ON tc.topic_id = t.id
+                WHERE tc.chapter_id = ?
+                ORDER BY t.seq, t.id
+                """,
+                (chapter_id,),
+            ).fetchall()
+            topic_ids = [row[0] for row in rows]
+            for row in rows:
+                self._invalidate_topic(row, reason)
+            return [self._topic_by_id(topic_id) for topic_id in topic_ids]
+
+    def _invalidate_topic(self, row: sqlite3.Row | tuple, reason: str) -> None:
+        topic = self._topic(row)
+        if topic.status == "RUNNING":
+            self._append_stale_reason(topic.id, reason, keep_status=True)
+        elif self._has_published_topic_output(topic.id):
+            self._append_stale_reason(topic.id, reason, keep_status=False)
+        else:
+            self.conn.execute(
+                """
+                UPDATE wb_topics
+                SET status = ?, stale_reason = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (self._topic_readiness_status(topic), _now(), topic.id),
+            )
+
+    def _append_stale_reason(self, topic_id: str, reason: str, *, keep_status: bool) -> None:
+        status_assignment = "" if keep_status else "status = 'STALE',"
+        self.conn.execute(
+            f"""
+            UPDATE wb_topics
+            SET {status_assignment}
+                stale_reason = CASE
+                  WHEN stale_reason = '' THEN ?
+                  WHEN instr(
+                    char(10) || stale_reason || char(10),
+                    char(10) || ? || char(10)
+                  ) > 0 THEN stale_reason
+                  ELSE stale_reason || char(10) || ?
+                END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (reason, reason, reason, _now(), topic_id),
+        )
+
+    def _topic_readiness_status(self, topic: CourseTopic) -> str:
+        reviews = self.list_topic_chapter_reviews(topic.id)
+        if not topic.confirmed or not reviews:
+            return "DRAFT"
+        for _, status, stale in reviews:
+            if status != "DONE" or stale:
+                return "NOT_READY"
+        return "READY"
+
+    def _topic_by_id(self, topic_id: str) -> CourseTopic:
+        row = self.conn.execute("SELECT * FROM wb_topics WHERE id = ?", (topic_id,)).fetchone()
+        if row is None:
+            raise ValueError("topic not found")
+        return self._topic(row)
+
+    def refresh_topic_status(self, topic_id: str) -> CourseTopic:
+        with self._atomic(immediate=True):
+            topic = self._topic_by_id(topic_id)
+            if topic.status not in {"DRAFT", "NOT_READY", "READY"}:
+                return topic
+            status = self._topic_readiness_status(topic)
+            self.conn.execute(
+                """
+                UPDATE wb_topics
+                SET status = ?, stale_reason = '', updated_at = ?
+                WHERE id = ? AND status IN ('DRAFT', 'NOT_READY', 'READY')
+                """,
+                (status, _now(), topic_id),
+            )
+            return self._topic_by_id(topic_id)
+
+    def mark_topic_stale(self, topic_id: str, reason: str) -> CourseTopic:
+        reason = _normalize_stale_reason(reason)
+        with self._atomic(immediate=True):
+            row = self.conn.execute(
+                "SELECT * FROM wb_topics WHERE id = ?",
+                (topic_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("topic not found")
+            self._invalidate_topic(row, reason)
+            return self._topic_by_id(topic_id)
 
     def replace_topic_note_blocks(
         self,

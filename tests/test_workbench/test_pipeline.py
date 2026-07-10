@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from parsing_core.storage.schema import init_db
@@ -7,6 +9,7 @@ from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
 from parsing_core.workbench.pipeline import IntensiveReadingPipeline
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
+from parsing_core.workbench.topic_state import NOT_READY, READY, STALE, refresh_topic_status
 
 
 def setup_chapter(tmp_path):
@@ -20,6 +23,19 @@ def setup_chapter(tmp_path):
     chapter = repo.create_chapter(course.id, source.id, 0, "第一章", str(source_md))
     repo.update_chapter_status(chapter.id, "CONFIRMED")
     return repo, chapter
+
+
+def setup_topic(repo, chapter, *, published=False):
+    topic = repo.create_topic(
+        chapter.course_id,
+        len(repo.list_topics(chapter.course_id)),
+        "竞争优势",
+    )
+    repo.update_topic(topic.id, confirmed=True)
+    repo.replace_topic_chapters(topic.id, [chapter.id])
+    if published:
+        repo.replace_topic_note_blocks(topic.id, {"summary": "旧主题摘要"})
+    return topic
 
 
 def test_pipeline_creates_blocks_cards_and_runs(tmp_path):
@@ -98,6 +114,7 @@ def test_rerun_marks_later_rounds_stale(tmp_path):
     pipeline.rerun(chapter.id, "concepts")
 
     stale = {r.round_key for r in repo.list_runs(chapter.id) if r.stale}
+    assert "concepts" not in stale
     assert {"plain_explain", "application", "mermaid", "cards", "review"} <= stale
 
 
@@ -120,6 +137,19 @@ def test_pipeline_allows_failed_chapter_rerun(tmp_path):
     pipeline.run_all(chapter.id)
 
     assert len(repo.list_runs(chapter.id)) == 7
+
+
+@pytest.mark.parametrize("operation", ["run_all", "rerun"])
+def test_pipeline_rejects_missing_chapter_without_run_side_effects(tmp_path, operation):
+    repo, _ = setup_chapter(tmp_path)
+    pipeline = IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "runs")
+    args = ("missing-chapter",) if operation == "run_all" else ("missing-chapter", "concepts")
+
+    with pytest.raises(ValueError, match="^chapter not found$"):
+        getattr(pipeline, operation)(*args)
+
+    run_count = repo.conn.execute("SELECT COUNT(*) FROM wb_runs").fetchone()[0]
+    assert run_count == 0
 
 
 @pytest.mark.parametrize("operation", ["run_all", "rerun"])
@@ -181,3 +211,149 @@ def test_pipeline_skips_codex_task_files_for_mermaid_and_review_rounds(tmp_path)
     assert runs["mermaid"].input_path == ""
     assert runs["review"].input_path == ""
     assert runs["structure"].input_path.endswith(f"{chapter.id}-structure-task.md")
+
+
+def test_run_all_refreshes_unpublished_topic_after_review_completes(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+    topic = setup_topic(repo, chapter)
+    assert refresh_topic_status(repo, topic.id).status == NOT_READY
+
+    pipeline = IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "runs")
+    pipeline.run_all(chapter.id)
+
+    assert repo.get_topic(topic.id).status == READY
+
+
+@pytest.mark.parametrize("operation", ["run_all", "rerun"])
+def test_pipeline_invalidates_topics_before_execution(tmp_path, operation):
+    repo, chapter = setup_chapter(tmp_path)
+    IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "initial").run_all(
+        chapter.id
+    )
+    published_topic = setup_topic(repo, chapter, published=True)
+    unpublished_topic = setup_topic(repo, chapter)
+    assert refresh_topic_status(repo, unpublished_topic.id).status == READY
+    unrelated_source = repo.create_source(chapter.course_id, "attachment", "/tmp/case.pdf", "案例")
+    unrelated_chapter = repo.create_chapter(
+        chapter.course_id, unrelated_source.id, 0, "案例", str(tmp_path / "case.md")
+    )
+    unrelated = setup_topic(repo, unrelated_chapter, published=True)
+    repo.update_topic(unrelated.id, status=READY)
+    observed_statuses = []
+
+    class AssertingExecutor(StubIntensiveReadingExecutor):
+        def run(self, round_key: str, task_package: str) -> str:
+            if not observed_statuses:
+                observed_statuses.append(
+                    (
+                        repo.get_topic(unpublished_topic.id).status,
+                        repo.get_topic(published_topic.id).status,
+                        repo.get_topic(unrelated.id).status,
+                    )
+                )
+            return super().run(round_key, task_package)
+
+    pipeline = IntensiveReadingPipeline(repo, AssertingExecutor(), tmp_path / "changed")
+    args = (chapter.id,) if operation == "run_all" else (chapter.id, "concepts")
+    getattr(pipeline, operation)(*args)
+
+    assert observed_statuses == [(NOT_READY, STALE, READY)]
+    assert repo.get_topic(published_topic.id).status == STALE
+    assert repo.get_topic(unrelated.id).status == READY
+
+
+def test_failed_rerun_makes_unpublished_topic_not_ready(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+    IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "initial").run_all(
+        chapter.id
+    )
+    topic = setup_topic(repo, chapter)
+    assert refresh_topic_status(repo, topic.id).status == READY
+
+    class FailingExecutor(StubIntensiveReadingExecutor):
+        def run(self, round_key: str, task_package: str) -> str:
+            raise RuntimeError("executor failed")
+
+    pipeline = IntensiveReadingPipeline(repo, FailingExecutor(), tmp_path / "failed")
+    with pytest.raises(RuntimeError, match="executor failed"):
+        pipeline.rerun(chapter.id, "concepts")
+
+    assert repo.get_topic(topic.id).status == NOT_READY
+
+
+def test_failed_rerun_keeps_published_topic_stale_and_outputs(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+    IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "initial").run_all(
+        chapter.id
+    )
+    topic = setup_topic(repo, chapter, published=True)
+    old_notes = repo.list_topic_note_blocks(topic.id)
+
+    class FailingExecutor(StubIntensiveReadingExecutor):
+        def run(self, round_key: str, task_package: str) -> str:
+            raise RuntimeError("executor failed")
+
+    pipeline = IntensiveReadingPipeline(repo, FailingExecutor(), tmp_path / "failed")
+    with pytest.raises(RuntimeError, match="executor failed"):
+        pipeline.rerun(chapter.id, "concepts")
+
+    assert repo.get_topic(topic.id).status == STALE
+    assert repo.list_topic_note_blocks(topic.id) == old_notes
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "error_type"),
+    [
+        ("missing_source", FileNotFoundError),
+        ("mkdir", PermissionError),
+        ("write_package", OSError),
+        ("executor", RuntimeError),
+    ],
+)
+def test_rerun_records_safe_failed_run_for_preparation_and_execution_errors(
+    tmp_path,
+    monkeypatch,
+    failure_mode,
+    error_type,
+):
+    repo, chapter = setup_chapter(tmp_path)
+    IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "initial").run_all(
+        chapter.id
+    )
+    run_dir = tmp_path / "failed"
+
+    class FailingExecutor(StubIntensiveReadingExecutor):
+        def run(self, round_key: str, task_package: str) -> str:
+            if failure_mode == "executor":
+                raise RuntimeError(f"cannot access {tmp_path}/private/model")
+            return super().run(round_key, task_package)
+
+    if failure_mode == "missing_source":
+        Path(chapter.source_md_path).unlink()
+    elif failure_mode == "mkdir":
+        original_mkdir = Path.mkdir
+
+        def fail_run_dir_mkdir(path, *args, **kwargs):
+            if path == run_dir:
+                raise PermissionError(f"cannot create {tmp_path}/private/runs")
+            return original_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", fail_run_dir_mkdir)
+    elif failure_mode == "write_package":
+
+        def fail_write_package(package, base_dir):
+            raise OSError(f"cannot write {tmp_path}/private/task.md")
+
+        monkeypatch.setattr(pipeline_module, "write_task_package", fail_write_package)
+
+    pipeline = IntensiveReadingPipeline(repo, FailingExecutor(), run_dir)
+    with pytest.raises(error_type):
+        pipeline.rerun(chapter.id, "concepts")
+
+    runs = {run.round_key: run for run in repo.list_runs(chapter.id)}
+    assert runs["concepts"].status == "FAILED"
+    assert runs["concepts"].stale is False
+    assert error_type.__name__ in runs["concepts"].output
+    assert "intensive reading round failed" in runs["concepts"].output
+    assert str(tmp_path) not in runs["concepts"].output
+    assert runs["review"].stale is True
