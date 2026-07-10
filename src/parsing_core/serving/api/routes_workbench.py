@@ -22,7 +22,7 @@ from parsing_core.workbench.deepseek import DeepSeekClient, DeepSeekError, DeepS
 from parsing_core.workbench.executors import StubIntensiveReadingExecutor
 from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
 from parsing_core.workbench.keychain import KeychainError, mask_secret, read_secret, save_secret
-from parsing_core.workbench.pipeline import IntensiveReadingPipeline
+from parsing_core.workbench.pipeline import ChapterMarkdownSyncError, IntensiveReadingPipeline
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.settings import WorkbenchSettings, load_settings, save_settings
 
@@ -33,10 +33,6 @@ KEYCHAIN_ACCOUNT = "api-key"
 
 def _repo(sch: SchedulerDep) -> WorkbenchRepository:
     return WorkbenchRepository(sch._query_orch.repo.conn)
-
-
-def _workbench_base(sch: SchedulerDep) -> Path:
-    return (Path(sch._query_orch.fs.base_dir) / "workbench-courses").resolve()
 
 
 def _settings_path(sch: SchedulerDep) -> Path:
@@ -66,6 +62,17 @@ def _resolve_inside(path: str, base: Path, message: str) -> Path:
     if not resolved.is_relative_to(base):
         raise HTTPException(400, message)
     return resolved
+
+
+def _resolve_absolute_dir(path: str) -> Path:
+    raw = Path(path)
+    if not raw.is_absolute():
+        raise HTTPException(400, "root_dir must be an absolute path")
+    expanded = raw.expanduser()
+    try:
+        return expanded.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(400, "root_dir is invalid") from exc
 
 
 def _course_response(course) -> CourseResponse:
@@ -136,8 +143,11 @@ def _safe_dir_name(name: str) -> str:
 
 @router.post("/courses", response_model=CourseResponse)
 async def create_course(req: CourseCreateRequest, sch: SchedulerDep):
-    root_dir = _resolve_inside(req.root_dir, _workbench_base(sch), "root_dir must be inside workbench-courses")
-    root_dir.mkdir(parents=True, exist_ok=True)
+    root_dir = _resolve_absolute_dir(req.root_dir)
+    try:
+        root_dir.mkdir(parents=True, exist_ok=True)
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(400, "root_dir cannot be created") from exc
     course = _repo(sch).create_course(req.title, req.description, str(root_dir))
     return _course_response(course)
 
@@ -188,11 +198,17 @@ async def detect_source_chapters(source_id: str, sch: SchedulerDep):
         raise HTTPException(409, "source has confirmed or generated chapters")
     repo.delete_chapters_by_source(source.id)
     out_dir = Path(course.root_dir) / _safe_dir_name(source.title)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(400, "course directory cannot be written") from exc
     chapters = []
     for candidate in detect_chapters(markdown):
         chapter_path = out_dir / _chapter_filename(candidate.seq, candidate.title)
-        chapter_path.write_text(candidate.raw_md, encoding="utf-8")
+        try:
+            chapter_path.write_text(candidate.raw_md, encoding="utf-8")
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(400, "course directory cannot be written") from exc
         chapters.append(
             repo.create_chapter(
                 course_id=course.id,
@@ -304,6 +320,9 @@ async def run_chapter(chapter_id: str, req: RunChapterRequest, sch: SchedulerDep
     run_dir = Path(sch._query_orch.fs.base_dir) / "workbench-runs"
     try:
         IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), run_dir).run_all(chapter_id)
+    except ChapterMarkdownSyncError as exc:
+        repo.update_chapter_status(chapter_id, "FAILED")
+        raise HTTPException(400, "course directory cannot be written") from exc
     except Exception as exc:
         repo.update_chapter_status(chapter_id, "FAILED")
         raise HTTPException(500, str(exc)) from exc
@@ -336,6 +355,9 @@ async def run_chapter_hybrid(chapter_id: str, sch: SchedulerDep):
 
     try:
         IntensiveReadingPipeline(repo, executor, run_dir).run_all(chapter_id)
+    except ChapterMarkdownSyncError as exc:
+        repo.update_chapter_status(chapter_id, "FAILED")
+        raise HTTPException(400, "course directory cannot be written") from exc
     except Exception as exc:
         repo.update_chapter_status(chapter_id, "FAILED")
         raise HTTPException(500, str(exc)) from exc

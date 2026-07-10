@@ -1,6 +1,7 @@
 import pytest
 
 from parsing_core.storage.schema import init_db
+from parsing_core.workbench import pipeline as pipeline_module
 from parsing_core.workbench.executors import StubIntensiveReadingExecutor
 from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
 from parsing_core.workbench.pipeline import IntensiveReadingPipeline
@@ -119,6 +120,37 @@ def test_pipeline_allows_failed_chapter_rerun(tmp_path):
     pipeline.run_all(chapter.id)
 
     assert len(repo.list_runs(chapter.id)) == 7
+
+
+@pytest.mark.parametrize("operation", ["run_all", "rerun"])
+def test_pipeline_wraps_markdown_sync_filesystem_errors(tmp_path, monkeypatch, operation):
+    repo, chapter = setup_chapter(tmp_path)
+    pipeline = IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "runs")
+
+    def fail_sync(repo, chapter_id):
+        raise OSError(f"cannot write {tmp_path}/private/intensive-note.md")
+
+    monkeypatch.setattr(pipeline_module, "sync_chapter_markdown", fail_sync)
+    args = (chapter.id,) if operation == "run_all" else (chapter.id, "concepts")
+
+    with pytest.raises(pipeline_module.ChapterMarkdownSyncError):
+        getattr(pipeline, operation)(*args)
+
+
+@pytest.mark.parametrize("operation", ["run_all", "rerun"])
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
+def test_pipeline_preserves_markdown_sync_business_errors(tmp_path, monkeypatch, operation, error_type):
+    repo, chapter = setup_chapter(tmp_path)
+    pipeline = IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "runs")
+
+    def fail_sync(repo, chapter_id):
+        raise error_type("chapter not found")
+
+    monkeypatch.setattr(pipeline_module, "sync_chapter_markdown", fail_sync)
+    args = (chapter.id,) if operation == "run_all" else (chapter.id, "concepts")
+
+    with pytest.raises(error_type, match="chapter not found"):
+        getattr(pipeline, operation)(*args)
 
 
 def test_pipeline_skips_codex_task_files_for_mermaid_and_review_rounds(tmp_path):

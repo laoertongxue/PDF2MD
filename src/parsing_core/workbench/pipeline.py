@@ -11,6 +11,17 @@ CODEX_ROUNDS = {"mermaid", "review"}
 MERMAID_FENCE_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
+class ChapterMarkdownSyncError(Exception):
+    pass
+
+
+def _sync_chapter_markdown(repo: WorkbenchRepository, chapter_id: str) -> None:
+    try:
+        sync_chapter_markdown(repo, chapter_id)
+    except OSError as exc:
+        raise ChapterMarkdownSyncError from exc
+
+
 class IntensiveReadingPipeline:
     def __init__(
         self,
@@ -31,7 +42,7 @@ class IntensiveReadingPipeline:
 
         for round_key in ROUNDS:
             self._run_round(chapter_id, round_key)
-        sync_chapter_markdown(self.repo, chapter_id)
+        _sync_chapter_markdown(self.repo, chapter_id)
 
     def rerun(self, chapter_id: str, round_key: str) -> None:
         if round_key not in ROUNDS:
@@ -39,7 +50,7 @@ class IntensiveReadingPipeline:
 
         self._run_round(chapter_id, round_key)
         self.repo.mark_runs_stale(chapter_id, ROUNDS[ROUNDS.index(round_key) + 1 :])
-        sync_chapter_markdown(self.repo, chapter_id)
+        _sync_chapter_markdown(self.repo, chapter_id)
 
     def _run_round(self, chapter_id: str, round_key: str) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)

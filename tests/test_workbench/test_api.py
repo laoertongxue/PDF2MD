@@ -1,20 +1,23 @@
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from parsing_core.llm.stub_client import StubLLMClient
 from parsing_core.orchestrator import Orchestrator
+from parsing_core.serving.api import routes_workbench
 from parsing_core.serving.serve import build_app
 from parsing_core.storage.fs_layout import FsLayout
 from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
-from parsing_core.serving.api import routes_workbench
+from parsing_core.workbench import pipeline as workbench_pipeline
 from parsing_core.workbench.keychain import KeychainError
+from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
 
 
-def client(tmp_path):
+def client(tmp_path, *, raise_server_exceptions=True):
     db_path = tmp_path / "serve.db"
 
     def factory():
@@ -28,7 +31,7 @@ def client(tmp_path):
             str(db_path),
         )
 
-    return TestClient(build_app(factory))
+    return TestClient(build_app(factory), raise_server_exceptions=raise_server_exceptions)
 
 
 def course_root(tmp_path):
@@ -69,15 +72,69 @@ def test_create_course_and_list(tmp_path):
     assert res.json()[0]["id"] == course_id
 
 
-def test_create_course_rejects_root_outside_workbench_base(tmp_path):
+def test_create_course_accepts_absolute_root_outside_workbench_base(tmp_path):
+    c = client(tmp_path)
+    root = tmp_path / "outside"
+
+    res = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "MBA", "root_dir": str(root)},
+    )
+
+    assert res.status_code == 200
+    assert res.json()["root_dir"] == str(root.resolve())
+    assert root.is_dir()
+
+
+def test_create_course_rejects_relative_root(tmp_path):
     c = client(tmp_path)
 
     res = c.post(
         "/api/workbench/courses",
-        json={"title": "战略管理", "description": "MBA", "root_dir": str(tmp_path / "outside")},
+        json={"title": "战略管理", "description": "MBA", "root_dir": "relative-course"},
     )
 
     assert res.status_code == 400
+    assert res.json()["detail"] == "root_dir must be an absolute path"
+
+
+def test_create_course_rejects_home_relative_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    c = client(tmp_path)
+
+    res = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "MBA", "root_dir": "~/MBA"},
+    )
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "root_dir must be an absolute path"
+
+
+def test_create_course_rejects_root_that_is_a_file(tmp_path):
+    c = client(tmp_path)
+    root = tmp_path / "course.txt"
+    root.write_text("not a directory", encoding="utf-8")
+
+    res = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "MBA", "root_dir": str(root)},
+    )
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "root_dir cannot be created"
+
+
+def test_create_course_rejects_nul_in_root_path(tmp_path):
+    c = client(tmp_path, raise_server_exceptions=False)
+
+    res = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "MBA", "root_dir": f"{tmp_path}/bad\0path"},
+    )
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "root_dir is invalid"
 
 
 def test_create_source_rejects_file_outside_course_root(tmp_path):
@@ -96,6 +153,32 @@ def test_create_source_rejects_file_outside_course_root(tmp_path):
     )
 
     assert res.status_code == 400
+
+
+@pytest.mark.parametrize("write_operation", ["mkdir", "write_text"])
+def test_detect_chapters_maps_course_directory_write_errors_to_400(tmp_path, monkeypatch, write_operation):
+    c = client(tmp_path, raise_server_exceptions=False)
+    root = tmp_path / "external-course"
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source_md = root / "source.md"
+    source_md.write_text("## 第一章\n战略是选择。", encoding="utf-8")
+    source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"kind": "main", "file_path": str(source_md), "title": "战略教材"},
+    ).json()
+
+    def fail_write(*args, **kwargs):
+        raise OSError("course directory is read-only")
+
+    monkeypatch.setattr(routes_workbench.Path, write_operation, fail_write)
+
+    res = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters")
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "course directory cannot be written"
 
 
 def test_cors_allows_local_app_origins_but_not_wildcard(tmp_path):
@@ -325,7 +408,8 @@ def test_run_hybrid_missing_codex_returns_400_without_running_pipeline(tmp_path,
     assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "CONFIRMED"
 
 
-def test_run_hybrid_pipeline_failure_marks_chapter_failed(tmp_path, monkeypatch):
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
+def test_run_hybrid_pipeline_failure_marks_chapter_failed(tmp_path, monkeypatch, error_type):
     c = client(tmp_path)
     root = course_root(tmp_path)
     _, _, chapter = confirmed_chapter(c, root)
@@ -334,7 +418,7 @@ def test_run_hybrid_pipeline_failure_marks_chapter_failed(tmp_path, monkeypatch)
     monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
 
     def fake_run_all(self, chapter_id):
-        raise RuntimeError("boom")
+        raise error_type("boom")
 
     monkeypatch.setattr(routes_workbench.IntensiveReadingPipeline, "run_all", fake_run_all)
 
@@ -342,6 +426,53 @@ def test_run_hybrid_pipeline_failure_marks_chapter_failed(tmp_path, monkeypatch)
 
     assert res.status_code == 500
     assert res.json()["detail"] == "boom"
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "initial_status"),
+    [
+        ("run", {"executor": "stub"}, "CONFIRMED"),
+        ("run-hybrid", None, "CONFIRMED"),
+        ("run-hybrid", None, "FAILED"),
+    ],
+)
+def test_chapter_run_maps_markdown_sync_errors_to_safe_400(
+    tmp_path,
+    monkeypatch,
+    endpoint,
+    payload,
+    initial_status,
+):
+    c = client(tmp_path)
+    root = tmp_path / "external-course"
+    _, _, chapter = confirmed_chapter(c, root)
+    if initial_status == "FAILED":
+        conn = init_db(str(tmp_path / "serve.db"))
+        WorkbenchRepository(conn).update_chapter_status(chapter["id"], "FAILED")
+        conn.close()
+
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+    stub = routes_workbench.StubIntensiveReadingExecutor()
+    monkeypatch.setattr(
+        routes_workbench.HybridIntensiveReadingExecutor,
+        "run",
+        lambda self, round_key, content: stub.run(round_key, content),
+    )
+
+    leaked_path = root / "private" / "intensive-note.md"
+
+    def fail_sync(repo, chapter_id):
+        raise OSError(f"cannot write {leaked_path}")
+
+    monkeypatch.setattr(workbench_pipeline, "sync_chapter_markdown", fail_sync)
+
+    res = c.post(f"/api/workbench/chapters/{chapter['id']}/{endpoint}", json=payload)
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "course directory cannot be written"
+    assert str(root) not in res.text
     assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
 
 
