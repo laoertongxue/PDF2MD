@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from parsing_core.serving.api.deps import set_scheduler
 from parsing_core.serving.api.routes_batches import router as batches_router
 from parsing_core.serving.api.routes_tasks import router as tasks_router
+from parsing_core.serving.api.routes_topics import router as topics_router
 from parsing_core.serving.api.routes_workbench import router as workbench_router
 from parsing_core.serving.api.routes_ws import router as ws_router
 from parsing_core.serving.config import (
@@ -53,6 +54,7 @@ def build_app(
 
     app.include_router(batches_router)
     app.include_router(tasks_router)
+    app.include_router(topics_router)
     app.include_router(workbench_router)
     app.include_router(ws_router)
     return app

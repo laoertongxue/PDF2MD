@@ -179,6 +179,88 @@ class WorkbenchRepository:
             )
         return CourseTopic(**row)
 
+    def create_topic_with_chapters(
+        self,
+        course_id: str,
+        title: str,
+        description: str = "",
+        chapter_ids: list[str] | None = None,
+    ) -> CourseTopic:
+        with self._atomic(immediate=True):
+            if self.get_course(course_id) is None:
+                raise ValueError("course not found")
+            seq = self.conn.execute(
+                "SELECT COALESCE(MAX(seq), -1) + 1 FROM wb_topics WHERE course_id = ?",
+                (course_id,),
+            ).fetchone()[0]
+            topic = self.create_topic(course_id, seq, title, description)
+            if chapter_ids is not None:
+                if not chapter_ids:
+                    raise ValueError("chapter_ids must not be empty")
+                self.replace_topic_chapters(topic.id, chapter_ids)
+            self._mark_topic_markdown_pending(topic.id)
+            return self._topic_by_id(topic.id)
+
+    def confirm_course_topics(self, course_id: str) -> list[CourseTopic]:
+        with self._atomic(immediate=True):
+            if self.get_course(course_id) is None:
+                raise ValueError("course not found")
+            topics = self.list_topics(course_id)
+            if not topics:
+                raise ValueError("course has no topics")
+            for topic in topics:
+                chapters = self.list_topic_chapters(topic.id)
+                if not chapters or any(chapter.course_id != course_id for chapter in chapters):
+                    raise ValueError("every topic must map to this course")
+            now = _now()
+            self.conn.execute(
+                "UPDATE wb_topics SET confirmed = 1, updated_at = ? WHERE course_id = ?",
+                (now, course_id),
+            )
+            for topic in topics:
+                status = self._topic_readiness_status(self._topic_by_id(topic.id))
+                self.conn.execute(
+                    "UPDATE wb_topics SET status = ?, updated_at = ? WHERE id = ?",
+                    (status, now, topic.id),
+                )
+                self._mark_topic_markdown_pending(topic.id, now=now)
+        return self.list_topics(course_id)
+
+    def edit_topic_content(
+        self, topic_id: str, *, title: str | None = None, description: str | None = None
+    ) -> CourseTopic:
+        with self._atomic(immediate=True):
+            topic = self._topic_by_id(topic_id)
+            if topic.status == "RUNNING":
+                raise ValueError("topic is already running")
+            self.update_topic(topic_id, title=title, description=description)
+            self._mark_topic_markdown_pending(topic_id)
+            if self._has_published_topic_output(topic_id):
+                return self.mark_topic_stale(topic_id, "topic metadata changed")
+            return self.refresh_topic_status(topic_id)
+
+    def replace_topic_chapters_and_refresh(
+        self, topic_id: str, chapter_ids: list[str]
+    ) -> CourseTopic:
+        with self._atomic(immediate=True):
+            topic = self._topic_by_id(topic_id)
+            if topic.status == "RUNNING":
+                raise ValueError("topic is already running")
+            self.replace_topic_chapters(topic_id, chapter_ids)
+            self._mark_topic_markdown_pending(topic_id)
+            if self._has_published_topic_output(topic_id):
+                return self.mark_topic_stale(topic_id, "topic chapter mapping changed")
+            return self.refresh_topic_status(topic_id)
+
+    def delete_topic_guarded(self, topic_id: str) -> None:
+        with self._atomic(immediate=True):
+            topic = self._topic_by_id(topic_id)
+            if topic.status == "RUNNING":
+                raise ValueError("topic is already running")
+            if self._has_published_topic_output(topic_id):
+                raise ValueError("topic with published output is protected")
+            self.delete_topic(topic_id)
+
     def get_topic(self, topic_id: str) -> CourseTopic | None:
         row = self.conn.execute("SELECT * FROM wb_topics WHERE id = ?", (topic_id,)).fetchone()
         return self._topic(row) if row else None
@@ -189,6 +271,39 @@ class WorkbenchRepository:
             (course_id,),
         ).fetchall()
         return [self._topic(row) for row in rows]
+
+    def course_topic_api_state(self, course_id: str) -> dict[str, dict]:
+        state: dict[str, dict] = {
+            topic.id: {"chapter_ids": [], "blocking_chapter_ids": [], "sync": None}
+            for topic in self.list_topics(course_id)
+        }
+        links = self.conn.execute(
+            """
+            SELECT tc.topic_id, c.id, r.status, COALESCE(r.stale, 0)
+            FROM wb_topic_chapters tc
+            JOIN wb_topics t ON t.id = tc.topic_id
+            JOIN wb_chapters c ON c.id = tc.chapter_id
+            LEFT JOIN wb_runs r ON r.chapter_id = c.id AND r.round_key = 'review'
+            WHERE t.course_id = ?
+            ORDER BY t.seq, c.source_id, c.seq, c.id
+            """,
+            (course_id,),
+        ).fetchall()
+        for topic_id, chapter_id, review_status, stale in links:
+            state[topic_id]["chapter_ids"].append(chapter_id)
+            if review_status != "DONE" or stale:
+                state[topic_id]["blocking_chapter_ids"].append(chapter_id)
+        sync_rows = self.conn.execute(
+            """
+            SELECT s.* FROM wb_topic_markdown_sync s
+            JOIN wb_topics t ON t.id = s.topic_id
+            WHERE t.course_id = ?
+            """,
+            (course_id,),
+        ).fetchall()
+        for row in sync_rows:
+            state[row[0]]["sync"] = TopicMarkdownSyncState(*row)
+        return state
 
     def replace_course_topic_drafts(
         self,
@@ -250,6 +365,7 @@ class WorkbenchRepository:
                     """,
                     ((topic_id, chapter_id, now) for chapter_id in spec["chapter_ids"]),
                 )
+                self._mark_topic_markdown_pending(topic_id, now=now)
         return self.list_topics(course_id)
 
     def course_topic_outline_snapshot(self, course_id: str) -> tuple[dict, str]:
@@ -382,7 +498,21 @@ class WorkbenchRepository:
                     "UPDATE wb_topics SET seq = ?, updated_at = ? WHERE id = ?",
                     (seq, now, topic_id),
                 )
+                self._mark_topic_markdown_pending(topic_id, now=now)
         return self.list_topics(course_id)
+
+    def _mark_topic_markdown_pending(self, topic_id: str, *, now: int | None = None) -> None:
+        now = _now() if now is None else now
+        self.conn.execute(
+            """
+            INSERT INTO wb_topic_markdown_sync (topic_id, status, error, updated_at)
+            VALUES (?, 'PENDING', '', ?)
+            ON CONFLICT(topic_id) DO UPDATE SET
+              status = 'PENDING', error = '', updated_at = excluded.updated_at,
+              owner_id = '', lease_expires_at = 0
+            """,
+            (topic_id, now),
+        )
 
     def delete_topic(self, topic_id: str) -> None:
         with self._atomic():

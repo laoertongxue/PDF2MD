@@ -1,10 +1,14 @@
+import fcntl
 import json
 import os
+import stat
 from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 
 from parsing_core.workbench.markdown_sync import (
+    LOCK_NAME,
+    OWNER_NAME,
     _first_line_regular_file,
     _pure_mermaid,
     atomic_write_bundle_fd,
@@ -57,6 +61,323 @@ class TopicMarkdownSyncError(Exception):
     pass
 
 
+class TopicMarkdownDeleteError(Exception):
+    pass
+
+
+def _delete_race_hook(phase: str, parent_fd: int, topic_fd: int, name: str) -> None:
+    pass
+
+
+def _identity(fd: int) -> tuple[int, int]:
+    info = os.fstat(fd)
+    return info.st_dev, info.st_ino
+
+
+def _entry_identity(parent_fd: int, name: str) -> tuple[int, int]:
+    info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("topic directory identity is protected")
+    return info.st_dev, info.st_ino
+
+
+def _regular_entry_identity(dir_fd: int, name: str) -> tuple[int, int]:
+    info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("topic directory contains protected file type")
+    return info.st_dev, info.st_ino
+
+
+def _read_regular_file_at(dir_fd: int, name: str) -> bytes:
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except OSError as exc:
+        raise ValueError("topic directory contains protected file type") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("topic directory contains protected file type")
+        chunks = []
+        while chunk := os.read(fd, 64 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _validate_delete_directory(
+    parent_fd: int,
+    topic_fd: int,
+    name: str,
+    expected_identity: tuple[int, int],
+    expected_lock_identity: tuple[int, int],
+    topic_id: str,
+) -> dict[str, bytes]:
+    if (
+        _identity(topic_fd) != expected_identity
+        or _entry_identity(parent_fd, name) != expected_identity
+    ):
+        raise ValueError("topic directory identity is protected")
+    if _regular_entry_identity(topic_fd, LOCK_NAME) != expected_lock_identity:
+        raise ValueError("topic directory lock is protected")
+    expected_names = {LOCK_NAME, OWNER_NAME, "topic-map.md"}
+    if set(os.listdir(topic_fd)) != expected_names:
+        raise ValueError("topic directory contains protected user files")
+    contents = {item: _read_regular_file_at(topic_fd, item) for item in expected_names}
+    if contents[OWNER_NAME].splitlines()[:1] != [f"topic:{topic_id}".encode()]:
+        raise ValueError("topic directory ownership is protected")
+    marker = f"<!-- topic-id: {topic_id} -->".encode()
+    if contents["topic-map.md"].splitlines()[:1] != [marker]:
+        raise ValueError("topic directory ownership is protected")
+    return contents
+
+
+def _restore_delete_directory(
+    parent_fd: int,
+    topic_fd: int,
+    name: str,
+    expected_identity: tuple[int, int],
+    contents: dict[str, bytes],
+    removed_names: set[str],
+) -> None:
+    try:
+        current_identity = _entry_identity(parent_fd, name)
+    except FileNotFoundError:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+        except FileExistsError as exc:
+            raise ValueError("topic deletion recovery found protected concurrent content") from exc
+        restore_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+    else:
+        if current_identity != expected_identity or _identity(topic_fd) != expected_identity:
+            raise ValueError("topic deletion recovery found protected identity change")
+        restore_fd = os.dup(topic_fd)
+    try:
+        for item in removed_names:
+            content = contents[item]
+            try:
+                fd = os.open(
+                    item,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=restore_fd,
+                )
+            except FileExistsError as exc:
+                raise ValueError(
+                    "topic deletion recovery found protected concurrent content"
+                ) from exc
+            try:
+                os.write(fd, content)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        os.fsync(restore_fd)
+    finally:
+        os.close(restore_fd)
+
+
+def _remove_created_placeholder(
+    parent_fd: int,
+    topic_fd: int,
+    name: str,
+    expected_identity: tuple[int, int],
+    lock_identity: tuple[int, int],
+) -> None:
+    try:
+        current_identity = _entry_identity(parent_fd, name)
+    except FileNotFoundError:
+        return
+    if current_identity != expected_identity or _identity(topic_fd) != expected_identity:
+        raise ValueError("topic placeholder identity changed during deletion")
+    if set(os.listdir(topic_fd)) != {LOCK_NAME}:
+        raise ValueError("topic placeholder contains protected concurrent content")
+    if _regular_entry_identity(topic_fd, LOCK_NAME) != lock_identity:
+        raise ValueError("topic placeholder lock changed during deletion")
+    os.unlink(LOCK_NAME, dir_fd=topic_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def delete_unpublished_topic(repo: WorkbenchRepository, topic_id: str) -> None:
+    topic = repo.get_topic(topic_id)
+    if topic is None:
+        raise ValueError("topic not found")
+    course = repo.get_course(topic.course_id)
+    if course is None:
+        raise ValueError("course not found")
+
+    course_root = Path(course.root_dir)
+    name = f"{topic.seq + 1:02d}-{safe_name(topic.title)}"
+    parent_fd = open_secure_directory(course_root, ["课程主题"])
+    try:
+        _delete_race_hook("before_target_open", parent_fd, -1, name)
+        placeholder_created = False
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            placeholder_created = True
+        except FileExistsError:
+            pass
+        try:
+            topic_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ValueError("topic directory identity is protected") from exc
+        try:
+            expected_identity = _identity(topic_fd)
+            if placeholder_created:
+                lock_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            else:
+                lock_flags = os.O_RDWR | os.O_NOFOLLOW
+            try:
+                lock_fd = os.open(LOCK_NAME, lock_flags, 0o600, dir_fd=topic_fd)
+            except FileNotFoundError:
+                entries = set(os.listdir(topic_fd))
+                if not entries <= {OWNER_NAME, "topic-map.md"} or OWNER_NAME not in entries:
+                    raise ValueError("topic directory lock is protected") from None
+                owner = _read_regular_file_at(topic_fd, OWNER_NAME)
+                if owner.splitlines()[:1] != [f"topic:{topic_id}".encode()]:
+                    raise ValueError("topic directory ownership is protected") from None
+                try:
+                    lock_fd = os.open(
+                        LOCK_NAME,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=topic_fd,
+                    )
+                except FileExistsError:
+                    lock_fd = os.open(LOCK_NAME, os.O_RDWR | os.O_NOFOLLOW, dir_fd=topic_fd)
+            except OSError as exc:
+                raise ValueError("topic directory lock is protected") from exc
+            try:
+                if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+                    raise ValueError("topic directory lock is protected")
+                lock_identity = _identity(lock_fd)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                with repo._connection_lock:
+                    placeholder_resolved = False
+                    contents: dict[str, bytes] = {}
+                    removed_names: set[str] = set()
+                    try:
+                        if placeholder_created:
+                            _delete_race_hook("placeholder_locked", parent_fd, topic_fd, name)
+                        if repo.conn.in_transaction:
+                            raise ValueError(
+                                "topic deletion requires outermost transaction ownership"
+                            )
+                        current_topic = repo.get_topic(topic_id)
+                        if current_topic is None:
+                            raise ValueError("topic not found")
+                        current_course = repo.get_course(current_topic.course_id)
+                        if current_course is None:
+                            raise ValueError("course not found")
+                        current_name = (
+                            f"{current_topic.seq + 1:02d}-{safe_name(current_topic.title)}"
+                        )
+                        if (
+                            current_topic.course_id != topic.course_id
+                            or current_course.root_dir != course.root_dir
+                            or current_name != name
+                        ):
+                            raise ValueError("topic directory identity is protected")
+                        if current_topic.status == "RUNNING":
+                            raise ValueError("topic is already running")
+                        if repo.has_published_topic_output(topic_id):
+                            raise ValueError("topic with published output is protected")
+
+                        if placeholder_created:
+                            with repo._atomic(immediate=True):
+                                repo.delete_topic_guarded(topic_id)
+                                _remove_created_placeholder(
+                                    parent_fd,
+                                    topic_fd,
+                                    name,
+                                    expected_identity,
+                                    lock_identity,
+                                )
+                            placeholder_resolved = True
+                            return
+
+                        contents = _validate_delete_directory(
+                            parent_fd,
+                            topic_fd,
+                            name,
+                            expected_identity,
+                            lock_identity,
+                            topic_id,
+                        )
+                        _delete_race_hook("before_revalidate", parent_fd, topic_fd, name)
+                        contents = _validate_delete_directory(
+                            parent_fd,
+                            topic_fd,
+                            name,
+                            expected_identity,
+                            lock_identity,
+                            topic_id,
+                        )
+                        _delete_race_hook("before_unlink", parent_fd, topic_fd, name)
+                        os.unlink("topic-map.md", dir_fd=topic_fd)
+                        removed_names.add("topic-map.md")
+                        os.unlink(OWNER_NAME, dir_fd=topic_fd)
+                        removed_names.add(OWNER_NAME)
+                        _delete_race_hook("after_generated_unlink", parent_fd, topic_fd, name)
+                        if set(os.listdir(topic_fd)) != {LOCK_NAME}:
+                            raise ValueError(
+                                "topic directory contains protected concurrent content"
+                            )
+                        if _entry_identity(parent_fd, name) != expected_identity:
+                            raise ValueError("topic directory identity is protected")
+                        if _regular_entry_identity(topic_fd, LOCK_NAME) != lock_identity:
+                            raise ValueError("topic directory lock is protected")
+                        os.unlink(LOCK_NAME, dir_fd=topic_fd)
+                        removed_names.add(LOCK_NAME)
+                        os.rmdir(name, dir_fd=parent_fd)
+                        repo.delete_topic_guarded(topic_id)
+                    except Exception as exc:
+                        if removed_names:
+                            try:
+                                _restore_delete_directory(
+                                    parent_fd,
+                                    topic_fd,
+                                    name,
+                                    expected_identity,
+                                    contents,
+                                    removed_names,
+                                )
+                            except ValueError:
+                                raise
+                            except OSError as restore_exc:
+                                raise TopicMarkdownDeleteError(
+                                    "topic directory cleanup failed and restoration failed"
+                                ) from restore_exc
+                        if isinstance(exc, ValueError):
+                            raise
+                        if placeholder_created:
+                            raise TopicMarkdownDeleteError(
+                                "topic placeholder cleanup failed"
+                            ) from exc
+                        raise TopicMarkdownDeleteError("topic directory cleanup failed") from exc
+                    finally:
+                        if placeholder_created and not placeholder_resolved:
+                            _remove_created_placeholder(
+                                parent_fd,
+                                topic_fd,
+                                name,
+                                expected_identity,
+                                lock_identity,
+                            )
+            finally:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+        finally:
+            os.close(topic_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def sync_topic_markdown(
     repo: WorkbenchRepository,
     topic_id: str,
@@ -67,6 +388,87 @@ def sync_topic_markdown(
         return _sync_topic_markdown(repo, topic_id, fence=fence, stack=stack)
 
 
+def sync_topic_map_markdown(
+    repo: WorkbenchRepository,
+    topic_id: str,
+    *,
+    fence: Callable[[], object] | None = None,
+) -> Path:
+    with ExitStack() as stack:
+        topic, course, chapters, topic_dir, topic_fd, marker = _prepare_topic_directory(
+            repo, topic_id, stack
+        )
+        map_text = _topic_map_text(repo, topic, course, chapters, marker)
+        atomic_write_bundle_fd(topic_fd, {"topic-map.md": map_text}, fence=fence)
+        return topic_dir / "topic-map.md"
+
+
+def _prepare_topic_directory(repo, topic_id, stack):
+    topic = repo.get_topic(topic_id)
+    if topic is None:
+        raise ValueError("topic not found")
+    course = repo.get_course(topic.course_id)
+    if course is None:
+        raise ValueError("course not found")
+    chapters = repo.list_topic_chapters(topic_id)
+    course_root = Path(course.root_dir)
+    course_root.mkdir(parents=True, exist_ok=True)
+    if course_root.is_symlink():
+        raise OSError("course root symlink rejected")
+    topics_root = course_root / "课程主题"
+    target = topics_root / f"{topic.seq + 1:02d}-{safe_name(topic.title)}"
+    topics_fd = open_secure_directory(course_root, ["课程主题"])
+    stack.callback(os.close, topics_fd)
+    target_existed = target.exists()
+    marker = f"<!-- topic-id: {topic.id} -->"
+    topic_dir = migrate_generated_directory(
+        topics_root, target, marker, entity_type="topic", entity_id=topic.id
+    )
+    relative = topic_dir.relative_to(course_root)
+    topic_fd = open_secure_directory(course_root, list(relative.parts))
+    stack.callback(os.close, topic_fd)
+    formal_owner = _first_line_regular_file(topic_dir / "topic-map.md") == marker
+    ensure_directory_owner(
+        topic_fd,
+        "topic",
+        topic.id,
+        allow_create_or_replace=not target_existed or formal_owner,
+    )
+    return topic, course, chapters, topic_dir, topic_fd, marker
+
+
+def _topic_map_text(repo, topic, course, chapters, marker):
+    sources = {chapter.source_id: repo.get_source(chapter.source_id) for chapter in chapters}
+    display = allocate_source_display_titles(
+        [(source.id, source.title) for source in repo.list_sources(topic.course_id)]
+    )
+    lines = [
+        marker,
+        f"# {topic.title}",
+        "",
+        topic.description,
+        "",
+        f"生成原因：{topic.generation_reason}",
+        f"状态：{topic.status}",
+        f"已确认：{'是' if topic.confirmed else '否'}",
+        "",
+        "## 教材章节",
+        "",
+    ]
+    for chapter in chapters:
+        source = sources[chapter.source_id]
+        chapter_note = (
+            textbook_dir(repo, source)
+            / f"{chapter.seq + 1:02d}-{safe_name(chapter.title)}"
+            / "intensive-note.md"
+        )
+        relative = Path("../..") / chapter_note.relative_to(course.root_dir)
+        label = f"[《{display[source.id]}》·第 {chapter.seq + 1} 章]"
+        lines.append(f"- {label} [{chapter.title}]({relative.as_posix()})")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _sync_topic_markdown(
     repo: WorkbenchRepository,
     topic_id: str,
@@ -74,20 +476,15 @@ def _sync_topic_markdown(
     fence: Callable[[], object] | None,
     stack: ExitStack,
 ) -> dict[str, str]:
-    topic = repo.get_topic(topic_id)
-    if topic is None:
-        raise ValueError("topic not found")
-    course = repo.get_course(topic.course_id)
-    if course is None:
-        raise ValueError("course not found")
+    topic, course, chapters, topic_dir, topic_fd, marker = _prepare_topic_directory(
+        repo, topic_id, stack
+    )
     blocks = {item.kind: item.content for item in repo.list_topic_note_blocks(topic_id)}
     if set(blocks) != set(FIXED_TOPIC_KINDS):
         raise ValueError("topic must contain exactly fourteen blocks")
     cards = repo.list_topic_cards(topic_id)
     if not 8 <= len(cards) <= 12:
         raise ValueError("topic cards must contain 8..12 items")
-    chapters = repo.list_topic_chapters(topic_id)
-    sources = {chapter.source_id: repo.get_source(chapter.source_id) for chapter in chapters}
     display = allocate_source_display_titles(
         [(source.id, source.title) for source in repo.list_sources(topic.course_id)]
     )
@@ -107,36 +504,9 @@ def _sync_topic_markdown(
         parsed_refs.append(refs)
 
     course_root = Path(course.root_dir)
-    course_root.mkdir(parents=True, exist_ok=True)
-    if course_root.is_symlink():
-        raise OSError("course root symlink rejected")
-    topics_root = Path(course.root_dir) / "课程主题"
-    target = topics_root / f"{topic.seq + 1:02d}-{safe_name(topic.title)}"
-    topics_fd = open_secure_directory(course_root, ["课程主题"])
-    stack.callback(os.close, topics_fd)
-    target_existed = target.exists()
-    topic_dir = migrate_generated_directory(
-        topics_root,
-        target,
-        f"<!-- topic-id: {topic.id} -->",
-        entity_type="topic",
-        entity_id=topic.id,
-    )
     relative = topic_dir.relative_to(course_root)
-    topic_fd = open_secure_directory(course_root, list(relative.parts))
-    stack.callback(os.close, topic_fd)
-    formal_owner = _first_line_regular_file(topic_dir / "topic-map.md") == (
-        f"<!-- topic-id: {topic.id} -->"
-    )
-    ensure_directory_owner(
-        topic_fd,
-        "topic",
-        topic.id,
-        allow_create_or_replace=not target_existed or formal_owner,
-    )
     runs_fd = open_secure_directory(course_root, [*relative.parts, "runs"])
     stack.callback(os.close, runs_fd)
-    marker = f"<!-- topic-id: {topic.id} -->"
     note_lines = [marker, f"# {topic.title}", ""]
     for kind in FIXED_TOPIC_KINDS:
         note_lines.extend([f"## {SECTION_TITLES[kind]}", ""])
@@ -163,30 +533,7 @@ def _sync_topic_markdown(
             ]
         )
 
-    map_lines = [
-        marker,
-        f"# {topic.title}",
-        "",
-        topic.description,
-        "",
-        f"生成原因：{topic.generation_reason}",
-        f"状态：{topic.status}",
-        f"已确认：{'是' if topic.confirmed else '否'}",
-        "",
-        "## 教材章节",
-        "",
-    ]
-    for chapter in chapters:
-        source = sources[chapter.source_id]
-        chapter_note = (
-            textbook_dir(repo, source)
-            / f"{chapter.seq + 1:02d}-{safe_name(chapter.title)}"
-            / "intensive-note.md"
-        )
-        relative = Path("../..") / chapter_note.relative_to(course.root_dir)
-        label = f"[《{display[source.id]}》·第 {chapter.seq + 1} 章]"
-        map_lines.append(f"- {label} [{chapter.title}]({relative.as_posix()})")
-    map_lines.append("")
+    map_text = _topic_map_text(repo, topic, course, chapters, marker)
 
     paths = {
         "map": topic_dir / "topic-map.md",
@@ -196,7 +543,7 @@ def _sync_topic_markdown(
     atomic_write_bundle_fd(
         topic_fd,
         {
-            "topic-map.md": "\n".join(map_lines),
+            "topic-map.md": map_text,
             "intensive-note.md": "\n".join(note_lines),
             "cards.md": "\n".join(card_lines),
         },

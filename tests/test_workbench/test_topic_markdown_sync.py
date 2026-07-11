@@ -1,6 +1,7 @@
 import gc
 import json
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,12 @@ from parsing_core.workbench import topic_markdown_sync
 from parsing_core.workbench.markdown_sync import recover_atomic_bundle
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
-from parsing_core.workbench.topic_markdown_sync import sync_topic_markdown
+from parsing_core.workbench.topic_markdown_sync import (
+    TopicMarkdownDeleteError,
+    delete_unpublished_topic,
+    sync_topic_map_markdown,
+    sync_topic_markdown,
+)
 from parsing_core.workbench.topic_pipeline import FIXED_TOPIC_KINDS
 
 TITLES = [
@@ -93,6 +99,192 @@ def test_topic_sync_writes_fixed_sections_diagrams_cards_and_relative_link(tmp_p
     )
     assert "../教材/教材/01-章节/intensive-note.md" in topic_map
     assert "<!-- topic-id:" in topic_map
+
+
+def test_real_topic_sync_and_delete_complete_without_abba_deadlock(tmp_path, monkeypatch):
+    repo, topic, _ = setup_published(tmp_path)
+    sync_topic_markdown(repo, topic.id)
+    sync_has_flock = threading.Event()
+    delete_attempts_flock = threading.Event()
+    errors = []
+    real_flock = topic_markdown_sync.fcntl.flock
+
+    def recording_flock(fd, operation):
+        if (
+            threading.current_thread().name == "topic-delete"
+            and operation == topic_markdown_sync.fcntl.LOCK_EX
+        ):
+            delete_attempts_flock.set()
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(topic_markdown_sync.fcntl, "flock", recording_flock)
+
+    def fence():
+        sync_has_flock.set()
+        assert delete_attempts_flock.wait(timeout=3)
+        repo.get_topic(topic.id)
+
+    def run_sync():
+        try:
+            sync_topic_markdown(repo, topic.id, fence=fence)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def run_delete():
+        try:
+            delete_unpublished_topic(repo, topic.id)
+        except ValueError:
+            pass
+        except BaseException as exc:
+            errors.append(exc)
+
+    syncing = threading.Thread(target=run_sync, name="topic-sync", daemon=True)
+    deleting = threading.Thread(target=run_delete, name="topic-delete", daemon=True)
+    syncing.start()
+    assert sync_has_flock.wait(timeout=3)
+    deleting.start()
+    syncing.join(timeout=3)
+    deleting.join(timeout=3)
+
+    assert not syncing.is_alive()
+    assert not deleting.is_alive()
+    assert errors == []
+
+
+def test_delete_missing_parent_and_target_serializes_with_real_sync_creation(tmp_path, monkeypatch):
+    repo, topic, _ = setup_published(tmp_path)
+    topics_root = tmp_path / "out" / "课程主题"
+    assert not topics_root.exists()
+    target_observed_missing = threading.Event()
+    allow_delete_to_continue = threading.Event()
+    errors = []
+    delete_conflicted = threading.Event()
+
+    def pause_before_target_open(phase, parent_fd, topic_fd, name):
+        if phase == "before_target_open":
+            assert topic_fd == -1
+            assert name not in os.listdir(parent_fd)
+            target_observed_missing.set()
+            assert allow_delete_to_continue.wait(timeout=3)
+
+    monkeypatch.setattr(topic_markdown_sync, "_delete_race_hook", pause_before_target_open)
+
+    def run_delete():
+        try:
+            delete_unpublished_topic(repo, topic.id)
+        except ValueError:
+            delete_conflicted.set()
+        except BaseException as exc:
+            errors.append(exc)
+
+    def run_sync():
+        try:
+            sync_topic_markdown(repo, topic.id)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            allow_delete_to_continue.set()
+
+    deleting = threading.Thread(target=run_delete, name="missing-target-delete", daemon=True)
+    deleting.start()
+    assert target_observed_missing.wait(timeout=3)
+    syncing = threading.Thread(target=run_sync, name="missing-target-sync", daemon=True)
+    syncing.start()
+    syncing.join(timeout=3)
+    deleting.join(timeout=3)
+
+    assert not syncing.is_alive()
+    assert not deleting.is_alive()
+    assert errors == []
+    assert delete_conflicted.is_set()
+    assert repo.get_topic(topic.id).status == "COMPLETED"
+    assert (topics_root / "01-主题" / "topic-map.md").exists()
+
+
+def test_missing_target_published_rejection_removes_placeholder_and_sync_can_continue(tmp_path):
+    repo, topic, _ = setup_published(tmp_path)
+    target = tmp_path / "out" / "课程主题" / "01-主题"
+
+    with pytest.raises(ValueError, match="published output"):
+        delete_unpublished_topic(repo, topic.id)
+
+    assert not target.exists()
+    assert Path(sync_topic_markdown(repo, topic.id)["map"]).exists()
+
+
+def test_missing_target_db_delete_failure_removes_placeholder_and_map_sync_retries(
+    tmp_path, monkeypatch
+):
+    repo, topic, _ = setup_published(tmp_path)
+    repo.conn.execute("DELETE FROM wb_topic_note_blocks WHERE topic_id = ?", (topic.id,))
+    repo.conn.execute("DELETE FROM wb_topic_cards WHERE topic_id = ?", (topic.id,))
+    repo.conn.commit()
+    target = tmp_path / "out" / "课程主题" / "01-主题"
+    original_delete = repo.delete_topic_guarded
+
+    def fail_delete(topic_id):
+        raise OSError("forced database delete failure")
+
+    monkeypatch.setattr(repo, "delete_topic_guarded", fail_delete)
+    with pytest.raises(TopicMarkdownDeleteError, match="placeholder cleanup failed"):
+        delete_unpublished_topic(repo, topic.id)
+
+    assert not target.exists()
+    monkeypatch.setattr(repo, "delete_topic_guarded", original_delete)
+    assert sync_topic_map_markdown(repo, topic.id).exists()
+
+
+def test_missing_target_placeholder_preserves_concurrent_user_content(tmp_path, monkeypatch):
+    repo, topic, _ = setup_published(tmp_path)
+    repo.conn.execute("DELETE FROM wb_topic_note_blocks WHERE topic_id = ?", (topic.id,))
+    repo.conn.execute("DELETE FROM wb_topic_cards WHERE topic_id = ?", (topic.id,))
+    repo.conn.commit()
+    target = tmp_path / "out" / "课程主题" / "01-主题"
+
+    def inject_content(phase, parent_fd, topic_fd, name):
+        if phase == "placeholder_locked":
+            fd = os.open(
+                "user-race.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=topic_fd
+            )
+            os.write(fd, b"keep me")
+            os.close(fd)
+
+    monkeypatch.setattr(topic_markdown_sync, "_delete_race_hook", inject_content)
+
+    with pytest.raises(ValueError, match="placeholder"):
+        delete_unpublished_topic(repo, topic.id)
+
+    assert repo.get_topic(topic.id) is not None
+    assert (target / "user-race.md").read_bytes() == b"keep me"
+
+
+def test_delete_rejects_existing_outer_transaction_without_changing_db_or_files(tmp_path):
+    repo, topic, _ = setup_published(tmp_path)
+    target = Path(sync_topic_markdown(repo, topic.id)["map"]).parent
+    original_map = (target / "topic-map.md").read_bytes()
+    repo.conn.execute("BEGIN")
+
+    with pytest.raises(ValueError, match="outermost transaction"):
+        delete_unpublished_topic(repo, topic.id)
+
+    repo.conn.rollback()
+    assert repo.get_topic(topic.id) is not None
+    assert target.is_dir()
+    assert (target / "topic-map.md").read_bytes() == original_map
+
+
+def test_delete_rejects_outer_transaction_and_removes_missing_target_placeholder(tmp_path):
+    repo, topic, _ = setup_published(tmp_path)
+    target = tmp_path / "out" / "课程主题" / "01-主题"
+    assert not target.exists()
+    repo.conn.execute("BEGIN")
+
+    with pytest.raises(ValueError, match="outermost transaction"):
+        delete_unpublished_topic(repo, topic.id)
+
+    assert not target.exists()
+    repo.conn.rollback()
+    assert repo.get_topic(topic.id) is not None
 
 
 def test_invalid_blocks_or_refs_do_not_overwrite_existing_topic_note(tmp_path):

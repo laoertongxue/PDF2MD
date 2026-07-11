@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.topic_markdown_sync import (
     TopicMarkdownSyncError,
+    sync_topic_map_markdown,
     sync_topic_markdown,
 )
 from parsing_core.workbench.topic_task_package import build_topic_task_package
@@ -312,15 +313,21 @@ class TopicFusionPipeline:
 
     def retry_markdown_sync(self, topic_id: str) -> None:
         topic = self.repo.get_topic(topic_id)
-        if topic is None or topic.status not in {"COMPLETED", "STALE", "FAILED"}:
-            raise ValueError("topic has no complete publication")
+        if topic is None:
+            raise ValueError("topic not found")
+        if self.repo.get_topic_markdown_sync_state(topic_id) is None:
+            self.repo.set_topic_markdown_sync_state(topic_id, "PENDING")
         blocks = self.repo.list_topic_note_blocks(topic_id)
         cards = self.repo.list_topic_cards(topic_id)
-        if {block.kind for block in blocks} != set(FIXED_TOPIC_KINDS) or not 8 <= len(cards) <= 12:
-            raise ValueError("topic has no complete publication")
-        self._sync_published_markdown(topic_id)
+        complete = {block.kind for block in blocks} == set(FIXED_TOPIC_KINDS) and 8 <= len(
+            cards
+        ) <= 12
+        self._sync_published_markdown(
+            topic_id,
+            mapping_only=topic.status != "COMPLETED" or not complete,
+        )
 
-    def _sync_published_markdown(self, topic_id: str) -> None:
+    def _sync_published_markdown(self, topic_id: str, *, mapping_only: bool = False) -> None:
         claim = self.repo.claim_topic_markdown_sync(
             topic_id, now=self.clock(), lease_ttl=self.markdown_sync_lease_ttl
         )
@@ -334,7 +341,8 @@ class TopicFusionPipeline:
             )
 
         try:
-            sync_topic_markdown(self.repo, topic_id, fence=fence)
+            sync = sync_topic_map_markdown if mapping_only else sync_topic_markdown
+            sync(self.repo, topic_id, fence=fence)
         except BaseException as exc:
             self.repo.finish_topic_markdown_sync(
                 topic_id,

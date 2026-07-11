@@ -133,7 +133,7 @@ def test_retry_markdown_sync_accepts_stale_or_failed_complete_publication(
         fence()
         calls.append(topic_id)
 
-    monkeypatch.setattr(topic_pipeline_module, "sync_topic_markdown", observe_retry)
+    monkeypatch.setattr(topic_pipeline_module, "sync_topic_map_markdown", observe_retry)
 
     pipeline.retry_markdown_sync(topic.id)
 
@@ -141,14 +141,15 @@ def test_retry_markdown_sync_accepts_stale_or_failed_complete_publication(
     assert repo.get_topic_markdown_sync_state(topic.id).status == "SYNCED"
 
 
-def test_retry_markdown_sync_rejects_failed_without_publication(tmp_path):
+def test_retry_markdown_sync_writes_working_map_without_publication(tmp_path):
     repo, topic, _ = setup_topic(tmp_path)
     repo.update_topic(topic.id, status="FAILED")
-    with pytest.raises(ValueError, match="complete publication"):
-        TopicFusionPipeline(repo, StubIntensiveReadingExecutor()).retry_markdown_sync(topic.id)
+    TopicFusionPipeline(repo, StubIntensiveReadingExecutor()).retry_markdown_sync(topic.id)
+    assert (tmp_path / "课程主题" / "01-战略选择" / "topic-map.md").exists()
+    assert repo.get_topic_markdown_sync_state(topic.id).status == "SYNCED"
 
 
-def test_retry_markdown_sync_rejects_stale_incomplete_publication(tmp_path):
+def test_retry_markdown_sync_falls_back_to_map_when_publication_is_incomplete(tmp_path):
     repo, topic, _ = setup_topic(tmp_path)
     pipeline = TopicFusionPipeline(repo, StubIntensiveReadingExecutor())
     pipeline.run(topic.id)
@@ -159,8 +160,8 @@ def test_retry_markdown_sync_rejects_stale_incomplete_publication(tmp_path):
     )
     repo.conn.commit()
     repo.set_topic_markdown_sync_state(topic.id, "FAILED", "old sync failed")
-    with pytest.raises(ValueError, match="complete publication"):
-        pipeline.retry_markdown_sync(topic.id)
+    pipeline.retry_markdown_sync(topic.id)
+    assert repo.get_topic_markdown_sync_state(topic.id).status == "SYNCED"
 
 
 class FailingExecutor(StubIntensiveReadingExecutor):
