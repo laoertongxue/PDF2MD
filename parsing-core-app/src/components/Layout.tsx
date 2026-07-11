@@ -172,7 +172,7 @@ export default function Layout() {
                 <FolderOpen size={16} /> 教材
               </Link>
               {selectedCourseId && <Link to={`/workbench/courses/${selectedCourseId}/topics`} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${pathname.includes("/topics") ? "bg-zinc-100 font-medium text-zinc-900" : "text-zinc-600 hover:bg-zinc-50"}`}><Layers3 size={16} /> 课程主题</Link>}
-              {selectedCourseId && <Link to={`/workbench/courses/${selectedCourseId}/topics`} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-zinc-600 hover:bg-zinc-50"><BookOpen size={16} /> 融合精读（先选题）</Link>}
+              {selectedCourseId && <Link to={`/workbench/courses/${selectedCourseId}/topics`} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-zinc-600 hover:bg-zinc-50"><BookOpen size={16} /> 融合精读</Link>}
               <Link
                 to="/workbench/cards"
                 className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${

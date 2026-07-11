@@ -11,13 +11,14 @@ import ChapterWorkbench from "./components/workbench/ChapterWorkbench";
 import CardPool from "./components/workbench/CardPool";
 import Settings from "./components/workbench/Settings";
 import TopicMap from "./components/workbench/TopicMap";
+import TopicFusion from "./components/workbench/TopicFusion";
 import { useWorkbenchStore } from "./store/useWorkbenchStore";
 
 function CourseTopicRoute() {
   const { courseId, topicId } = useParams();
   const selectCourse = useWorkbenchStore((state) => state.selectCourse);
   useEffect(() => { if (courseId) selectCourse(courseId); }, [courseId, selectCourse]);
-  return <TopicMap initialTopicId={topicId} oldResult={!!topicId} />;
+  return topicId && courseId ? <TopicFusion courseId={courseId} topicId={topicId} /> : <TopicMap />;
 }
 
 export default function App() {

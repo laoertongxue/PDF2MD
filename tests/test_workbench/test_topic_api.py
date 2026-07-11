@@ -971,7 +971,7 @@ def test_published_edit_and_mapping_mark_stale_resync_map_and_keep_publication(t
     assert edited.json()["status"] == "STALE"
     assert edited.json()["sync_status"] == "SYNCED"
     renamed = tmp_path / "course" / "课程主题" / "01-Renamed"
-    assert "## 核心概念" in (renamed / "intensive-note.md").read_text()
+    assert "## 3. 核心概念" in (renamed / "intensive-note.md").read_text()
     assert len(c.get(f"/api/workbench/topics/{topic['id']}/cards").json()) == 8
     assert not (tmp_path / "course" / "课程主题" / "01-Fusion").exists()
 
@@ -983,7 +983,7 @@ def test_published_edit_and_mapping_mark_stale_resync_map_and_keep_publication(t
     assert mapped.json()["status"] == "STALE"
     assert mapped.json()["sync_status"] == "SYNCED"
     assert chapters[1]["title"] in (renamed / "topic-map.md").read_text()
-    assert "## 核心概念" in (renamed / "intensive-note.md").read_text()
+    assert "## 3. 核心概念" in (renamed / "intensive-note.md").read_text()
 
 
 def test_delete_rejects_topic_with_published_output(tmp_path):

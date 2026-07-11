@@ -1256,6 +1256,57 @@ class WorkbenchRepository:
         ).fetchall()
         return [TopicNoteBlock(*row) for row in rows]
 
+    def prepare_topic_note_block_update(
+        self,
+        topic_id: str,
+        kind: str,
+        content: str,
+        expected_content: str,
+        *,
+        now: int | None = None,
+    ) -> TopicNoteBlock:
+        now = _now() if now is None else now
+        with self._atomic(immediate=True):
+            row = self.conn.execute(
+                "SELECT content FROM wb_topic_note_blocks WHERE topic_id = ? AND kind = ?",
+                (topic_id, kind),
+            ).fetchone()
+            if row is None:
+                raise ValueError("topic note block not found")
+            if row[0] != expected_content:
+                raise ValueError("topic note block changed")
+            sync = self.conn.execute(
+                "SELECT status, lease_expires_at FROM wb_topic_markdown_sync "
+                "WHERE topic_id = ?",
+                (topic_id,),
+            ).fetchone()
+            if sync is not None and sync[0] == "SYNCING":
+                if sync[1] > now:
+                    raise ValueError("topic Markdown is already syncing")
+                self.conn.execute(
+                    "UPDATE wb_topic_markdown_sync SET status = 'FAILED', "
+                    "error = 'topic Markdown sync lease expired', updated_at = ?, "
+                    "owner_id = '', lease_expires_at = 0 "
+                    "WHERE topic_id = ? AND status = 'SYNCING' AND lease_expires_at <= ?",
+                    (now, topic_id, now),
+                )
+            self.conn.execute(
+                "UPDATE wb_topic_note_blocks SET content = ?, updated_at = ? "
+                "WHERE topic_id = ? AND kind = ?",
+                (content, now, topic_id, kind),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO wb_topic_markdown_sync (topic_id, status, error, updated_at)
+                VALUES (?, 'PENDING', '', ?)
+                ON CONFLICT(topic_id) DO UPDATE SET
+                  status = 'PENDING', error = '', updated_at = excluded.updated_at,
+                  owner_id = '', lease_expires_at = 0
+                """,
+                (topic_id, now),
+            )
+        return next(block for block in self.list_topic_note_blocks(topic_id) if block.kind == kind)
+
     def replace_topic_cards(self, topic_id: str, cards: list[dict]) -> list[TopicCard]:
         with self._atomic(immediate=True):
             if self.get_topic(topic_id) is None:
@@ -1755,6 +1806,35 @@ class WorkbenchRepository:
             (course_id,),
         ).fetchall()
         return [self._card(row) for row in rows]
+
+    def list_course_cards(self, course_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM (
+            SELECT wc.id, 'chapter' AS origin_type, wc.chapter_id AS origin_id,
+                   ch.title AS origin_title, wc.kind AS card_type, wc.title,
+                   wc.body AS content, json_array(wc.chapter_id) AS source_refs_json,
+                   ch.seq AS origin_seq
+            FROM wb_cards wc
+            JOIN wb_chapters ch ON ch.id = wc.chapter_id
+            WHERE wc.course_id = ?
+            UNION ALL
+            SELECT tc.id, 'topic', tc.topic_id, t.title, tc.card_type, tc.title,
+                   tc.content, tc.source_refs_json, t.seq
+            FROM wb_topic_cards tc
+            JOIN wb_topics t ON t.id = tc.topic_id
+            WHERE t.course_id = ?
+            ) AS course_cards
+            ORDER BY CASE origin_type WHEN 'chapter' THEN 0 ELSE 1 END,
+                     origin_seq, origin_id, id
+            """,
+            (course_id, course_id),
+        ).fetchall()
+        keys = (
+            "id", "origin_type", "origin_id", "origin_title", "card_type",
+            "title", "content", "source_refs_json", "origin_seq",
+        )
+        return [dict(zip(keys, row, strict=True)) for row in rows]
 
     def list_cards_by_chapter(self, chapter_id: str) -> list[Card]:
         rows = self.conn.execute(

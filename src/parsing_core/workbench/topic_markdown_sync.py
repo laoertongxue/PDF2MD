@@ -40,20 +40,20 @@ FIXED_TOPIC_KINDS = (
 )
 
 SECTION_TITLES = {
-    "overview": "主题概要",
-    "linked_sources": "关联教材与章节",
-    "core_concepts": "核心概念",
-    "viewpoint_comparison": "教材观点对照",
-    "consensus_disagreements": "共识与分歧",
-    "complementary_views": "互补视角",
-    "plain_explanation": "通俗有趣生活化解释",
-    "textbook_cases": "教材案例",
-    "real_world_problem_solving": "现实案例与问题解决",
-    "integrated_framework": "综合分析框架",
-    "application_methods": "实际应用方法",
-    "further_thinking": "延伸思考",
-    "knowledge_mermaid": "Mermaid知识结构图",
-    "application_mermaid": "Mermaid应用流程图",
+    "overview": "1. 主题概要",
+    "linked_sources": "2. 关联教材与章节",
+    "core_concepts": "3. 核心概念",
+    "viewpoint_comparison": "4. 教材观点对照",
+    "consensus_disagreements": "5. 共识与分歧",
+    "complementary_views": "6. 互补视角",
+    "plain_explanation": "7. 通俗、有趣、生活化的解释",
+    "textbook_cases": "8. 教材案例解读",
+    "real_world_problem_solving": "9. 现实案例与问题解决",
+    "integrated_framework": "10. 综合分析框架",
+    "application_methods": "11. 实际应用方法",
+    "further_thinking": "12. 延伸思考",
+    "knowledge_mermaid": "13. Mermaid 知识结构图",
+    "application_mermaid": "14. Mermaid 应用流程图",
 }
 
 
@@ -801,9 +801,19 @@ def _sync_topic_markdown(
             note_lines.extend(["```mermaid", _pure_mermaid(blocks[kind]), "```", ""])
         else:
             note_lines.extend([blocks[kind], ""])
-    note_lines.extend(["## 写作卡片", ""])
-    for card in cards:
-        note_lines.extend([f"- [{card.title}](cards.md#{safe_name(card.title)})：{card.content}"])
+    note_lines.extend(["## 15. 写作卡片", ""])
+    for card, refs in zip(cards, parsed_refs, strict=True):
+        note_lines.extend(
+            [
+                f"### {card.title}",
+                "",
+                f"类型：{card.card_type}",
+                f"来源：{'、'.join(refs)}",
+                "",
+                card.content,
+                "",
+            ]
+        )
     note_lines.append("")
 
     card_lines = [f"# {topic.title} 写作卡片", ""]

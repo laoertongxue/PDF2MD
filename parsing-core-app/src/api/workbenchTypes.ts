@@ -39,14 +39,13 @@ export interface Chapter {
 
 export interface Card {
   id: string;
-  course_id: string;
-  chapter_id: string;
-  kind: string;
+  origin_type: "chapter" | "topic";
+  origin_id: string;
+  origin_title: string;
+  card_type: string;
   title: string;
-  body: string;
-  favorite: boolean;
-  created_at?: number;
-  updated_at?: number;
+  content: string;
+  source_refs: string[];
 }
 
 export interface NoteBlock {

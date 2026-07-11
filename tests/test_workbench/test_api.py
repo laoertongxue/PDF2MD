@@ -1132,9 +1132,10 @@ def test_confirm_chapter_then_run_pipeline(tmp_path):
 
     res = c.get(f"/api/workbench/courses/{course['id']}/cards")
     assert res.status_code == 200
-    assert res.json()[0]["course_id"] == course["id"]
-    assert res.json()[0]["chapter_id"] == chapter_id
-    assert res.json()[0]["kind"] == "topic"
+    assert res.json()[0]["origin_type"] == "chapter"
+    assert res.json()[0]["origin_id"] == chapter_id
+    assert res.json()[0]["origin_title"] == chapter["title"]
+    assert res.json()[0]["card_type"] == "topic"
 
     res = c.get(f"/api/workbench/chapters/{chapter_id}/note-blocks")
     assert res.status_code == 200
@@ -1150,6 +1151,216 @@ def test_workbench_list_endpoints_return_not_found(tmp_path):
     assert c.get("/api/workbench/sources/missing/chapters").status_code == 404
     assert c.get("/api/workbench/courses/missing/cards").status_code == 404
     assert c.get("/api/workbench/chapters/missing/note-blocks").status_code == 404
+
+
+def test_course_cards_unify_chapter_and_topic_origins_and_topic_block_patch(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course, source, chapter = confirmed_chapter(c, root)
+    run_chapter = c.post(
+        f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"}
+    )
+    assert run_chapter.status_code == 200
+    topic = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "战略融合", "chapter_ids": [chapter["id"]]},
+    ).json()
+    assert c.post(f"/api/workbench/courses/{course['id']}/topics/confirm").status_code == 200
+    run_topic = c.post(
+        f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"}
+    )
+    assert run_topic.status_code == 200
+
+    cards = c.get(f"/api/workbench/courses/{course['id']}/cards").json()
+    assert {card["origin_type"] for card in cards} == {"chapter", "topic"}
+    chapter_card = next(card for card in cards if card["origin_type"] == "chapter")
+    assert chapter_card["origin_id"] == chapter["id"]
+    assert chapter_card["origin_title"] == chapter["title"]
+    topic_card = next(card for card in cards if card["origin_type"] == "topic")
+    assert topic_card["origin_id"] == topic["id"]
+    assert topic_card["origin_title"] == "战略融合"
+    assert topic_card["source_refs"] == [f"[《{source['title']}》·第 1 章]"]
+
+    block = c.patch(
+        f"/api/workbench/topics/{topic['id']}/note-blocks/knowledge_mermaid",
+        json={
+            "content": "flowchart LR\nA[更新] --> B[保存]",
+            "expected_content": next(
+                item["content"]
+                for item in c.get(
+                    f"/api/workbench/topics/{topic['id']}/note-blocks"
+                ).json()
+                if item["kind"] == "knowledge_mermaid"
+            ),
+        },
+    )
+    assert block.status_code == 200, block.text
+    assert block.json()["content"].startswith("flowchart LR")
+    listed = c.get(f"/api/workbench/topics/{topic['id']}/note-blocks").json()
+    saved = next(item for item in listed if item["kind"] == "knowledge_mermaid")
+    assert saved["content"] == block.json()["content"]
+    assert c.patch(
+        f"/api/workbench/topics/{topic['id']}/note-blocks/not-a-block",
+        json={"content": "x"},
+    ).status_code == 422
+
+
+def test_topic_block_patch_sync_failure_retains_edit_and_retry_publishes(
+    tmp_path, monkeypatch
+):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course, _, chapter = confirmed_chapter(c, root)
+    c.post(f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"})
+    topic = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "战略融合", "chapter_ids": [chapter["id"]]},
+    ).json()
+    c.post(f"/api/workbench/courses/{course['id']}/topics/confirm")
+    c.post(f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"})
+    source = "flowchart LR\nA[新源码] --> B[已保留]"
+
+    def fail_sync(*_args, **_kwargs):
+        raise OSError("/private/key sk-secret")
+
+    monkeypatch.setattr(
+        "parsing_core.workbench.topic_pipeline.sync_topic_markdown", fail_sync
+    )
+    failed = c.patch(
+        f"/api/workbench/topics/{topic['id']}/note-blocks/knowledge_mermaid",
+        json={
+            "content": source,
+            "expected_content": next(
+                block.content for block in WorkbenchRepository(
+                    get_scheduler()._query_orch.repo.conn
+                ).list_topic_note_blocks(topic["id"])
+                if block.kind == "knowledge_mermaid"
+            ),
+        },
+    )
+    assert failed.status_code == 507
+    assert failed.json() == {"detail": "topic Markdown sync failed; database edit retained"}
+    repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
+    saved = next(
+        block for block in repo.list_topic_note_blocks(topic["id"])
+        if block.kind == "knowledge_mermaid"
+    )
+    assert saved.content == source
+    assert repo.get_topic_markdown_sync_state(topic["id"]).status == "FAILED"
+    assert "/private" not in failed.text and "secret" not in failed.text
+
+    monkeypatch.undo()
+    retry = c.post(f"/api/workbench/topics/{topic['id']}/sync/retry")
+    assert retry.status_code == 200
+    assert retry.json()["sync_status"] == "SYNCED"
+    notes = [path.read_text(encoding="utf-8") for path in root.rglob("intensive-note.md")]
+    assert any(source in note for note in notes)
+
+
+def test_topic_block_patch_uses_cas_and_preserves_first_window_db_and_markdown(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course, _, chapter = confirmed_chapter(c, root)
+    c.post(f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"})
+    topic = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "融合", "chapter_ids": [chapter["id"]]},
+    ).json()
+    c.post(f"/api/workbench/courses/{course['id']}/topics/confirm")
+    c.post(f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"})
+    endpoint = f"/api/workbench/topics/{topic['id']}/note-blocks/knowledge_mermaid"
+    original = next(
+        item["content"] for item in c.get(
+            f"/api/workbench/topics/{topic['id']}/note-blocks"
+        ).json() if item["kind"] == "knowledge_mermaid"
+    )
+    first_source = "flowchart LR\nA[窗口一] --> B[成功]"
+    assert c.patch(
+        endpoint, json={"content": first_source, "expected_content": original}
+    ).status_code == 200
+    second = c.patch(
+        endpoint,
+        json={"content": "flowchart LR\nA[窗口二] --> B[冲突]", "expected_content": original},
+    )
+    assert second.status_code == 409
+    repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
+    assert next(
+        block.content for block in repo.list_topic_note_blocks(topic["id"])
+        if block.kind == "knowledge_mermaid"
+    ) == first_source
+    assert any(
+        first_source in path.read_text(encoding="utf-8")
+        for path in root.rglob("intensive-note.md")
+    )
+
+
+def test_topic_block_patch_protects_live_sync_owner_and_recovers_expired_lease(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course, _, chapter = confirmed_chapter(c, root)
+    c.post(f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"})
+    topic = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "融合", "chapter_ids": [chapter["id"]]},
+    ).json()
+    c.post(f"/api/workbench/courses/{course['id']}/topics/confirm")
+    c.post(f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"})
+    repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
+    original = next(
+        block.content for block in repo.list_topic_note_blocks(topic["id"])
+        if block.kind == "knowledge_mermaid"
+    )
+    repo.set_topic_markdown_sync_state(topic["id"], "PENDING")
+    lease = repo.claim_topic_markdown_sync(topic["id"], lease_ttl=3600)
+    endpoint = f"/api/workbench/topics/{topic['id']}/note-blocks/knowledge_mermaid"
+    active = c.patch(
+        endpoint,
+        json={"content": "flowchart LR\nA-->B", "expected_content": original},
+    )
+    assert active.status_code == 409
+    state = repo.get_topic_markdown_sync_state(topic["id"])
+    assert state.status == "SYNCING" and state.owner_id == lease.owner_id
+    repo.conn.execute(
+        "UPDATE wb_topic_markdown_sync SET lease_expires_at = 0 WHERE topic_id = ?",
+        (topic["id"],),
+    )
+    repo.conn.commit()
+    recovered = c.patch(
+        endpoint,
+        json={
+            "content": "flowchart LR\nA[过期] --> B[恢复]",
+            "expected_content": original,
+        },
+    )
+    assert recovered.status_code == 200
+    assert repo.get_topic_markdown_sync_state(topic["id"]).status == "SYNCED"
+
+
+def test_course_cards_have_stable_origin_seq_id_order_and_constant_select_count(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course, _, chapter = confirmed_chapter(c, root)
+    c.post(f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"})
+    topic = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "融合", "chapter_ids": [chapter["id"]]},
+    ).json()
+    c.post(f"/api/workbench/courses/{course['id']}/topics/confirm")
+    c.post(f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"})
+    conn = get_scheduler()._query_orch.repo.conn
+    statements = []
+    conn.set_trace_callback(statements.append)
+    try:
+        first = c.get(f"/api/workbench/courses/{course['id']}/cards")
+        second = c.get(f"/api/workbench/courses/{course['id']}/cards")
+    finally:
+        conn.set_trace_callback(None)
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    order = [(item["origin_type"], item["origin_id"], item["id"]) for item in first.json()]
+    assert order == sorted(order, key=lambda item: (item[0] != "chapter", item[1], item[2]))
+    selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+    assert len(selects) == 4  # one course existence check + one union query per request
 
 
 def test_draft_chapter_run_returns_conflict(tmp_path):

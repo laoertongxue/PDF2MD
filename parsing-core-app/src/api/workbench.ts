@@ -32,7 +32,9 @@ export type SafeApiErrorCategory =
   | "service_unavailable"
   | "protocol"
   | "network"
-  | "canceled";
+  | "canceled"
+  | "task_running"
+  | "edit_saved_sync_failed";
 
 const SAFE_ERROR_MESSAGES: Record<SafeApiErrorCategory, string> = {
   invalid_request: "请求内容不正确，请检查后重试",
@@ -45,6 +47,8 @@ const SAFE_ERROR_MESSAGES: Record<SafeApiErrorCategory, string> = {
   protocol: "服务返回数据格式异常，请稍后重试",
   network: "无法连接本地服务，请确认服务已启动",
   canceled: "操作已取消",
+  task_running: "任务仍在运行",
+  edit_saved_sync_failed: "编辑已保存到数据库，Markdown同步失败，可重试",
 };
 
 export class SafeApiError extends Error {
@@ -146,11 +150,21 @@ function parseTopicRun(value: unknown): TopicRun {
   return value as unknown as TopicRun;
 }
 
+function parseCourseCard(value: unknown): Card {
+  if (!isRecord(value) || typeof value.id !== "string" ||
+    (value.origin_type !== "chapter" && value.origin_type !== "topic") ||
+    typeof value.origin_id !== "string" || typeof value.origin_title !== "string" ||
+    typeof value.card_type !== "string" || typeof value.title !== "string" ||
+    typeof value.content !== "string" || !isStringArray(value.source_refs)) throw protocolError();
+  return value as unknown as Card;
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit,
   parse: (value: unknown) => T = (value) => value as T,
   allowNoContent = false,
+  statusCategories: Partial<Record<number, SafeApiErrorCategory>> = {},
 ): Promise<T> {
   try {
     const res = await fetch(`${BASE}${path}`, init);
@@ -163,7 +177,7 @@ async function request<T>(
         502: "model_unavailable",
         507: "storage",
       };
-      throw new SafeApiError(categories[res.status] ?? "service_unavailable");
+      throw new SafeApiError(statusCategories[res.status] ?? categories[res.status] ?? "service_unavailable");
     }
     if (res.status === 204) {
       if (allowNoContent) return undefined as T;
@@ -260,7 +274,7 @@ export function runHybridChapter(chapterId: string): Promise<Chapter> {
 }
 
 export function listCourseCards(courseId: string): Promise<Card[]> {
-  return request<Card[]>(`/api/workbench/courses/${courseId}/cards`);
+  return request<Card[]>(`/api/workbench/courses/${courseId}/cards`, undefined, (value) => parseArray(value, parseCourseCard));
 }
 
 export function listChapterNoteBlocks(chapterId: string): Promise<NoteBlock[]> {
@@ -332,7 +346,9 @@ export function runTopicHybrid(topicId: string): Promise<CourseTopic> {
 }
 
 export function recoverTopic(topicId: string): Promise<CourseTopic> {
-  return post<CourseTopic>(`/api/workbench/topics/${topicId}/recover`, undefined, parseTopic);
+  return request<CourseTopic>(`/api/workbench/topics/${topicId}/recover`, {
+    method: "POST",
+  }, parseTopic, false, { 409: "task_running" });
 }
 
 export function retryTopicSync(topicId: string): Promise<CourseTopic> {
@@ -349,4 +365,10 @@ export function listTopicCards(topicId: string): Promise<TopicCard[]> {
 
 export function listTopicRuns(topicId: string): Promise<TopicRun[]> {
   return request<TopicRun[]>(`/api/workbench/topics/${topicId}/runs`, undefined, (value) => parseArray(value, parseTopicRun));
+}
+
+export function saveTopicBlock(topicId: string, kind: string, content: string, expectedContent: string): Promise<TopicNoteBlock> {
+  return request<TopicNoteBlock>(`/api/workbench/topics/${topicId}/note-blocks/${kind}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content, expected_content: expectedContent }),
+  }, parseTopicBlock, false, { 507: "edit_saved_sync_failed" });
 }

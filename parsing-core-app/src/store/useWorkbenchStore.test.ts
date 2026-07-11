@@ -26,6 +26,7 @@ vi.mock("../api/workbench", async (importOriginal) => {
     listTopicRuns: vi.fn(),
     retryTopicSync: vi.fn(),
     recoverTopic: vi.fn(),
+    saveTopicBlock: vi.fn(),
     deleteTopic: vi.fn(),
   };
 });
@@ -103,6 +104,29 @@ beforeEach(() => {
 });
 
 describe("主题工作流 Store", () => {
+  it("恢复检查遇到有效租约时保留任务仍在运行安全文案", async () => {
+    mocked.recoverTopic.mockRejectedValueOnce(new api.SafeApiError("task_running"));
+    useWorkbenchStore.setState({ topicsByCourse: { "course-1": [topic({ status: "RUNNING" })] } });
+
+    await expect(useWorkbenchStore.getState().recoverTopic("topic-1")).rejects.toThrow("任务仍在运行");
+
+    expect(useWorkbenchStore.getState().topicActions["recoverTopic:topic-1"]).toEqual({
+      loading: false,
+      error: "任务仍在运行",
+    });
+  });
+
+  it("保存主题 block 后只更新对应缓存内容", async () => {
+    const updated = { ...block, content: "flowchart LR\nA-->B", updated_at: 2 };
+    mocked.saveTopicBlock.mockResolvedValueOnce(updated);
+    useWorkbenchStore.setState({ topicBlocksById: { "topic-1": [block] } });
+
+    await useWorkbenchStore.getState().saveTopicBlock("topic-1", "summary", updated.content, block.content);
+
+    expect(mocked.saveTopicBlock).toHaveBeenCalledWith("topic-1", "summary", updated.content, block.content);
+    expect(useWorkbenchStore.getState().topicBlocksById["topic-1"]).toEqual([updated]);
+  });
+
   it.each([
     ["conflict", "当前状态不允许此操作，请刷新后重试"],
     ["storage", "文件同步失败，请检查存储空间后重试"],

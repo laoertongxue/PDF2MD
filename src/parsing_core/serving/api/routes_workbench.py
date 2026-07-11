@@ -1,12 +1,14 @@
+import json
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
 from parsing_core.parser.markitdown_adapter import MarkItDownAdapter
 from parsing_core.serving.api.deps import SchedulerDep
 from parsing_core.serving.models.api import (
-    CardResponse,
     ChapterResponse,
     CourseCreateRequest,
     CourseResponse,
@@ -35,10 +37,41 @@ from parsing_core.workbench.source_import import (
     SourceImportInputError,
     TextbookImportBatch,
 )
+from parsing_core.workbench.topic_pipeline import (
+    FIXED_TOPIC_KINDS,
+    TopicFusionPipeline,
+    TopicMarkdownSyncError,
+    validate_mermaid_subset,
+)
 
 router = APIRouter(prefix="/api/workbench", tags=["workbench"])
 KEYCHAIN_SERVICE = "pdf2md.deepseek"
 KEYCHAIN_ACCOUNT = "api-key"
+
+
+class CourseCardResponse(BaseModel):
+    id: str
+    origin_type: Literal["chapter", "topic"]
+    origin_id: str
+    origin_title: str
+    card_type: str
+    title: str
+    content: str
+    source_refs: list[str]
+
+
+class TopicBlockPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=20_000)
+    expected_content: str = Field(max_length=20_000)
+
+
+class TopicBlockPatchResponse(BaseModel):
+    id: str
+    topic_id: str
+    kind: str
+    content: str
+    updated_at: int
 
 
 def _repo(sch: SchedulerDep) -> WorkbenchRepository:
@@ -168,18 +201,6 @@ def _chapter_response(chapter) -> ChapterResponse:
         seq=chapter.seq,
         title=chapter.title,
         status=chapter.status,
-    )
-
-
-def _card_response(card) -> CardResponse:
-    return CardResponse(
-        id=card.id,
-        course_id=card.course_id,
-        chapter_id=card.chapter_id,
-        kind=card.kind,
-        title=card.title,
-        body=card.body,
-        favorite=card.favorite,
     )
 
 
@@ -386,12 +407,50 @@ async def confirm_chapter(chapter_id: str, sch: SchedulerDep):
     return _chapter_response(repo.get_chapter(chapter_id))
 
 
-@router.get("/courses/{course_id}/cards", response_model=list[CardResponse])
+@router.get("/courses/{course_id}/cards", response_model=list[CourseCardResponse])
 async def list_cards(course_id: str, sch: SchedulerDep):
     repo = _repo(sch)
     if repo.get_course(course_id) is None:
         raise HTTPException(404, "course not found")
-    return [_card_response(card) for card in repo.list_cards(course_id)]
+    return [
+        CourseCardResponse(
+            **{
+                key: row[key]
+                for key in (
+                    "id", "origin_type", "origin_id", "origin_title",
+                    "card_type", "title", "content",
+                )
+            },
+            source_refs=json.loads(row["source_refs_json"]),
+        )
+        for row in repo.list_course_cards(course_id)
+    ]
+
+
+@router.patch("/topics/{topic_id}/note-blocks/{kind}", response_model=TopicBlockPatchResponse)
+async def patch_topic_note_block(
+    topic_id: str, kind: str, req: TopicBlockPatchRequest, sch: SchedulerDep
+):
+    if kind not in FIXED_TOPIC_KINDS:
+        raise HTTPException(422, "unknown topic block kind")
+    if kind.endswith("_mermaid"):
+        try:
+            validate_mermaid_subset(req.content)
+        except ValueError as exc:
+            raise HTTPException(422, "invalid Mermaid source") from exc
+    repo = _repo(sch)
+    try:
+        block = repo.prepare_topic_note_block_update(
+            topic_id, kind, req.content, req.expected_content
+        )
+        TopicFusionPipeline(repo, StubIntensiveReadingExecutor()).retry_markdown_sync(topic_id)
+    except TopicMarkdownSyncError as exc:
+        raise HTTPException(507, "topic Markdown sync failed; database edit retained") from exc
+    except ValueError as exc:
+        if "changed" in str(exc) or "already syncing" in str(exc):
+            raise HTTPException(409, "topic block edit conflicts with current state") from exc
+        raise HTTPException(404, "topic note block not found") from exc
+    return block
 
 
 @router.get("/chapters/{chapter_id}/note-blocks", response_model=list[NoteBlockResponse])

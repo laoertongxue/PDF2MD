@@ -65,6 +65,7 @@ interface WorkbenchState {
   loadTopicRuns: (topicId: string) => Promise<TopicRun[]>;
   retryTopicSync: (topicId: string) => Promise<CourseTopic>;
   recoverTopic: (topicId: string) => Promise<CourseTopic>;
+  saveTopicBlock: (topicId: string, kind: string, content: string, expectedContent: string) => Promise<TopicNoteBlock>;
 }
 
 export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
@@ -438,5 +439,18 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
 
     recoverTopic: (topicId) =>
       runTopicAction("recoverTopic", topicId, () => api.recoverTopic(topicId)),
+
+    saveTopicBlock: (topicId, kind, content, expectedContent) =>
+      runAction(
+        `saveTopicBlock:${topicId}:${kind}`,
+        [`topicBlocks:${topicId}`],
+        () => api.saveTopicBlock(topicId, kind, content, expectedContent),
+        (block) => set((state) => ({
+          topicBlocksById: {
+            ...state.topicBlocksById,
+            [topicId]: (state.topicBlocksById[topicId] ?? []).map((item) => item.kind === kind ? block : item),
+          },
+        })),
+      ),
   };
 });

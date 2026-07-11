@@ -20,20 +20,21 @@ from parsing_core.workbench.topic_markdown_sync import (
 from parsing_core.workbench.topic_pipeline import FIXED_TOPIC_KINDS
 
 TITLES = [
-    "主题概要",
-    "关联教材与章节",
-    "核心概念",
-    "教材观点对照",
-    "共识与分歧",
-    "互补视角",
-    "通俗有趣生活化解释",
-    "教材案例",
-    "现实案例与问题解决",
-    "综合分析框架",
-    "实际应用方法",
-    "延伸思考",
-    "Mermaid知识结构图",
-    "Mermaid应用流程图",
+    "1. 主题概要",
+    "2. 关联教材与章节",
+    "3. 核心概念",
+    "4. 教材观点对照",
+    "5. 共识与分歧",
+    "6. 互补视角",
+    "7. 通俗、有趣、生活化的解释",
+    "8. 教材案例解读",
+    "9. 现实案例与问题解决",
+    "10. 综合分析框架",
+    "11. 实际应用方法",
+    "12. 延伸思考",
+    "13. Mermaid 知识结构图",
+    "14. Mermaid 应用流程图",
+    "15. 写作卡片",
 ]
 
 
@@ -83,9 +84,12 @@ def test_topic_sync_writes_fixed_sections_diagrams_cards_and_relative_link(tmp_p
     paths = sync_topic_markdown(repo, topic.id)
     note = Path(paths["note"]).read_text(encoding="utf-8")
     topic_map = Path(paths["map"]).read_text(encoding="utf-8")
-    assert [line[3:] for line in note.splitlines() if line.startswith("## ")] == TITLES + [
-        "写作卡片"
-    ]
+    headings = [line[3:] for line in note.splitlines() if line.startswith("## ")]
+    assert headings == TITLES
+    assert len(headings) == 15
+    assert "类型：观点" in note
+    assert "来源：[《教材》·第 1 章]" in note
+    assert "内容" in note
     assert note.count("```mermaid") == 2
     assert (
         len(
