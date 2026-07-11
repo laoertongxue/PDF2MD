@@ -136,6 +136,13 @@ CREATE TABLE IF NOT EXISTS wb_topic_runs (
   finished_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS wb_topic_generation_leases (
+  topic_id TEXT PRIMARY KEY REFERENCES wb_topics(id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL,
+  heartbeat_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_wb_sources_course ON wb_sources(course_id);
 CREATE INDEX IF NOT EXISTS idx_wb_chapters_course ON wb_chapters(course_id);
 CREATE INDEX IF NOT EXISTS idx_wb_cards_course ON wb_cards(course_id);

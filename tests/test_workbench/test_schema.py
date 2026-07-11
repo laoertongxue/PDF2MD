@@ -26,6 +26,7 @@ def test_apply_workbench_schema_creates_tables(tmp_path):
     assert "wb_topic_note_blocks" in tables
     assert "wb_topic_cards" in tables
     assert "wb_topic_runs" in tables
+    assert "wb_topic_generation_leases" in tables
 
 
 def test_apply_workbench_schema_is_idempotent(tmp_path):
@@ -61,6 +62,24 @@ def test_apply_workbench_schema_is_idempotent(tmp_path):
         "SELECT title FROM wb_courses WHERE id = 'course-1'"
     ).fetchone()[0]
     assert stored_title == "战略管理"
+
+
+def test_apply_schema_adds_topic_generation_leases_to_old_database(tmp_path):
+    conn = init_db(str(tmp_path / "serve.db"))
+    apply_workbench_schema(conn)
+    conn.execute("DROP TABLE wb_topic_generation_leases")
+
+    apply_workbench_schema(conn)
+    apply_workbench_schema(conn)
+
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(wb_topic_generation_leases)")
+    }
+    assert columns == {"topic_id", "owner_id", "heartbeat_at", "expires_at"}
+    foreign_keys = conn.execute(
+        "PRAGMA foreign_key_list(wb_topic_generation_leases)"
+    ).fetchall()
+    assert any(row[2] == "wb_topics" and row[6] == "CASCADE" for row in foreign_keys)
 
 
 def test_topic_schema_applies_database_defaults(tmp_path):

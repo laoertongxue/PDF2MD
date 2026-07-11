@@ -146,3 +146,19 @@ class TopicRunRecord:
     error: str
     started_at: int
     finished_at: int | None
+
+
+@dataclass(frozen=True)
+class TopicGenerationStart:
+    topic: CourseTopic
+    input_fingerprint: str
+    stale_reason_baseline: str
+    owner_id: str
+
+
+@dataclass(frozen=True)
+class TopicGenerationLease:
+    topic_id: str
+    owner_id: str
+    heartbeat_at: int
+    expires_at: int

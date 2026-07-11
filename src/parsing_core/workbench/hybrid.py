@@ -5,6 +5,10 @@ DEEPSEEK_ROUNDS = {
     "application",
     "cards",
     "topic_outline",
+    "alignment",
+    "comparison",
+    "plain_cases",
+    "framework_application",
 }
 CODEX_ROUNDS = {"mermaid", "review"}
 

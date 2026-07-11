@@ -21,6 +21,8 @@ from parsing_core.workbench.models import (
     RunRecord,
     Source,
     TopicCard,
+    TopicGenerationLease,
+    TopicGenerationStart,
     TopicNoteBlock,
     TopicRunRecord,
 )
@@ -451,6 +453,285 @@ class WorkbenchRepository:
             (topic_id,),
         ).fetchall()
         return [(row[0], row[1], bool(row[2])) for row in rows]
+
+    def topic_input_snapshot(self, topic_id: str) -> tuple[dict, str]:
+        rows = self.conn.execute(
+            """
+            SELECT t.id, t.course_id, t.title, t.description, t.confirmed, t.updated_at,
+                   tc.created_at, s.id, s.title, s.updated_at,
+                   c.id, c.seq, c.title, c.status, c.updated_at,
+                   r.status, COALESCE(r.stale, 0), r.updated_at, r.output,
+                   n.id, n.kind, n.title, n.body, n.seq, n.updated_at
+            FROM wb_topics t
+            LEFT JOIN wb_topic_chapters tc ON tc.topic_id = t.id
+            LEFT JOIN wb_chapters c ON c.id = tc.chapter_id
+            LEFT JOIN wb_sources s ON s.id = c.source_id
+            LEFT JOIN wb_runs r ON r.chapter_id = c.id AND r.round_key = 'review'
+            LEFT JOIN wb_note_blocks n ON n.chapter_id = c.id
+            WHERE t.id = ?
+            ORDER BY s.title, s.id, c.seq, c.id, n.seq, n.kind, n.id
+            """,
+            (topic_id,),
+        ).fetchall()
+        if not rows:
+            raise ValueError("topic not found")
+        first = rows[0]
+        snapshot = {
+            "topic": {
+                "id": first[0], "course_id": first[1], "title": first[2],
+                "description": first[3], "confirmed": bool(first[4]),
+            },
+            "chapters": [],
+        }
+        chapters = {}
+        for row in rows:
+            if row[10] is None:
+                continue
+            chapter = chapters.get(row[10])
+            if chapter is None:
+                chapter = {
+                    "mapping_created_at": row[6],
+                    "source": {"id": row[7], "title": row[8], "updated_at": row[9]},
+                    "id": row[10], "seq": row[11], "title": row[12],
+                    "status": row[13], "updated_at": row[14],
+                    "review": {
+                        "status": row[15], "stale": bool(row[16]),
+                        "updated_at": row[17], "output": row[18],
+                    },
+                    "notes": [],
+                }
+                chapters[row[10]] = chapter
+                snapshot["chapters"].append(chapter)
+            if row[19] is not None:
+                chapter["notes"].append({
+                    "id": row[19], "kind": row[20], "title": row[21], "body": row[22],
+                    "seq": row[23], "updated_at": row[24],
+                })
+        return snapshot, _stable_fingerprint(snapshot)
+
+    def start_topic_generation(
+        self,
+        topic_id: str,
+        expected_fingerprint: str,
+        *,
+        now: int | None = None,
+        lease_ttl: int = 7_200,
+    ) -> TopicGenerationStart:
+        now = _now() if now is None else now
+        if lease_ttl <= 0:
+            raise ValueError("lease_ttl must be positive")
+        with self._atomic(immediate=True):
+            topic = self._topic_by_id(topic_id)
+            if topic.status == "RUNNING":
+                raise ValueError("topic is already running")
+            if topic.status in {"DRAFT", "NOT_READY"}:
+                raise ValueError("topic is not ready")
+            if topic.status not in {"READY", "STALE", "FAILED"}:
+                raise ValueError("topic cannot be started")
+            snapshot, fingerprint = self.topic_input_snapshot(topic_id)
+            if fingerprint != expected_fingerprint:
+                raise ValueError("topic input changed")
+            if not snapshot["topic"]["confirmed"] or not snapshot["chapters"] or any(
+                chapter["review"]["status"] != "DONE" or chapter["review"]["stale"]
+                for chapter in snapshot["chapters"]
+            ):
+                raise ValueError("topic dependencies are not ready")
+            baseline = topic.stale_reason
+            cursor = self.conn.execute(
+                "UPDATE wb_topics SET status = 'RUNNING', updated_at = ? "
+                "WHERE id = ? AND status = ?",
+                (_now(), topic_id, topic.status),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("topic is already running")
+            owner_id = uuid4().hex
+            self.conn.execute(
+                """
+                INSERT INTO wb_topic_generation_leases
+                  (topic_id, owner_id, heartbeat_at, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (topic_id, owner_id, now, now + lease_ttl),
+            )
+            return TopicGenerationStart(
+                self._topic_by_id(topic_id), fingerprint, baseline, owner_id
+            )
+
+    def get_topic_generation_lease(
+        self, topic_id: str
+    ) -> TopicGenerationLease | None:
+        row = self.conn.execute(
+            "SELECT * FROM wb_topic_generation_leases WHERE topic_id = ?",
+            (topic_id,),
+        ).fetchone()
+        return TopicGenerationLease(*row) if row else None
+
+    def heartbeat_topic_generation(
+        self,
+        topic_id: str,
+        owner_id: str,
+        *,
+        now: int | None = None,
+        lease_ttl: int = 7_200,
+    ) -> TopicGenerationLease:
+        now = _now() if now is None else now
+        if lease_ttl <= 0:
+            raise ValueError("lease_ttl must be positive")
+        with self._atomic(immediate=True):
+            cursor = self.conn.execute(
+                """
+                UPDATE wb_topic_generation_leases
+                SET heartbeat_at = ?, expires_at = ?
+                WHERE topic_id = ? AND owner_id = ? AND expires_at > ?
+                """,
+                (now, now + lease_ttl, topic_id, owner_id, now),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("topic generation lease lost")
+            lease = self.get_topic_generation_lease(topic_id)
+            if lease is None:
+                raise ValueError("topic generation lease lost")
+            return lease
+
+    def publish_topic_generation(
+        self,
+        topic_id: str,
+        expected_fingerprint: str,
+        stale_reason_baseline: str,
+        blocks: dict[str, str],
+        cards: list[dict],
+        *,
+        review_run_id: str,
+        owner_id: str,
+        review_output: str,
+        now: int | None = None,
+    ) -> CourseTopic:
+        now = _now() if now is None else now
+        with self._atomic(immediate=True):
+            topic = self._topic_by_id(topic_id)
+            if topic.status != "RUNNING":
+                raise ValueError("topic is not running")
+            _, fingerprint = self.topic_input_snapshot(topic_id)
+            if fingerprint != expected_fingerprint or topic.stale_reason != stale_reason_baseline:
+                raise ValueError("topic input changed")
+            lease = self.conn.execute(
+                """
+                SELECT 1 FROM wb_topic_generation_leases
+                WHERE topic_id = ? AND owner_id = ? AND expires_at > ?
+                """,
+                (topic_id, owner_id, now),
+            ).fetchone()
+            if lease is None:
+                raise ValueError("topic generation lease lost")
+            self.replace_topic_note_blocks(topic_id, blocks)
+            self.replace_topic_cards(topic_id, cards)
+            cursor = self.conn.execute(
+                """
+                UPDATE wb_topic_runs
+                SET status = 'COMPLETED', output = ?, error = '', finished_at = ?
+                WHERE id = ? AND topic_id = ? AND round_key = 'review' AND status = 'RUNNING'
+                """,
+                (review_output, now, review_run_id, topic_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("review topic run is not RUNNING")
+            self.conn.execute(
+                "UPDATE wb_topics SET status = 'COMPLETED', stale_reason = '', updated_at = ? "
+                "WHERE id = ? AND status = 'RUNNING'",
+                (now, topic_id),
+            )
+            self.conn.execute(
+                "DELETE FROM wb_topic_generation_leases WHERE topic_id = ? AND owner_id = ?",
+                (topic_id, owner_id),
+            )
+            return self._topic_by_id(topic_id)
+
+    def fail_topic_generation(self, topic_id: str, owner_id: str) -> CourseTopic:
+        with self._atomic(immediate=True):
+            topic = self._topic_by_id(topic_id)
+            if topic.status != "RUNNING":
+                return topic
+            lease = self.conn.execute(
+                """
+                SELECT 1 FROM wb_topic_generation_leases
+                WHERE topic_id = ? AND owner_id = ?
+                """,
+                (topic_id, owner_id),
+            ).fetchone()
+            if lease is None:
+                raise ValueError("topic generation lease lost")
+            published = self.conn.execute(
+                """
+                SELECT
+                  EXISTS(SELECT 1 FROM wb_topic_note_blocks WHERE topic_id = ?)
+                  OR EXISTS(SELECT 1 FROM wb_topic_cards WHERE topic_id = ?)
+                """,
+                (topic_id, topic_id),
+            ).fetchone()[0]
+            if published:
+                status = "STALE"
+            else:
+                status = self._topic_readiness_status(topic)
+                if status == "READY":
+                    status = "FAILED"
+            self.conn.execute(
+                "UPDATE wb_topics SET status = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'RUNNING'",
+                (status, _now(), topic_id),
+            )
+            self.conn.execute(
+                "DELETE FROM wb_topic_generation_leases WHERE topic_id = ? AND owner_id = ?",
+                (topic_id, owner_id),
+            )
+            return self._topic_by_id(topic_id)
+
+    def recover_interrupted_topic_run(
+        self, topic_id: str, *, now: int | None = None, owner_id: str | None = None
+    ) -> CourseTopic:
+        now = _now() if now is None else now
+        with self._atomic(immediate=True):
+            topic = self._topic_by_id(topic_id)
+            if topic.status != "RUNNING":
+                raise ValueError("topic is not running")
+            lease = self.get_topic_generation_lease(topic_id)
+            if lease is not None:
+                if owner_id is not None and lease.owner_id != owner_id:
+                    raise ValueError("topic generation lease owner mismatch")
+                if lease.expires_at > now:
+                    raise ValueError("topic generation lease not expired")
+            self.conn.execute(
+                """
+                UPDATE wb_topic_runs
+                SET status = 'FAILED', output = '', error = 'interrupted', finished_at = ?
+                WHERE topic_id = ? AND status = 'RUNNING'
+                """,
+                (now, topic_id),
+            )
+            published = self.conn.execute(
+                """
+                SELECT
+                  EXISTS(SELECT 1 FROM wb_topic_note_blocks WHERE topic_id = ?)
+                  OR EXISTS(SELECT 1 FROM wb_topic_cards WHERE topic_id = ?)
+                """,
+                (topic_id, topic_id),
+            ).fetchone()[0]
+            if published:
+                status = "STALE"
+            else:
+                status = self._topic_readiness_status(topic)
+                if status == "READY":
+                    status = "FAILED"
+            self.conn.execute(
+                "UPDATE wb_topics SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, topic_id),
+            )
+            if lease is not None:
+                self.conn.execute(
+                    "DELETE FROM wb_topic_generation_leases "
+                    "WHERE topic_id = ? AND owner_id = ? AND expires_at <= ?",
+                    (topic_id, lease.owner_id, now),
+                )
+            return self._topic_by_id(topic_id)
 
     def has_published_topic_output(self, topic_id: str) -> bool:
         return self._has_published_topic_output(topic_id)
