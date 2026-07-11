@@ -57,3 +57,81 @@ export interface WorkbenchSettings {
   deepseek_model: string;
   deepseek_key_masked: string | null;
 }
+
+export type TopicOutlineExecutor = "stub" | "deepseek" | "hybrid";
+export type TopicStatus = "DRAFT" | "NOT_READY" | "READY" | "RUNNING" | "COMPLETED" | "STALE" | "FAILED";
+export type TopicSyncStatus = "PENDING" | "SYNCING" | "SYNCED" | "FAILED";
+export type TopicRunStatus = "RUNNING" | "COMPLETED" | "FAILED";
+
+export interface TopicCreateRequest {
+  title?: string;
+  description?: string;
+  chapter_ids?: string[] | null;
+}
+
+export interface TopicPatchRequest {
+  title?: string;
+  description?: string;
+}
+
+export interface TopicMappingRequest {
+  chapter_ids: string[];
+}
+
+export interface TopicReorderRequest {
+  topic_ids: string[];
+}
+
+export interface TopicGenerateRequest {
+  executor: TopicOutlineExecutor;
+}
+
+export interface TopicRunRequest {
+  executor: "stub";
+}
+
+export interface CourseTopic {
+  id: string;
+  course_id: string;
+  seq: number;
+  title: string;
+  description: string;
+  generation_reason: string;
+  status: TopicStatus;
+  confirmed: boolean;
+  stale_reason: string;
+  chapter_ids: string[];
+  blocking_chapter_ids: string[];
+  sync_status: TopicSyncStatus;
+  sync_error: string;
+}
+
+export interface TopicNoteBlock {
+  id: string;
+  topic_id: string;
+  kind: string;
+  content: string;
+  updated_at: number;
+}
+
+export interface TopicCard {
+  id: string;
+  topic_id: string;
+  card_type: string;
+  title: string;
+  content: string;
+  source_refs: string[];
+  created_at: number;
+}
+
+export interface TopicRun {
+  id: string;
+  topic_id: string;
+  round_key: string;
+  status: TopicRunStatus;
+  input_fingerprint: string;
+  output: string;
+  error: string;
+  started_at: number;
+  finished_at: number | null;
+}

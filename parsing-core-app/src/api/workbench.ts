@@ -1,22 +1,183 @@
-import type { Card, Chapter, Course, NoteBlock, Source, WorkbenchSettings } from "./workbenchTypes";
+import type {
+  Card,
+  Chapter,
+  Course,
+  CourseTopic,
+  NoteBlock,
+  Source,
+  TopicCard,
+  TopicCreateRequest,
+  TopicNoteBlock,
+  TopicOutlineExecutor,
+  TopicPatchRequest,
+  TopicRun,
+  TopicRunStatus,
+  TopicStatus,
+  TopicSyncStatus,
+  WorkbenchSettings,
+} from "./workbenchTypes";
 
 const BASE = "http://127.0.0.1:8000";
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, init);
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    throw new Error(body?.detail ?? `HTTP ${res.status}`);
+export type SafeApiErrorCategory =
+  | "invalid_request"
+  | "not_found"
+  | "conflict"
+  | "invalid_format"
+  | "model_unavailable"
+  | "storage"
+  | "service_unavailable"
+  | "protocol"
+  | "network"
+  | "canceled";
+
+const SAFE_ERROR_MESSAGES: Record<SafeApiErrorCategory, string> = {
+  invalid_request: "请求内容不正确，请检查后重试",
+  not_found: "请求的内容不存在或已被删除",
+  conflict: "当前状态不允许此操作，请刷新后重试",
+  invalid_format: "请求内容或格式无效，请检查后重试",
+  model_unavailable: "主题生成服务暂时不可用，请稍后重试",
+  storage: "文件同步失败，请检查存储空间后重试",
+  service_unavailable: "服务暂时不可用，请稍后重试",
+  protocol: "服务返回数据格式异常，请稍后重试",
+  network: "无法连接本地服务，请确认服务已启动",
+  canceled: "操作已取消",
+};
+
+export class SafeApiError extends Error {
+  constructor(readonly category: SafeApiErrorCategory) {
+    super(SAFE_ERROR_MESSAGES[category]);
+    this.name = "SafeApiError";
   }
-  return res.json();
 }
 
-function post<T>(path: string, body?: unknown): Promise<T> {
+export function getSafeApiErrorMessage(error: unknown): string | null {
+  return error instanceof SafeApiError ? SAFE_ERROR_MESSAGES[error.category] : null;
+}
+
+const TOPIC_STATUSES = new Set<TopicStatus>(["DRAFT", "NOT_READY", "READY", "RUNNING", "COMPLETED", "STALE", "FAILED"]);
+const TOPIC_SYNC_STATUSES = new Set<TopicSyncStatus>(["PENDING", "SYNCING", "SYNCED", "FAILED"]);
+const TOPIC_RUN_STATUSES = new Set<TopicRunStatus>(["RUNNING", "COMPLETED", "FAILED"]);
+
+function protocolError(): SafeApiError {
+  return new SafeApiError("protocol");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function parseArray<T>(value: unknown, parseItem: (item: unknown) => T): T[] {
+  if (!Array.isArray(value)) throw protocolError();
+  return value.map(parseItem);
+}
+
+function parseTopic(value: unknown): CourseTopic {
+  if (!isRecord(value)) throw protocolError();
+  const status = value.status;
+  const syncStatus = value.sync_status;
+  if (
+    typeof value.id !== "string" ||
+    typeof value.course_id !== "string" ||
+    typeof value.seq !== "number" ||
+    typeof value.title !== "string" ||
+    typeof value.description !== "string" ||
+    typeof value.generation_reason !== "string" ||
+    typeof status !== "string" ||
+    !TOPIC_STATUSES.has(status as TopicStatus) ||
+    typeof value.confirmed !== "boolean" ||
+    typeof value.stale_reason !== "string" ||
+    !isStringArray(value.chapter_ids) ||
+    !isStringArray(value.blocking_chapter_ids) ||
+    typeof syncStatus !== "string" ||
+    !TOPIC_SYNC_STATUSES.has(syncStatus as TopicSyncStatus) ||
+    typeof value.sync_error !== "string"
+  ) throw protocolError();
+  return value as unknown as CourseTopic;
+}
+
+function parseTopicBlock(value: unknown): TopicNoteBlock {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.topic_id !== "string" ||
+    typeof value.kind !== "string" || typeof value.content !== "string" || typeof value.updated_at !== "number") {
+    throw protocolError();
+  }
+  return value as unknown as TopicNoteBlock;
+}
+
+function parseTopicCard(value: unknown): TopicCard {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.topic_id !== "string" ||
+    typeof value.card_type !== "string" || typeof value.title !== "string" || typeof value.content !== "string" ||
+    !isStringArray(value.source_refs) || typeof value.created_at !== "number") {
+    throw protocolError();
+  }
+  return value as unknown as TopicCard;
+}
+
+function parseTopicRun(value: unknown): TopicRun {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.topic_id !== "string" ||
+    typeof value.round_key !== "string" || typeof value.status !== "string" ||
+    !TOPIC_RUN_STATUSES.has(value.status as TopicRunStatus) || typeof value.input_fingerprint !== "string" ||
+    typeof value.output !== "string" || typeof value.error !== "string" || typeof value.started_at !== "number" ||
+    (value.finished_at !== null && typeof value.finished_at !== "number")) {
+    throw protocolError();
+  }
+  return value as unknown as TopicRun;
+}
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  parse: (value: unknown) => T = (value) => value as T,
+  allowNoContent = false,
+): Promise<T> {
+  try {
+    const res = await fetch(`${BASE}${path}`, init);
+    if (!res.ok) {
+      const categories: Record<number, SafeApiErrorCategory> = {
+        400: "invalid_request",
+        404: "not_found",
+        409: "conflict",
+        422: "invalid_format",
+        502: "model_unavailable",
+        507: "storage",
+      };
+      throw new SafeApiError(categories[res.status] ?? "service_unavailable");
+    }
+    if (res.status === 204) {
+      if (allowNoContent) return undefined as T;
+      throw protocolError();
+    }
+    let value: unknown;
+    try {
+      value = await res.json();
+    } catch {
+      throw protocolError();
+    }
+    return parse(value);
+  } catch (error) {
+    if (error instanceof SafeApiError) {
+      throw error;
+    }
+    if (isRecord(error) && error.name === "AbortError") {
+      throw new SafeApiError("canceled");
+    }
+    if (error instanceof TypeError) {
+      throw new SafeApiError("network");
+    }
+    throw protocolError();
+  }
+}
+
+function post<T>(path: string, body?: unknown, parse?: (value: unknown) => T): Promise<T> {
   return request<T>(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  }, parse);
 }
 
 export function listCourses(): Promise<Course[]> {
@@ -81,4 +242,80 @@ export function listCourseCards(courseId: string): Promise<Card[]> {
 
 export function listChapterNoteBlocks(chapterId: string): Promise<NoteBlock[]> {
   return request<NoteBlock[]>(`/api/workbench/chapters/${chapterId}/note-blocks`);
+}
+
+export function listTopics(courseId: string): Promise<CourseTopic[]> {
+  return request<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics`, undefined, (value) => parseArray(value, parseTopic));
+}
+
+export function createTopic(courseId: string, body: TopicCreateRequest): Promise<CourseTopic> {
+  return post<CourseTopic>(`/api/workbench/courses/${courseId}/topics`, body, parseTopic);
+}
+
+export function generateTopics(courseId: string, executor: TopicOutlineExecutor = "stub"): Promise<CourseTopic[]> {
+  return post<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics/generate`, { executor }, (value) => parseArray(value, parseTopic));
+}
+
+export function reorderTopics(courseId: string, topic_ids: string[]): Promise<CourseTopic[]> {
+  return request<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics/reorder`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topic_ids }),
+  }, (value) => parseArray(value, parseTopic));
+}
+
+export function confirmTopics(courseId: string): Promise<CourseTopic[]> {
+  return post<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics/confirm`, undefined, (value) => parseArray(value, parseTopic));
+}
+
+export function getTopic(topicId: string): Promise<CourseTopic> {
+  return request<CourseTopic>(`/api/workbench/topics/${topicId}`, undefined, parseTopic);
+}
+
+export function patchTopic(topicId: string, body: TopicPatchRequest): Promise<CourseTopic> {
+  return request<CourseTopic>(`/api/workbench/topics/${topicId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }, parseTopic);
+}
+
+export function deleteTopic(topicId: string): Promise<void> {
+  return request<void>(`/api/workbench/topics/${topicId}`, { method: "DELETE" }, undefined, true);
+}
+
+export function updateTopicMapping(topicId: string, chapter_ids: string[]): Promise<CourseTopic> {
+  return request<CourseTopic>(`/api/workbench/topics/${topicId}/chapters`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chapter_ids }),
+  }, parseTopic);
+}
+
+export function runTopic(topicId: string): Promise<CourseTopic> {
+  return post<CourseTopic>(`/api/workbench/topics/${topicId}/run`, { executor: "stub" }, parseTopic);
+}
+
+export function runTopicHybrid(topicId: string): Promise<CourseTopic> {
+  return post<CourseTopic>(`/api/workbench/topics/${topicId}/run-hybrid`, undefined, parseTopic);
+}
+
+export function recoverTopic(topicId: string): Promise<CourseTopic> {
+  return post<CourseTopic>(`/api/workbench/topics/${topicId}/recover`, undefined, parseTopic);
+}
+
+export function retryTopicSync(topicId: string): Promise<CourseTopic> {
+  return post<CourseTopic>(`/api/workbench/topics/${topicId}/sync/retry`, undefined, parseTopic);
+}
+
+export function listTopicNoteBlocks(topicId: string): Promise<TopicNoteBlock[]> {
+  return request<TopicNoteBlock[]>(`/api/workbench/topics/${topicId}/note-blocks`, undefined, (value) => parseArray(value, parseTopicBlock));
+}
+
+export function listTopicCards(topicId: string): Promise<TopicCard[]> {
+  return request<TopicCard[]>(`/api/workbench/topics/${topicId}/cards`, undefined, (value) => parseArray(value, parseTopicCard));
+}
+
+export function listTopicRuns(topicId: string): Promise<TopicRun[]> {
+  return request<TopicRun[]>(`/api/workbench/topics/${topicId}/runs`, undefined, (value) => parseArray(value, parseTopicRun));
 }

@@ -1,6 +1,22 @@
 import { create } from "zustand";
 import * as api from "../api/workbench";
-import type { Card, Chapter, Course, NoteBlock, Source } from "../api/workbenchTypes";
+import type {
+  Card,
+  Chapter,
+  Course,
+  CourseTopic,
+  NoteBlock,
+  Source,
+  TopicCard,
+  TopicNoteBlock,
+  TopicOutlineExecutor,
+  TopicRun,
+} from "../api/workbenchTypes";
+
+interface AsyncActionState {
+  loading: boolean;
+  error: string | null;
+}
 
 interface WorkbenchState {
   courses: Course[];
@@ -8,6 +24,12 @@ interface WorkbenchState {
   chapters: Record<string, Chapter[]>;
   cardsByCourse: Record<string, Card[]>;
   noteBlocksByChapter: Record<string, NoteBlock[]>;
+  topicsByCourse: Record<string, CourseTopic[]>;
+  topicBlocksById: Record<string, TopicNoteBlock[]>;
+  topicCardsById: Record<string, TopicCard[]>;
+  topicRunsById: Record<string, TopicRun[]>;
+  deletedTopics: Record<string, true>;
+  topicActions: Record<string, AsyncActionState>;
   selectedCourseId: string | null;
 
   selectCourse: (courseId: string) => void;
@@ -22,9 +44,155 @@ interface WorkbenchState {
   confirmChapter: (chapterId: string) => Promise<Chapter>;
   runChapter: (chapterId: string) => Promise<void>;
   runHybridChapter: (chapterId: string) => Promise<void>;
+  loadTopics: (courseId: string) => Promise<CourseTopic[]>;
+  generateTopics: (courseId: string, executor?: TopicOutlineExecutor) => Promise<CourseTopic[]>;
+  updateTopicMapping: (topicId: string, chapterIds: string[]) => Promise<CourseTopic>;
+  confirmTopics: (courseId: string) => Promise<CourseTopic[]>;
+  reorderTopics: (courseId: string, topicIds: string[]) => Promise<CourseTopic[]>;
+  deleteTopic: (courseId: string, topicId: string) => Promise<void>;
+  runTopic: (topicId: string) => Promise<CourseTopic>;
+  runTopicHybrid: (topicId: string) => Promise<CourseTopic>;
+  loadTopicBlocks: (topicId: string) => Promise<TopicNoteBlock[]>;
+  loadTopicCards: (topicId: string) => Promise<TopicCard[]>;
+  loadTopicRuns: (topicId: string) => Promise<TopicRun[]>;
+  retryTopicSync: (topicId: string) => Promise<CourseTopic>;
+  recoverTopic: (topicId: string) => Promise<CourseTopic>;
 }
 
 export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
+  const actionVersions = new Map<string, number>();
+  const resourceEpochs = new Map<string, number>();
+  let actionSequence = 0;
+
+  const claimResource = (resourceKey: string, startedAt: number, requireUnchanged = false) => {
+    if (requireUnchanged && (resourceEpochs.get(resourceKey) ?? 0) > startedAt) return null;
+    resourceEpochs.set(resourceKey, startedAt);
+    return startedAt;
+  };
+
+  const findTopicCourseId = (topicId: string) => {
+    for (const [courseId, topics] of Object.entries(get().topicsByCourse)) {
+      if (topics.some((topic) => topic.id === topicId)) return courseId;
+    }
+    return null;
+  };
+
+  const runAction = async <T>(
+    actionKey: string,
+    resourceKeys: string[],
+    operation: () => Promise<T>,
+    apply: (result: T) => void,
+    responseResourceKeys?: (result: T) => string[],
+  ): Promise<T> => {
+    const startedAt = ++actionSequence;
+    const actionVersion = (actionVersions.get(actionKey) ?? 0) + 1;
+    actionVersions.set(actionKey, actionVersion);
+    const leases = new Map(resourceKeys.map((key) => [key, claimResource(key, startedAt)]));
+    const ownsResources = () =>
+      [...leases].every(([resourceKey, epoch]) => resourceEpochs.get(resourceKey) === epoch);
+    set((state) => ({
+      topicActions: { ...state.topicActions, [actionKey]: { loading: true, error: null } },
+    }));
+    try {
+      const result = await operation();
+      if (ownsResources()) {
+        for (const resourceKey of responseResourceKeys?.(result) ?? []) {
+          if (!leases.has(resourceKey)) {
+            const lease = claimResource(resourceKey, startedAt, true);
+            if (lease === null) return result;
+            leases.set(resourceKey, lease);
+          }
+        }
+        if (ownsResources()) apply(result);
+      }
+      return result;
+    } catch (error) {
+      const message = api.getSafeApiErrorMessage(error) ?? "操作失败，请稍后重试";
+      if (actionVersions.get(actionKey) === actionVersion) {
+        set((state) => ({
+          topicActions: { ...state.topicActions, [actionKey]: { loading: false, error: message } },
+        }));
+      }
+      throw new Error(message);
+    } finally {
+      if (actionVersions.get(actionKey) === actionVersion) {
+        set((state) => ({
+          topicActions: {
+            ...state.topicActions,
+            [actionKey]: { ...state.topicActions[actionKey], loading: false },
+          },
+        }));
+      }
+    }
+  };
+
+  const saveTopics = (courseId: string, topics: CourseTopic[]) =>
+    set((state) => ({
+      topicsByCourse: {
+        ...state.topicsByCourse,
+        [courseId]: topics.filter((topic) => !state.deletedTopics[topic.id]),
+      },
+    }));
+
+  const saveTopic = (topic: CourseTopic) =>
+    set((state) => {
+      if (state.deletedTopics[topic.id]) return state;
+      const topics = state.topicsByCourse[topic.course_id] ?? [];
+      const exists = topics.some((item) => item.id === topic.id);
+      return {
+        topicsByCourse: {
+          ...state.topicsByCourse,
+          [topic.course_id]: exists
+            ? topics.map((item) => (item.id === topic.id ? topic : item))
+            : [...topics, topic].sort((left, right) => left.seq - right.seq),
+        },
+      };
+    });
+
+  const finalizeTopicDeletion = (courseId: string, topicId: string) => {
+    const finalizedAt = ++actionSequence;
+    for (const resourceKey of [
+      `courseTopics:${courseId}`,
+      `topic:${topicId}`,
+      `topicBlocks:${topicId}`,
+      `topicCards:${topicId}`,
+      `topicRuns:${topicId}`,
+    ]) resourceEpochs.set(resourceKey, finalizedAt);
+    set((state) => {
+      const topicBlocksById = { ...state.topicBlocksById };
+      const topicCardsById = { ...state.topicCardsById };
+      const topicRunsById = { ...state.topicRunsById };
+      delete topicBlocksById[topicId];
+      delete topicCardsById[topicId];
+      delete topicRunsById[topicId];
+      return {
+        deletedTopics: { ...state.deletedTopics, [topicId]: true },
+        topicsByCourse: {
+          ...state.topicsByCourse,
+          [courseId]: (state.topicsByCourse[courseId] ?? []).filter((topic) => topic.id !== topicId),
+        },
+        topicBlocksById,
+        topicCardsById,
+        topicRunsById,
+      };
+    });
+  };
+
+  const runTopicAction = (
+    action: string,
+    topicId: string,
+    operation: () => Promise<CourseTopic>,
+  ) => {
+    const courseId = findTopicCourseId(topicId);
+    return runAction(
+      `${action}:${topicId}`,
+      [`topic:${topicId}`, ...(courseId ? [`courseTopics:${courseId}`] : [])],
+      operation,
+      saveTopic,
+      (topic) => [`courseTopics:${topic.course_id}`],
+    );
+  };
+
   const updateChapter = (chapter: Chapter) =>
     set((state) => {
       const chapters = state.chapters[chapter.source_id] ?? [];
@@ -59,6 +227,12 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
     chapters: {},
     cardsByCourse: {},
     noteBlocksByChapter: {},
+    topicsByCourse: {},
+    topicBlocksById: {},
+    topicCardsById: {},
+    topicRunsById: {},
+    deletedTopics: {},
+    topicActions: {},
     selectedCourseId: null,
 
     selectCourse: (courseId) => set({ selectedCourseId: courseId }),
@@ -123,5 +297,104 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
     runHybridChapter: async (chapterId) => {
       await runChapterWith(chapterId, api.runHybridChapter);
     },
+
+    loadTopics: (courseId) =>
+      runAction(
+        `loadTopics:${courseId}`,
+        [`courseTopics:${courseId}`],
+        () => api.listTopics(courseId),
+        (topics) => saveTopics(courseId, topics),
+      ),
+
+    generateTopics: (courseId, executor = "stub") =>
+      runAction(
+        `generateTopics:${courseId}`,
+        [`courseTopics:${courseId}`],
+        () => api.generateTopics(courseId, executor),
+        (topics) => saveTopics(courseId, topics),
+      ),
+
+    updateTopicMapping: (topicId, chapterIds) =>
+      runTopicAction(
+        "updateTopicMapping",
+        topicId,
+        () => api.updateTopicMapping(topicId, chapterIds),
+      ),
+
+    confirmTopics: (courseId) =>
+      runAction(
+        `confirmTopics:${courseId}`,
+        [`courseTopics:${courseId}`],
+        () => api.confirmTopics(courseId),
+        (topics) => saveTopics(courseId, topics),
+      ),
+
+    reorderTopics: (courseId, topicIds) =>
+      runAction(
+        `reorderTopics:${courseId}`,
+        [`courseTopics:${courseId}`],
+        () => api.reorderTopics(courseId, topicIds),
+        (topics) => saveTopics(courseId, topics),
+      ),
+
+    deleteTopic: (courseId, topicId) =>
+      (async () => {
+        const actionKey = `deleteTopic:${topicId}`;
+        const actionVersion = (actionVersions.get(actionKey) ?? 0) + 1;
+        actionVersions.set(actionKey, actionVersion);
+        set((state) => ({ topicActions: { ...state.topicActions, [actionKey]: { loading: true, error: null } } }));
+        try {
+          await api.deleteTopic(topicId);
+          finalizeTopicDeletion(courseId, topicId);
+        } catch (error) {
+          const message = api.getSafeApiErrorMessage(error) ?? "操作失败，请稍后重试";
+          if (actionVersions.get(actionKey) === actionVersion) {
+            set((state) => ({ topicActions: { ...state.topicActions, [actionKey]: { loading: false, error: message } } }));
+          }
+          throw new Error(message);
+        } finally {
+          if (actionVersions.get(actionKey) === actionVersion) {
+            set((state) => ({
+              topicActions: { ...state.topicActions, [actionKey]: { ...state.topicActions[actionKey], loading: false } },
+            }));
+          }
+        }
+      })(),
+
+    runTopic: (topicId) =>
+      runTopicAction("runTopic", topicId, () => api.runTopic(topicId)),
+
+    runTopicHybrid: (topicId) =>
+      runTopicAction("runTopicHybrid", topicId, () => api.runTopicHybrid(topicId)),
+
+    loadTopicBlocks: (topicId) =>
+      runAction(
+        `loadTopicBlocks:${topicId}`,
+        [`topicBlocks:${topicId}`],
+        () => api.listTopicNoteBlocks(topicId),
+        (blocks) => set((state) => ({ topicBlocksById: { ...state.topicBlocksById, [topicId]: blocks } })),
+      ),
+
+    loadTopicCards: (topicId) =>
+      runAction(
+        `loadTopicCards:${topicId}`,
+        [`topicCards:${topicId}`],
+        () => api.listTopicCards(topicId),
+        (cards) => set((state) => ({ topicCardsById: { ...state.topicCardsById, [topicId]: cards } })),
+      ),
+
+    loadTopicRuns: (topicId) =>
+      runAction(
+        `loadTopicRuns:${topicId}`,
+        [`topicRuns:${topicId}`],
+        () => api.listTopicRuns(topicId),
+        (runs) => set((state) => ({ topicRunsById: { ...state.topicRunsById, [topicId]: runs } })),
+      ),
+
+    retryTopicSync: (topicId) =>
+      runTopicAction("retryTopicSync", topicId, () => api.retryTopicSync(topicId)),
+
+    recoverTopic: (topicId) =>
+      runTopicAction("recoverTopic", topicId, () => api.recoverTopic(topicId)),
   };
 });
