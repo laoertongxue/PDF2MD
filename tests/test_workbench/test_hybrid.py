@@ -15,7 +15,7 @@ class RecordingExecutor:
 
 @pytest.mark.parametrize(
     "round_key",
-    ["structure", "concepts", "plain_explain", "application", "cards"],
+    ["structure", "concepts", "plain_explain", "application", "cards", "topic_outline"],
 )
 def test_hybrid_routes_deepseek_rounds(round_key):
     deepseek = RecordingExecutor("deepseek")

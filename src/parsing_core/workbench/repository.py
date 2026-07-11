@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import time
@@ -14,6 +15,7 @@ from parsing_core.workbench.models import (
     Card,
     Chapter,
     Course,
+    CourseChapter,
     CourseTopic,
     NoteBlock,
     RunRecord,
@@ -45,6 +47,17 @@ def _normalize_stale_reason(reason: str) -> str:
     if not reason or "\n" in reason or "\r" in reason:
         raise ValueError("reason must be a nonempty single line")
     return reason
+
+
+def _stable_fingerprint(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _temporary_topic_sequences(existing: list[object], count: int) -> list[int]:
@@ -129,6 +142,7 @@ class WorkbenchRepository:
         seq: int,
         title: str,
         description: str = "",
+        generation_reason: str = "",
     ) -> CourseTopic:
         now = _now()
         row = {
@@ -142,6 +156,7 @@ class WorkbenchRepository:
             "stale_reason": "",
             "created_at": now,
             "updated_at": now,
+            "generation_reason": generation_reason,
         }
         with self._atomic():
             self.conn.execute(
@@ -149,12 +164,12 @@ class WorkbenchRepository:
                 INSERT INTO wb_topics
                   (
                     id, course_id, seq, title, description, status, confirmed,
-                    stale_reason, created_at, updated_at
+                    stale_reason, created_at, updated_at, generation_reason
                   )
                 VALUES
                   (
                     :id, :course_id, :seq, :title, :description, :status, :confirmed,
-                    :stale_reason, :created_at, :updated_at
+                    :stale_reason, :created_at, :updated_at, :generation_reason
                   )
                 """,
                 {**row, "confirmed": int(row["confirmed"])},
@@ -171,6 +186,142 @@ class WorkbenchRepository:
             (course_id,),
         ).fetchall()
         return [self._topic(row) for row in rows]
+
+    def replace_course_topic_drafts(
+        self,
+        course_id: str,
+        topic_specs: list[dict],
+        expected_fingerprint: str,
+    ) -> list[CourseTopic]:
+        with self._atomic(immediate=True):
+            _, current_fingerprint = self.course_topic_outline_snapshot(course_id)
+            if current_fingerprint != expected_fingerprint:
+                raise ValueError("course outline input snapshot changed")
+            topics = self.list_topics(course_id)
+            protected = [
+                topic.id
+                for topic in topics
+                if topic.confirmed
+                or topic.status != "DRAFT"
+                or self._has_published_topic_output(topic.id)
+            ]
+            if protected:
+                raise ValueError(f"protected topic prevents replacement: {', '.join(protected)}")
+
+            chapter_ids = [
+                chapter_id
+                for spec in topic_specs
+                for chapter_id in spec["chapter_ids"]
+            ]
+            chapters = self._chapters_by_ids(list(dict.fromkeys(chapter_ids)))
+            if len(chapters) != len(set(chapter_ids)) or any(
+                chapter.course_id != course_id for chapter in chapters
+            ):
+                raise ValueError("all chapters must exist and belong to the course")
+
+            self.conn.execute(
+                "DELETE FROM wb_topics WHERE course_id = ? AND confirmed = 0",
+                (course_id,),
+            )
+            now = _now()
+            for seq, spec in enumerate(topic_specs):
+                topic_id = uuid4().hex
+                self.conn.execute(
+                    """
+                    INSERT INTO wb_topics
+                      (id, course_id, seq, title, description, status, confirmed,
+                       stale_reason, created_at, updated_at, generation_reason)
+                    VALUES (?, ?, ?, ?, ?, 'DRAFT', 0, '', ?, ?, ?)
+                    """,
+                    (
+                        topic_id,
+                        course_id,
+                        seq,
+                        spec["title"],
+                        spec["description"],
+                        now,
+                        now,
+                        spec["reason"],
+                    ),
+                )
+                self.conn.executemany(
+                    """
+                    INSERT INTO wb_topic_chapters (topic_id, chapter_id, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    ((topic_id, chapter_id, now) for chapter_id in spec["chapter_ids"]),
+                )
+        return self.list_topics(course_id)
+
+    def course_topic_outline_snapshot(self, course_id: str) -> tuple[dict, str]:
+        rows = self.conn.execute(
+            """
+            SELECT
+              co.id, co.title, co.description, co.updated_at,
+              c.id, c.status, c.updated_at, c.seq, c.title,
+              s.id, s.title,
+              r.status, COALESCE(r.stale, 0), r.updated_at, r.output,
+              n.kind, n.seq, n.title, n.body, n.updated_at
+            FROM wb_courses co
+            LEFT JOIN wb_chapters c
+              ON c.course_id = co.id AND c.status IN ('CONFIRMED', 'COMPLETED')
+            LEFT JOIN wb_sources s ON s.id = c.source_id
+            LEFT JOIN wb_runs r
+              ON r.chapter_id = c.id AND r.round_key = 'review'
+            LEFT JOIN wb_note_blocks n ON n.chapter_id = c.id
+            WHERE co.id = ?
+            ORDER BY s.title, s.id, c.seq, c.id, n.seq, n.kind, n.id
+            """,
+            (course_id,),
+        ).fetchall()
+        if not rows:
+            raise ValueError("course not found")
+
+        first = rows[0]
+        snapshot = {
+            "course": {
+                "id": first[0],
+                "title": first[1],
+                "description": first[2],
+                "updated_at": first[3],
+            },
+            "chapters": [],
+        }
+        by_id = {}
+        for row in rows:
+            chapter_id = row[4]
+            if chapter_id is None:
+                continue
+            chapter = by_id.get(chapter_id)
+            if chapter is None:
+                chapter = {
+                    "id": chapter_id,
+                    "status": row[5],
+                    "updated_at": row[6],
+                    "seq": row[7],
+                    "title": row[8],
+                    "source": {"id": row[9], "title": row[10]},
+                    "review": {
+                        "status": row[11],
+                        "stale": bool(row[12]),
+                        "updated_at": row[13],
+                        "output": row[14],
+                    },
+                    "notes": [],
+                }
+                by_id[chapter_id] = chapter
+                snapshot["chapters"].append(chapter)
+            if row[15] is not None:
+                chapter["notes"].append(
+                    {
+                        "kind": row[15],
+                        "seq": row[16],
+                        "title": row[17],
+                        "body": row[18],
+                        "updated_at": row[19],
+                    }
+                )
+        return snapshot, _stable_fingerprint(snapshot)
 
     def update_topic(
         self,
@@ -781,6 +932,19 @@ class WorkbenchRepository:
         ).fetchall()
         return [Chapter(*row) for row in rows]
 
+    def list_course_chapters(self, course_id: str) -> list[CourseChapter]:
+        rows = self.conn.execute(
+            """
+            SELECT c.*, s.title
+            FROM wb_chapters c
+            JOIN wb_sources s ON s.id = c.source_id
+            WHERE c.course_id = ? AND c.status IN ('CONFIRMED', 'COMPLETED')
+            ORDER BY s.title, s.id, c.seq, c.id
+            """,
+            (course_id,),
+        ).fetchall()
+        return [CourseChapter(Chapter(*row[:-1]), row[-1]) for row in rows]
+
     def delete_chapters_by_source(self, source_id: str) -> None:
         self.conn.execute("DELETE FROM wb_chapters WHERE source_id = ?", (source_id,))
         self.conn.commit()
@@ -831,7 +995,7 @@ class WorkbenchRepository:
 
     def list_note_blocks(self, chapter_id: str) -> list[NoteBlock]:
         rows = self.conn.execute(
-            "SELECT * FROM wb_note_blocks WHERE chapter_id = ? ORDER BY seq",
+            "SELECT * FROM wb_note_blocks WHERE chapter_id = ? ORDER BY seq, id",
             (chapter_id,),
         ).fetchall()
         return [NoteBlock(*row) for row in rows]

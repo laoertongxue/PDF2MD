@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS wb_topics (
   stale_reason TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  generation_reason TEXT NOT NULL DEFAULT '',
   UNIQUE(course_id, seq)
 );
 
@@ -150,4 +151,9 @@ CREATE INDEX IF NOT EXISTS idx_wb_topic_runs_topic ON wb_topic_runs(topic_id, st
 def apply_workbench_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(WORKBENCH_SCHEMA_SQL)
+    topic_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_topics)")}
+    if "generation_reason" not in topic_columns:
+        conn.execute(
+            "ALTER TABLE wb_topics ADD COLUMN generation_reason TEXT NOT NULL DEFAULT ''"
+        )
     conn.commit()

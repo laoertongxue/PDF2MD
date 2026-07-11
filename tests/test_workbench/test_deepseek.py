@@ -3,7 +3,13 @@ from urllib.error import HTTPError
 
 import pytest
 
-from parsing_core.workbench.deepseek import DeepSeekClient, DeepSeekError, DeepSeekExecutor
+from parsing_core.workbench.deepseek import (
+    MAX_HTTP_RESPONSE_BYTES,
+    TOPIC_OUTLINE_MAX_TOKENS,
+    DeepSeekClient,
+    DeepSeekError,
+    DeepSeekExecutor,
+)
 
 
 class FakeResponse:
@@ -16,19 +22,23 @@ class FakeResponse:
     def __exit__(self, *args):
         return False
 
-    def read(self):
+    def read(self, size=-1):
         return json.dumps(self.payload).encode()
 
 
 def test_deepseek_client_returns_message(monkeypatch):
+    request_payload = {}
+
     def fake_urlopen(req, timeout):
         assert req.headers["Authorization"] == "Bearer sk-test"
+        request_payload.update(json.loads(req.data))
         return FakeResponse({"choices": [{"message": {"content": "精读结果"}}]})
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     client = DeepSeekClient(api_key="sk-test", model="deepseek-chat")
-    assert client.complete("hello") == "精读结果"
+    assert client.complete("hello", max_tokens=321) == "精读结果"
+    assert request_payload["max_tokens"] == 321
 
 
 def test_deepseek_client_raises_on_http_error(monkeypatch):
@@ -55,10 +65,85 @@ def test_deepseek_client_raises_on_empty_choices(monkeypatch):
 
 def test_deepseek_executor_uses_client():
     class Client:
-        def complete(self, prompt: str) -> str:
+        model = "deepseek-chat"
+
+        def complete(self, prompt: str, *, max_tokens: int) -> str:
             assert "## 原文" in prompt
+            assert max_tokens > 0
             return "结构理解"
 
     executor = DeepSeekExecutor(Client())
 
     assert executor.run("structure", "## 原文\n战略") == "结构理解"
+
+
+def test_topic_outline_uses_fixed_output_budget():
+    calls = []
+
+    class Client:
+        model = "deepseek-chat"
+
+        def complete(self, prompt, *, max_tokens):
+            calls.append((prompt, max_tokens))
+            return "{}"
+
+    executor = DeepSeekExecutor(Client())
+    executor.validate_prompt("topic_outline", "small prompt")
+    output = executor.run("topic_outline", "prompt")
+
+    assert output == "{}"
+    assert calls == [("prompt", TOPIC_OUTLINE_MAX_TOKENS)]
+
+
+def test_validate_prompt_uses_conservative_fallback(monkeypatch):
+    class Client:
+        model = "deepseek-chat"
+
+    executor = DeepSeekExecutor(Client())
+    monkeypatch.setattr(executor, "_load_litellm", lambda: (_ for _ in ()).throw(ImportError()))
+
+    with pytest.raises(DeepSeekError, match="fallback token estimate"):
+        executor.validate_prompt("topic_outline", "汉" * 20_000)
+
+
+def test_http_response_read_is_bounded_and_oversize_is_stable(monkeypatch):
+    calls = []
+
+    class OversizeResponse(FakeResponse):
+        def read(self, size=-1):
+            calls.append(size)
+            return b"x" * size
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda req, timeout: OversizeResponse({}),
+    )
+    monkeypatch.setattr(
+        "parsing_core.workbench.deepseek.json.loads",
+        lambda value: (_ for _ in ()).throw(AssertionError("JSON must not be parsed")),
+    )
+    client = DeepSeekClient(api_key="sk-test", model="deepseek-chat")
+
+    with pytest.raises(DeepSeekError, match="deepseek response exceeds limit"):
+        client.complete("hello")
+    assert calls == [MAX_HTTP_RESPONSE_BYTES + 1]
+
+
+@pytest.mark.parametrize("body", [b"\xff", b"not-json"])
+def test_malformed_http_response_has_stable_error(monkeypatch, body):
+    class MalformedResponse(FakeResponse):
+        def read(self, size=-1):
+            return body
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda req, timeout: MalformedResponse({}),
+    )
+    client = DeepSeekClient(api_key="sk-secret", model="deepseek-chat")
+
+    with pytest.raises(DeepSeekError, match="deepseek returned malformed response") as error:
+        client.complete("hello")
+    assert "sk-secret" not in str(error.value)
+    decoded = body.decode("utf-8", errors="ignore")
+    if decoded:
+        assert decoded not in str(error.value)

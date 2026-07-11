@@ -5,6 +5,10 @@ class IntensiveReadingExecutor(Protocol):
     def run(self, round_key: str, task_package: str) -> str: ...
 
 
+class TextExecutor(Protocol):
+    def run(self, task_key: str, prompt: str) -> str: ...
+
+
 class StubIntensiveReadingExecutor:
     def run(self, round_key: str, task_package: str) -> str:
         if round_key == "mermaid":

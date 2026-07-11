@@ -53,6 +53,7 @@ def test_apply_workbench_schema_is_idempotent(tmp_path):
         "status",
         "confirmed",
         "stale_reason",
+        "generation_reason",
         "created_at",
         "updated_at",
     } == topic_cols
@@ -79,9 +80,10 @@ def test_topic_schema_applies_database_defaults(tmp_path):
     )
 
     row = conn.execute(
-        "SELECT description, status, confirmed, stale_reason FROM wb_topics WHERE id = 'topic-1'"
+        "SELECT description, status, confirmed, stale_reason, generation_reason "
+        "FROM wb_topics WHERE id = 'topic-1'"
     ).fetchone()
-    assert tuple(row) == ("", "DRAFT", 0, "")
+    assert tuple(row) == ("", "DRAFT", 0, "", "")
 
     with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
         conn.execute(
@@ -148,6 +150,6 @@ def test_apply_schema_preserves_existing_topics_table_without_rebuilding(tmp_pat
     apply_workbench_schema(conn)
 
     row = conn.execute(
-        "SELECT title, confirmed FROM wb_topics WHERE id = 'topic-1'"
+        "SELECT title, confirmed, generation_reason FROM wb_topics WHERE id = 'topic-1'"
     ).fetchone()
-    assert tuple(row) == ("旧主题", 2)
+    assert tuple(row) == ("旧主题", 2, "")

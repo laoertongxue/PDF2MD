@@ -78,6 +78,10 @@ def make_course_with_chapters(r, tmp_path, title="战略管理"):
     return course, (chapter_a2, chapter_a0, chapter_b0)
 
 
+def outline_fingerprint(r, course_id):
+    return r.course_topic_outline_snapshot(course_id)[1]
+
+
 def test_topic_crud_and_defaults(tmp_path):
     r = repo(tmp_path)
     course = r.create_course("战略管理", "", str(tmp_path / "out"))
@@ -87,6 +91,7 @@ def test_topic_crud_and_defaults(tmp_path):
     assert topic.status == "DRAFT"
     assert topic.confirmed is False
     assert topic.stale_reason == ""
+    assert topic.generation_reason == ""
     assert r.get_topic(topic.id) == topic
     assert r.list_topics(course.id) == [topic]
 
@@ -104,6 +109,148 @@ def test_topic_crud_and_defaults(tmp_path):
     assert updated.status == "READY"
     assert updated.confirmed is True
     assert updated.stale_reason == "source changed"
+
+
+def test_list_course_chapters_includes_source_and_excludes_drafts(tmp_path):
+    r = repo(tmp_path)
+    course, chapters = make_course_with_chapters(r, tmp_path)
+    for chapter in chapters[:2]:
+        r.update_chapter_status(chapter.id, "CONFIRMED")
+
+    rows = r.list_course_chapters(course.id)
+
+    assert [(row.source_title, row.chapter.title) for row in rows] == [
+        ("主教材", "第一章"),
+        ("主教材", "第三章"),
+    ]
+
+
+def test_replace_course_topic_drafts_replaces_only_safe_drafts(tmp_path):
+    r = repo(tmp_path)
+    course, chapters = make_course_with_chapters(r, tmp_path)
+    old = r.create_topic(course.id, 0, "旧草稿", "旧说明")
+    r.replace_topic_chapters(old.id, [chapters[0].id])
+
+    topics = r.replace_course_topic_drafts(
+        course.id,
+        [
+            {
+                "title": "新主题一",
+                "description": "说明一",
+                "reason": "原因一",
+                "chapter_ids": [chapters[1].id, chapters[0].id],
+            },
+            {
+                "title": "新主题二",
+                "description": "说明二",
+                "reason": "原因二",
+                "chapter_ids": [chapters[0].id],
+            },
+        ],
+        expected_fingerprint=outline_fingerprint(r, course.id),
+    )
+
+    assert r.get_topic(old.id) is None
+    assert [(t.seq, t.title, t.generation_reason) for t in topics] == [
+        (0, "新主题一", "原因一"),
+        (1, "新主题二", "原因二"),
+    ]
+    assert [c.id for c in r.list_topic_chapters(topics[0].id)] == [
+        chapters[1].id,
+        chapters[0].id,
+    ]
+
+
+@pytest.mark.parametrize(
+    "published_kind",
+    ["confirmed", "non-draft", "note", "card", "completed-run"],
+)
+def test_replace_course_topic_drafts_protects_manual_and_published_topics(tmp_path, published_kind):
+    r = repo(tmp_path)
+    course, chapters = make_course_with_chapters(r, tmp_path)
+    topic = r.create_topic(course.id, 0, "受保护主题", "")
+    if published_kind == "confirmed":
+        r.update_topic(topic.id, confirmed=True)
+    elif published_kind == "non-draft":
+        r.update_topic(topic.id, status="RUNNING")
+    elif published_kind == "note":
+        r.replace_topic_note_blocks(topic.id, {"summary": "published"})
+    elif published_kind == "card":
+        r.replace_topic_cards(
+            topic.id,
+            [{"card_type": "x", "title": "x", "content": "x", "source_refs_json": []}],
+        )
+    else:
+        run = r.create_topic_run(topic.id, "draft", "fingerprint")
+        r.finish_topic_run(run.id, "COMPLETED", output="published")
+
+    with pytest.raises(ValueError, match="protected topic"):
+        r.replace_course_topic_drafts(
+            course.id,
+            [{"title": "new", "description": "", "reason": "r", "chapter_ids": [chapters[0].id]}],
+            expected_fingerprint=outline_fingerprint(r, course.id),
+        )
+    assert r.list_topics(course.id) == [r.get_topic(topic.id)]
+
+
+def test_replace_course_topic_drafts_rolls_back_all_inserts(tmp_path):
+    r = repo(tmp_path)
+    course, chapters = make_course_with_chapters(r, tmp_path)
+    old = r.create_topic(course.id, 0, "旧草稿", "")
+    r.conn.execute(
+        """
+        CREATE TRIGGER fail_second_generated_topic
+        BEFORE INSERT ON wb_topics WHEN NEW.title = '失败主题'
+        BEGIN SELECT RAISE(ABORT, 'forced failure'); END
+        """
+    )
+    r.conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced failure"):
+        r.replace_course_topic_drafts(
+            course.id,
+            [
+                {
+                    "title": "先插入",
+                    "description": "",
+                    "reason": "r",
+                    "chapter_ids": [chapters[0].id],
+                },
+                {
+                    "title": "失败主题",
+                    "description": "",
+                    "reason": "r",
+                    "chapter_ids": [chapters[1].id],
+                },
+            ],
+            expected_fingerprint=outline_fingerprint(r, course.id),
+        )
+    assert r.list_topics(course.id) == [old]
+
+
+def test_replace_course_topic_drafts_rechecks_protection_after_begin_immediate(tmp_path):
+    path = tmp_path / "concurrent.db"
+    first_conn = sqlite3.connect(path, check_same_thread=False, timeout=2)
+    second_conn = sqlite3.connect(path, check_same_thread=False, timeout=2)
+    apply_workbench_schema(first_conn)
+    apply_workbench_schema(second_conn)
+    first = WorkbenchRepository(first_conn)
+    second = WorkbenchRepository(second_conn)
+    course = first.create_course("战略", "", str(tmp_path))
+    source = first.create_source(course.id, "main", "/tmp/a", "教材")
+    chapter = first.create_chapter(course.id, source.id, 0, "章", "/tmp/a.md")
+    topic = first.create_topic(course.id, 0, "人工主题", "")
+
+    second.update_topic(topic.id, confirmed=True)
+    with pytest.raises(ValueError, match="protected topic"):
+        first.replace_course_topic_drafts(
+            course.id,
+            [{"title": "AI 主题", "description": "", "reason": "r", "chapter_ids": [chapter.id]}],
+            expected_fingerprint=outline_fingerprint(first, course.id),
+        )
+    assert first.get_topic(topic.id).confirmed is True
+    first_conn.close()
+    second_conn.close()
 
 
 def test_reorder_topics_swaps_unique_sequences_and_rejects_invalid_lists_atomically(tmp_path):

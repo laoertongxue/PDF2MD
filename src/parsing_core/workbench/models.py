@@ -99,6 +99,13 @@ class CourseTopic:
     stale_reason: str
     created_at: int
     updated_at: int
+    generation_reason: str = ""
+
+
+@dataclass(frozen=True)
+class CourseChapter:
+    chapter: Chapter
+    source_title: str
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,11 @@
-DEEPSEEK_ROUNDS = {"structure", "concepts", "plain_explain", "application", "cards"}
+DEEPSEEK_ROUNDS = {
+    "structure",
+    "concepts",
+    "plain_explain",
+    "application",
+    "cards",
+    "topic_outline",
+}
 CODEX_ROUNDS = {"mermaid", "review"}
 
 
