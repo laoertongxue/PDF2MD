@@ -1,0 +1,331 @@
+import gc
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from parsing_core.storage.schema import init_db
+from parsing_core.workbench import topic_markdown_sync
+from parsing_core.workbench.markdown_sync import recover_atomic_bundle
+from parsing_core.workbench.repository import WorkbenchRepository
+from parsing_core.workbench.schema import apply_workbench_schema
+from parsing_core.workbench.topic_markdown_sync import sync_topic_markdown
+from parsing_core.workbench.topic_pipeline import FIXED_TOPIC_KINDS
+
+TITLES = [
+    "主题概要",
+    "关联教材与章节",
+    "核心概念",
+    "教材观点对照",
+    "共识与分歧",
+    "互补视角",
+    "通俗有趣生活化解释",
+    "教材案例",
+    "现实案例与问题解决",
+    "综合分析框架",
+    "实际应用方法",
+    "延伸思考",
+    "Mermaid知识结构图",
+    "Mermaid应用流程图",
+]
+
+
+def setup_published(tmp_path):
+    conn = init_db(str(tmp_path / "db.sqlite"))
+    apply_workbench_schema(conn)
+    repo = WorkbenchRepository(conn)
+    course = repo.create_course("课程", "", str(tmp_path / "out"))
+    source = repo.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    raw = tmp_path / "raw.md"
+    raw.write_text("原文", encoding="utf-8")
+    chapter = repo.create_chapter(course.id, source.id, 0, "章节", str(raw))
+    from parsing_core.workbench.markdown_sync import sync_chapter_markdown
+
+    sync_chapter_markdown(repo, chapter.id)
+    topic = repo.create_topic(course.id, 0, "主题", "说明", "生成原因")
+    repo.update_topic(topic.id, confirmed=True, status="COMPLETED")
+    repo.replace_topic_chapters(topic.id, [chapter.id])
+    repo.replace_topic_note_blocks(
+        topic.id,
+        {
+            kind: (
+                "```mermaid\nflowchart TD\nA-->B\n```"
+                if kind.endswith("mermaid")
+                else f"内容 {kind}"
+            )
+            for kind in FIXED_TOPIC_KINDS
+        },
+    )
+    repo.replace_topic_cards(
+        topic.id,
+        [
+            {
+                "card_type": "观点",
+                "title": f"卡片{i}",
+                "content": "内容",
+                "source_refs_json": ["[《教材》·第 1 章]"],
+            }
+            for i in range(8)
+        ],
+    )
+    return repo, topic, chapter
+
+
+def test_topic_sync_writes_fixed_sections_diagrams_cards_and_relative_link(tmp_path):
+    repo, topic, _ = setup_published(tmp_path)
+    paths = sync_topic_markdown(repo, topic.id)
+    note = Path(paths["note"]).read_text(encoding="utf-8")
+    topic_map = Path(paths["map"]).read_text(encoding="utf-8")
+    assert [line[3:] for line in note.splitlines() if line.startswith("## ")] == TITLES + [
+        "写作卡片"
+    ]
+    assert note.count("```mermaid") == 2
+    assert (
+        len(
+            [
+                line
+                for line in Path(paths["cards"]).read_text(encoding="utf-8").splitlines()
+                if line.startswith("## ")
+            ]
+        )
+        == 8
+    )
+    assert "../教材/教材/01-章节/intensive-note.md" in topic_map
+    assert "<!-- topic-id:" in topic_map
+
+
+def test_invalid_blocks_or_refs_do_not_overwrite_existing_topic_note(tmp_path):
+    repo, topic, _ = setup_published(tmp_path)
+    note = Path(sync_topic_markdown(repo, topic.id)["note"])
+    old = note.read_text(encoding="utf-8")
+    repo.conn.execute(
+        "DELETE FROM wb_topic_note_blocks WHERE topic_id = ? AND kind = ?", (topic.id, "overview")
+    )
+    repo.conn.commit()
+    with pytest.raises(ValueError, match="fourteen"):
+        sync_topic_markdown(repo, topic.id)
+    assert note.read_text(encoding="utf-8") == old
+
+    repo.replace_topic_note_blocks(
+        topic.id,
+        {
+            kind: "flowchart TD\nA-->B" if kind.endswith("mermaid") else kind
+            for kind in FIXED_TOPIC_KINDS
+        },
+    )
+    repo.conn.execute(
+        "UPDATE wb_topic_cards SET source_refs_json = ? WHERE topic_id = ?",
+        (json.dumps("bad"), topic.id),
+    )
+    repo.conn.commit()
+    with pytest.raises(ValueError, match="source refs"):
+        sync_topic_markdown(repo, topic.id)
+    assert note.read_text(encoding="utf-8") == old
+
+
+def test_topic_card_refs_must_match_current_mapping_with_duplicate_title_suffixes(tmp_path):
+    repo, topic, first_chapter = setup_published(tmp_path)
+    second_source = repo.create_source(topic.course_id, "main", "/tmp/second.pdf", "教材")
+    second_chapter = repo.create_chapter(
+        topic.course_id, second_source.id, 0, "第二来源章节", str(tmp_path / "raw.md")
+    )
+    outside_source = repo.create_source(topic.course_id, "main", "/tmp/outside.pdf", "教材")
+    outside_chapter = repo.create_chapter(
+        topic.course_id, outside_source.id, 0, "未映射章节", str(tmp_path / "raw.md")
+    )
+    repo.replace_topic_chapters(topic.id, [first_chapter.id, second_chapter.id])
+    repo.upsert_run(first_chapter.id, "review", "old", "FAILED", "", "", "failed")
+    repo.upsert_run(second_chapter.id, "review", "old", "DONE", "", "", "old", stale=True)
+    valid = ["[《教材》·第 1 章]", "[《教材（2）》·第 1 章]"]
+    repo.conn.execute(
+        "UPDATE wb_topic_cards SET source_refs_json = ? WHERE topic_id = ?",
+        (json.dumps([valid[1], valid[1]], ensure_ascii=False), topic.id),
+    )
+    repo.conn.commit()
+    cards_path = Path(sync_topic_markdown(repo, topic.id)["cards"])
+    assert cards_path.read_text(encoding="utf-8").count(valid[1]) == 16
+
+    old = cards_path.read_text(encoding="utf-8")
+    invalid_refs = [
+        "[《教材（3）》·第 1 章]",  # same-title source exists, but is outside this topic
+        "[《教材》·第 2 章]",  # chapter is not mapped
+        "[《教材（4）》·第 1 章]",  # unknown suffix
+    ]
+    for invalid in invalid_refs:
+        repo.conn.execute(
+            "UPDATE wb_topic_cards SET source_refs_json = ? WHERE topic_id = ?",
+            (json.dumps([invalid], ensure_ascii=False), topic.id),
+        )
+        repo.conn.commit()
+        with pytest.raises(ValueError, match="unknown source ref"):
+            sync_topic_markdown(repo, topic.id)
+        assert cards_path.read_text(encoding="utf-8") == old
+
+    assert outside_chapter.id not in {chapter.id for chapter in repo.list_topic_chapters(topic.id)}
+
+
+@pytest.mark.parametrize("foreign_marker", ["", "<!-- topic-id: other -->"])
+def test_preexisting_desired_topic_directory_is_never_overwritten(tmp_path, foreign_marker):
+    repo, topic, _ = setup_published(tmp_path)
+    desired = tmp_path / "out" / "课程主题" / "01-主题"
+    desired.mkdir(parents=True)
+    user_file = desired / "topic-map.md"
+    user_file.write_text(f"{foreign_marker}\n用户内容", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="target directory already exists"):
+        sync_topic_markdown(repo, topic.id)
+    assert user_file.read_text(encoding="utf-8") == f"{foreign_marker}\n用户内容"
+
+
+def test_topic_bundle_rolls_back_all_files_on_second_replace_failure(tmp_path, monkeypatch):
+    repo, topic, _ = setup_published(tmp_path)
+    paths = sync_topic_markdown(repo, topic.id)
+    old = {key: Path(path).read_text(encoding="utf-8") for key, path in paths.items()}
+    original = topic_markdown_sync.os.replace
+    replacements = 0
+
+    def fail_second_target(src, dst, *args, **kwargs):
+        nonlocal replacements
+        if str(dst) in {"topic-map.md", "intensive-note.md", "cards.md"}:
+            replacements += 1
+            if replacements == 2:
+                raise OSError("second replace failed")
+        return original(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(topic_markdown_sync.os, "replace", fail_second_target)
+    with pytest.raises(OSError, match="second replace failed"):
+        sync_topic_markdown(repo, topic.id)
+    assert {key: Path(path).read_text(encoding="utf-8") for key, path in paths.items()} == old
+
+
+def test_topic_bundle_recovers_keyboard_interrupt_and_redacts_runs(tmp_path, monkeypatch):
+    repo, topic, _ = setup_published(tmp_path)
+    run = repo.create_topic_run(topic.id, "review", "fingerprint")
+    repo.finish_topic_run(
+        run.id,
+        "FAILED",
+        error="正常中文 /Users/a C:\\x file:///tmp/x sk-abcdefghijklmnopqrstuvwxyz",
+    )
+    paths = sync_topic_markdown(repo, topic.id)
+    old = {key: Path(path).read_text(encoding="utf-8") for key, path in paths.items()}
+    original = topic_markdown_sync.os.replace
+
+    def interrupt_target(src, dst, *args, **kwargs):
+        if str(dst) == "intensive-note.md":
+            raise KeyboardInterrupt
+        return original(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(topic_markdown_sync.os, "replace", interrupt_target)
+    with pytest.raises(KeyboardInterrupt):
+        sync_topic_markdown(repo, topic.id)
+    assert {key: Path(path).read_text(encoding="utf-8") for key, path in paths.items()} == old
+    run_text = next((Path(paths["note"]).parent / "runs").glob("*.md")).read_text(encoding="utf-8")
+    assert "正常中文" in run_text and "/Users/" not in run_text and "sk-" not in run_text
+
+
+@pytest.mark.parametrize("level", ["课程主题", "topic"])
+def test_topic_sync_rejects_symlink_escape(tmp_path, level):
+    repo, topic, _ = setup_published(tmp_path)
+    root = tmp_path / "out"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if level == "课程主题":
+        (root / "课程主题").symlink_to(outside, target_is_directory=True)
+    else:
+        (root / "课程主题").mkdir()
+        (root / "课程主题" / "01-主题").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        sync_topic_markdown(repo, topic.id)
+    assert not list(outside.iterdir())
+
+
+@pytest.mark.parametrize("phase", ["PREPARED", "COMMITTED"])
+def test_bundle_journal_recovers_crash_and_cleans_secret_backup(tmp_path, phase):
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    target = directory / "cards.md"
+    target.write_text("旧secret", encoding="utf-8")
+    backup = ".pdf2md-crash.bundle-backup"
+    temp = ".pdf2md-crash.bundle-tmp"
+    (directory / backup).hardlink_to(target)
+    (directory / temp).write_text("新内容", encoding="utf-8")
+    os.replace(directory / temp, target)
+    journal = {
+        "phase": phase,
+        "entries": [{"target": "cards.md", "temp": temp, "backup": backup, "existed": True}],
+    }
+    (directory / ".pdf2md-bundle-journal.json").write_text(json.dumps(journal), encoding="utf-8")
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        recover_atomic_bundle(fd)
+    finally:
+        os.close(fd)
+    assert target.read_text(encoding="utf-8") == ("旧secret" if phase == "PREPARED" else "新内容")
+    assert not (directory / backup).exists()
+    assert not (directory / ".pdf2md-bundle-journal.json").exists()
+
+
+def test_topic_first_bundle_failure_keeps_owner_and_retry_succeeds(tmp_path, monkeypatch):
+    repo, topic, _ = setup_published(tmp_path)
+    original = topic_markdown_sync.atomic_write_bundle_fd
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("disk full")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(topic_markdown_sync, "atomic_write_bundle_fd", fail_once)
+    with pytest.raises(OSError, match="disk full"):
+        sync_topic_markdown(repo, topic.id)
+    topic_dir = tmp_path / "out" / "课程主题" / "01-主题"
+    assert (topic_dir / ".pdf2md-owner").read_text(encoding="utf-8") == (f"topic:{topic.id}\n")
+    assert Path(sync_topic_markdown(repo, topic.id)["map"]).exists()
+
+
+@pytest.mark.parametrize("kind, entity_id", [("chapter", "other"), ("topic", "other")])
+def test_fake_owner_never_authorizes_topic_directory(tmp_path, kind, entity_id):
+    repo, topic, _ = setup_published(tmp_path)
+    desired = tmp_path / "out" / "课程主题" / "01-主题"
+    desired.mkdir(parents=True)
+    (desired / ".pdf2md-owner").write_text(f"{kind}:{entity_id}\n", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        sync_topic_markdown(repo, topic.id)
+
+
+@pytest.mark.parametrize("failure", ["oserror", "interrupt", "fence"])
+def test_topic_failures_do_not_leak_file_descriptors(tmp_path, monkeypatch, failure):
+    fd_dir = Path("/dev/fd")
+    if not fd_dir.exists():
+        pytest.skip("fd directory is unavailable")
+    repo, topic, _ = setup_published(tmp_path)
+    baseline = len(list(fd_dir.iterdir()))
+
+    def fail(*args, **kwargs):
+        if failure == "interrupt":
+            raise KeyboardInterrupt
+        if failure == "fence":
+            kwargs["fence"]()
+        raise OSError("disk full")
+
+    monkeypatch.setattr(topic_markdown_sync, "atomic_write_bundle_fd", fail)
+    for _ in range(40):
+        fence = (
+            (lambda: (_ for _ in ()).throw(ValueError("owner lost")))
+            if failure == "fence"
+            else None
+        )
+        expected = (
+            ValueError
+            if failure == "fence"
+            else KeyboardInterrupt
+            if failure == "interrupt"
+            else OSError
+        )
+        with pytest.raises(expected):
+            sync_topic_markdown(repo, topic.id, fence=fence)
+    gc.collect()
+    assert len(list(fd_dir.iterdir())) <= baseline

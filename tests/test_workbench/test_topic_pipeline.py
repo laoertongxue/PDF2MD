@@ -12,6 +12,7 @@ from parsing_core.workbench.schema import apply_workbench_schema
 from parsing_core.workbench.topic_pipeline import (
     FIXED_TOPIC_KINDS,
     TopicFusionPipeline,
+    TopicMarkdownSyncError,
     validate_mermaid_subset,
 )
 from parsing_core.workbench.topic_task_package import build_topic_task_package
@@ -31,9 +32,17 @@ def setup_topic(tmp_path, *, published=False):
     repo.replace_topic_chapters(topic.id, [chapter.id])
     if published:
         repo.replace_topic_note_blocks(topic.id, {"old": "旧内容"})
-        repo.replace_topic_cards(topic.id, [{
-            "card_type": "old", "title": "旧卡", "content": "旧卡内容", "source_refs_json": [],
-        }])
+        repo.replace_topic_cards(
+            topic.id,
+            [
+                {
+                    "card_type": "old",
+                    "title": "旧卡",
+                    "content": "旧卡内容",
+                    "source_refs_json": [],
+                }
+            ],
+        )
     return repo, topic, chapter
 
 
@@ -45,11 +54,113 @@ def test_pipeline_atomically_publishes_fourteen_blocks_and_cards(tmp_path):
     assert 8 <= len(repo.list_topic_cards(topic.id)) <= 12
     assert repo.get_topic(topic.id).status == "COMPLETED"
     assert [run.round_key for run in repo.list_topic_runs(topic.id)] == [
-        "alignment", "comparison", "plain_cases", "framework_application",
-        "mermaid", "cards", "review",
+        "alignment",
+        "comparison",
+        "plain_cases",
+        "framework_application",
+        "mermaid",
+        "cards",
+        "review",
     ]
     assert all(run.status == "COMPLETED" for run in repo.list_topic_runs(topic.id))
     assert repo.get_topic_generation_lease(topic.id) is None
+
+
+def test_pipeline_syncs_markdown_only_after_database_publication(tmp_path, monkeypatch):
+    repo, topic, _ = setup_topic(tmp_path)
+    observed = []
+
+    def observe_sync(current_repo, topic_id, *, fence):
+        fence()
+        observed.append(
+            (
+                current_repo.get_topic(topic_id).status,
+                len(current_repo.list_topic_note_blocks(topic_id)),
+            )
+        )
+
+    monkeypatch.setattr(topic_pipeline_module, "sync_topic_markdown", observe_sync)
+    TopicFusionPipeline(repo, StubIntensiveReadingExecutor()).run(topic.id)
+    assert observed == [("COMPLETED", 14)]
+
+
+def test_markdown_sync_failure_does_not_rollback_or_mark_model_run_failed(tmp_path, monkeypatch):
+    repo, topic, _ = setup_topic(tmp_path)
+
+    def fail_sync(repo, topic_id, *, fence):
+        fence()
+        raise OSError("disk full")
+
+    monkeypatch.setattr(topic_pipeline_module, "sync_topic_markdown", fail_sync)
+    with pytest.raises(TopicMarkdownSyncError):
+        TopicFusionPipeline(repo, StubIntensiveReadingExecutor()).run(topic.id)
+    assert repo.get_topic(topic.id).status == "COMPLETED"
+    assert repo.list_topic_runs(topic.id)[-1].status == "COMPLETED"
+    assert len(repo.list_topic_note_blocks(topic.id)) == 14
+    assert repo.get_topic_markdown_sync_state(topic.id).status == "FAILED"
+
+
+def test_retry_markdown_sync_uses_published_db_without_model(tmp_path, monkeypatch):
+    repo, topic, _ = setup_topic(tmp_path)
+    pipeline = TopicFusionPipeline(repo, StubIntensiveReadingExecutor())
+    pipeline.run(topic.id)
+    repo.set_topic_markdown_sync_state(topic.id, "FAILED", "disk failed")
+    calls = []
+
+    def observe_retry(repo, topic_id, *, fence):
+        fence()
+        calls.append(topic_id)
+
+    monkeypatch.setattr(topic_pipeline_module, "sync_topic_markdown", observe_retry)
+    pipeline.retry_markdown_sync(topic.id)
+    assert calls == [topic.id]
+    assert repo.get_topic_markdown_sync_state(topic.id).status == "SYNCED"
+
+
+@pytest.mark.parametrize("status", ["STALE", "FAILED"])
+def test_retry_markdown_sync_accepts_stale_or_failed_complete_publication(
+    tmp_path, monkeypatch, status
+):
+    repo, topic, _ = setup_topic(tmp_path)
+    pipeline = TopicFusionPipeline(repo, StubIntensiveReadingExecutor())
+    pipeline.run(topic.id)
+    repo.update_topic(topic.id, status=status)
+    assert repo.get_topic_markdown_sync_state(topic.id).status == "SYNCED"
+    repo.set_topic_markdown_sync_state(topic.id, "FAILED", "retry requested")
+    calls = []
+
+    def observe_retry(repo, topic_id, *, fence):
+        fence()
+        calls.append(topic_id)
+
+    monkeypatch.setattr(topic_pipeline_module, "sync_topic_markdown", observe_retry)
+
+    pipeline.retry_markdown_sync(topic.id)
+
+    assert calls == [topic.id]
+    assert repo.get_topic_markdown_sync_state(topic.id).status == "SYNCED"
+
+
+def test_retry_markdown_sync_rejects_failed_without_publication(tmp_path):
+    repo, topic, _ = setup_topic(tmp_path)
+    repo.update_topic(topic.id, status="FAILED")
+    with pytest.raises(ValueError, match="complete publication"):
+        TopicFusionPipeline(repo, StubIntensiveReadingExecutor()).retry_markdown_sync(topic.id)
+
+
+def test_retry_markdown_sync_rejects_stale_incomplete_publication(tmp_path):
+    repo, topic, _ = setup_topic(tmp_path)
+    pipeline = TopicFusionPipeline(repo, StubIntensiveReadingExecutor())
+    pipeline.run(topic.id)
+    repo.update_topic(topic.id, status="STALE")
+    repo.conn.execute(
+        "DELETE FROM wb_topic_note_blocks WHERE topic_id = ? AND kind = 'overview'",
+        (topic.id,),
+    )
+    repo.conn.commit()
+    repo.set_topic_markdown_sync_state(topic.id, "FAILED", "old sync failed")
+    with pytest.raises(ValueError, match="complete publication"):
+        pipeline.retry_markdown_sync(topic.id)
 
 
 class FailingExecutor(StubIntensiveReadingExecutor):
@@ -189,12 +300,8 @@ def test_live_lease_heartbeat_requires_owner_and_blocks_recovery(tmp_path):
     started = _start(repo, topic)
     repo.create_topic_run(topic.id, "alignment", started.input_fingerprint)
 
-    lease = repo.heartbeat_topic_generation(
-        topic.id, started.owner_id, now=150, lease_ttl=100
-    )
-    assert (lease.owner_id, lease.heartbeat_at, lease.expires_at) == (
-        started.owner_id, 150, 250
-    )
+    lease = repo.heartbeat_topic_generation(topic.id, started.owner_id, now=150, lease_ttl=100)
+    assert (lease.owner_id, lease.heartbeat_at, lease.expires_at) == (started.owner_id, 150, 250)
     with pytest.raises(ValueError, match="lease lost"):
         repo.heartbeat_topic_generation(topic.id, "wrong-owner", now=151, lease_ttl=100)
     with pytest.raises(ValueError, match="lease not expired"):
@@ -214,17 +321,16 @@ def test_pipeline_stops_when_lease_owner_changes_during_model_call(tmp_path):
         def run(self, round_key, task_package):
             calls.append(round_key)
             repo.conn.execute(
-                "UPDATE wb_topic_generation_leases SET owner_id = 'replacement' "
-                "WHERE topic_id = ?",
+                "UPDATE wb_topic_generation_leases SET owner_id = 'replacement' WHERE topic_id = ?",
                 (topic.id,),
             )
             repo.conn.commit()
             return super().run(round_key, task_package)
 
     with pytest.raises(ValueError, match="lease lost"):
-        TopicFusionPipeline(
-            repo, StealingExecutor(), clock=lambda: 100, lease_ttl=100
-        ).run(topic.id)
+        TopicFusionPipeline(repo, StealingExecutor(), clock=lambda: 100, lease_ttl=100).run(
+            topic.id
+        )
 
     assert calls == ["alignment"]
     assert (repo.list_topic_note_blocks(topic.id), repo.list_topic_cards(topic.id)) == old
@@ -359,9 +465,7 @@ def test_background_heartbeat_detects_lost_lease_before_parsing_or_publish(
             (topic.id,),
         )
     else:
-        repo.conn.execute(
-            "DELETE FROM wb_topic_generation_leases WHERE topic_id = ?", (topic.id,)
-        )
+        repo.conn.execute("DELETE FROM wb_topic_generation_leases WHERE topic_id = ?", (topic.id,))
     repo.conn.commit()
     assert lost.wait(2)
     release.set()
@@ -392,16 +496,19 @@ def test_executor_error_stops_background_heartbeat_thread(tmp_path):
         ).run(topic.id)
 
     assert not any(
-        thread.name.startswith("topic-lease-heartbeat-")
-        for thread in threading.enumerate()
+        thread.name.startswith("topic-lease-heartbeat-") for thread in threading.enumerate()
     )
 
 
 def _new_publication():
-    return {"new": "新内容"}, [{
-        "card_type": "new", "title": "新卡", "content": "新卡内容",
-        "source_refs_json": [],
-    }]
+    return {"new": "新内容"}, [
+        {
+            "card_type": "new",
+            "title": "新卡",
+            "content": "新卡内容",
+            "source_refs_json": [],
+        }
+    ]
 
 
 def _publication_state(repo, topic_id):
@@ -671,9 +778,7 @@ def test_local_validation_rejects_total_output_over_limit(tmp_path):
     class OversizedExecutor(StubIntensiveReadingExecutor):
         def run(self, round_key, task_package):
             raw = super().run(round_key, task_package)
-            if round_key not in {
-                "alignment", "comparison", "plain_cases", "framework_application"
-            }:
+            if round_key not in {"alignment", "comparison", "plain_cases", "framework_application"}:
                 return raw
             value = json.loads(raw)
             for key in value:

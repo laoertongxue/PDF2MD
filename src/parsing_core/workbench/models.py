@@ -162,3 +162,13 @@ class TopicGenerationLease:
     owner_id: str
     heartbeat_at: int
     expires_at: int
+
+
+@dataclass(frozen=True)
+class TopicMarkdownSyncState:
+    topic_id: str
+    status: str
+    error: str
+    updated_at: int
+    owner_id: str
+    lease_expires_at: int

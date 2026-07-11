@@ -23,6 +23,7 @@ from parsing_core.workbench.models import (
     TopicCard,
     TopicGenerationLease,
     TopicGenerationStart,
+    TopicMarkdownSyncState,
     TopicNoteBlock,
     TopicRunRecord,
 )
@@ -210,11 +211,7 @@ class WorkbenchRepository:
             if protected:
                 raise ValueError(f"protected topic prevents replacement: {', '.join(protected)}")
 
-            chapter_ids = [
-                chapter_id
-                for spec in topic_specs
-                for chapter_id in spec["chapter_ids"]
-            ]
+            chapter_ids = [chapter_id for spec in topic_specs for chapter_id in spec["chapter_ids"]]
             chapters = self._chapters_by_ids(list(dict.fromkeys(chapter_ids)))
             if len(chapters) != len(set(chapter_ids)) or any(
                 chapter.course_id != course_id for chapter in chapters
@@ -478,8 +475,11 @@ class WorkbenchRepository:
         first = rows[0]
         snapshot = {
             "topic": {
-                "id": first[0], "course_id": first[1], "title": first[2],
-                "description": first[3], "confirmed": bool(first[4]),
+                "id": first[0],
+                "course_id": first[1],
+                "title": first[2],
+                "description": first[3],
+                "confirmed": bool(first[4]),
             },
             "chapters": [],
         }
@@ -492,21 +492,32 @@ class WorkbenchRepository:
                 chapter = {
                     "mapping_created_at": row[6],
                     "source": {"id": row[7], "title": row[8], "updated_at": row[9]},
-                    "id": row[10], "seq": row[11], "title": row[12],
-                    "status": row[13], "updated_at": row[14],
+                    "id": row[10],
+                    "seq": row[11],
+                    "title": row[12],
+                    "status": row[13],
+                    "updated_at": row[14],
                     "review": {
-                        "status": row[15], "stale": bool(row[16]),
-                        "updated_at": row[17], "output": row[18],
+                        "status": row[15],
+                        "stale": bool(row[16]),
+                        "updated_at": row[17],
+                        "output": row[18],
                     },
                     "notes": [],
                 }
                 chapters[row[10]] = chapter
                 snapshot["chapters"].append(chapter)
             if row[19] is not None:
-                chapter["notes"].append({
-                    "id": row[19], "kind": row[20], "title": row[21], "body": row[22],
-                    "seq": row[23], "updated_at": row[24],
-                })
+                chapter["notes"].append(
+                    {
+                        "id": row[19],
+                        "kind": row[20],
+                        "title": row[21],
+                        "body": row[22],
+                        "seq": row[23],
+                        "updated_at": row[24],
+                    }
+                )
         return snapshot, _stable_fingerprint(snapshot)
 
     def start_topic_generation(
@@ -531,9 +542,13 @@ class WorkbenchRepository:
             snapshot, fingerprint = self.topic_input_snapshot(topic_id)
             if fingerprint != expected_fingerprint:
                 raise ValueError("topic input changed")
-            if not snapshot["topic"]["confirmed"] or not snapshot["chapters"] or any(
-                chapter["review"]["status"] != "DONE" or chapter["review"]["stale"]
-                for chapter in snapshot["chapters"]
+            if (
+                not snapshot["topic"]["confirmed"]
+                or not snapshot["chapters"]
+                or any(
+                    chapter["review"]["status"] != "DONE" or chapter["review"]["stale"]
+                    for chapter in snapshot["chapters"]
+                )
             ):
                 raise ValueError("topic dependencies are not ready")
             baseline = topic.stale_reason
@@ -557,9 +572,7 @@ class WorkbenchRepository:
                 self._topic_by_id(topic_id), fingerprint, baseline, owner_id
             )
 
-    def get_topic_generation_lease(
-        self, topic_id: str
-    ) -> TopicGenerationLease | None:
+    def get_topic_generation_lease(self, topic_id: str) -> TopicGenerationLease | None:
         row = self.conn.execute(
             "SELECT * FROM wb_topic_generation_leases WHERE topic_id = ?",
             (topic_id,),
@@ -644,7 +657,133 @@ class WorkbenchRepository:
                 "DELETE FROM wb_topic_generation_leases WHERE topic_id = ? AND owner_id = ?",
                 (topic_id, owner_id),
             )
+            self.conn.execute(
+                """
+                INSERT INTO wb_topic_markdown_sync (topic_id, status, error, updated_at)
+                VALUES (?, 'PENDING', '', ?)
+                ON CONFLICT(topic_id) DO UPDATE SET
+                  status = 'PENDING', error = '', updated_at = excluded.updated_at,
+                  owner_id = '', lease_expires_at = 0
+                """,
+                (topic_id, now),
+            )
             return self._topic_by_id(topic_id)
+
+    def get_topic_markdown_sync_state(self, topic_id: str) -> TopicMarkdownSyncState | None:
+        row = self.conn.execute(
+            "SELECT * FROM wb_topic_markdown_sync WHERE topic_id = ?", (topic_id,)
+        ).fetchone()
+        return TopicMarkdownSyncState(*row) if row else None
+
+    def set_topic_markdown_sync_state(
+        self, topic_id: str, status: str, error: str = ""
+    ) -> TopicMarkdownSyncState:
+        if status not in {"PENDING", "SYNCED", "FAILED"}:
+            raise ValueError("invalid topic Markdown sync status")
+        if self.get_topic(topic_id) is None:
+            raise ValueError("topic not found")
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO wb_topic_markdown_sync (topic_id, status, error, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(topic_id) DO UPDATE SET
+                  status = excluded.status, error = excluded.error,
+                  updated_at = excluded.updated_at, owner_id = '', lease_expires_at = 0
+                """,
+                (topic_id, status, error, now),
+            )
+        state = self.get_topic_markdown_sync_state(topic_id)
+        if state is None:
+            raise RuntimeError("topic Markdown sync state was not persisted")
+        return state
+
+    def claim_topic_markdown_sync(
+        self, topic_id: str, *, now: int | None = None, lease_ttl: int = 600
+    ) -> TopicMarkdownSyncState:
+        if lease_ttl <= 0:
+            raise ValueError("lease_ttl must be positive")
+        now = _now() if now is None else now
+        owner_id = uuid4().hex
+        with self._atomic(immediate=True):
+            cursor = self.conn.execute(
+                """
+                UPDATE wb_topic_markdown_sync
+                SET status = 'SYNCING', error = '', updated_at = ?, owner_id = ?,
+                    lease_expires_at = ?
+                WHERE topic_id = ? AND (
+                  status IN ('PENDING', 'FAILED')
+                  OR (status = 'SYNCING' AND lease_expires_at <= ?)
+                )
+                """,
+                (now, owner_id, now + lease_ttl, topic_id, now),
+            )
+            if cursor.rowcount != 1:
+                state = self.get_topic_markdown_sync_state(topic_id)
+                if state is not None and state.status == "SYNCING":
+                    raise ValueError("topic Markdown is already syncing")
+                raise ValueError("topic Markdown is not pending or failed")
+        state = self.get_topic_markdown_sync_state(topic_id)
+        if state is None:
+            raise RuntimeError("topic Markdown sync claim was not persisted")
+        return state
+
+    def finish_topic_markdown_sync(
+        self,
+        topic_id: str,
+        owner_id: str,
+        status: str,
+        error: str = "",
+        *,
+        now: int | None = None,
+    ) -> TopicMarkdownSyncState:
+        if status not in {"SYNCED", "FAILED"}:
+            raise ValueError("invalid finished topic Markdown sync status")
+        now = _now() if now is None else now
+        with self._atomic(immediate=True):
+            cursor = self.conn.execute(
+                """
+                UPDATE wb_topic_markdown_sync
+                SET status = ?, error = ?, updated_at = ?, owner_id = '', lease_expires_at = 0
+                WHERE topic_id = ? AND status = 'SYNCING' AND owner_id = ?
+                """,
+                (status, "" if status == "SYNCED" else error, now, topic_id, owner_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("topic Markdown sync owner lost")
+        state = self.get_topic_markdown_sync_state(topic_id)
+        if state is None:
+            raise RuntimeError("topic Markdown sync finish was not persisted")
+        return state
+
+    def fence_topic_markdown_sync(
+        self,
+        topic_id: str,
+        owner_id: str,
+        *,
+        now: int | None = None,
+        lease_ttl: int = 600,
+    ) -> TopicMarkdownSyncState:
+        if lease_ttl <= 0:
+            raise ValueError("lease_ttl must be positive")
+        now = _now() if now is None else now
+        with self._atomic(immediate=True):
+            cursor = self.conn.execute(
+                """
+                UPDATE wb_topic_markdown_sync
+                SET updated_at = ?, lease_expires_at = ?
+                WHERE topic_id = ? AND status = 'SYNCING' AND owner_id = ?
+                  AND lease_expires_at > ?
+                """,
+                (now, now + lease_ttl, topic_id, owner_id, now),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("topic Markdown sync owner lost")
+        state = self.get_topic_markdown_sync_state(topic_id)
+        if state is None:
+            raise RuntimeError("topic Markdown sync fence was not persisted")
+        return state
 
     def fail_topic_generation(self, topic_id: str, owner_id: str) -> CourseTopic:
         with self._atomic(immediate=True):
@@ -1134,7 +1273,7 @@ class WorkbenchRepository:
 
     def list_sources(self, course_id: str) -> list[Source]:
         rows = self.conn.execute(
-            "SELECT * FROM wb_sources WHERE course_id = ? ORDER BY created_at, id",
+            "SELECT * FROM wb_sources WHERE course_id = ? ORDER BY created_at, rowid",
             (course_id,),
         ).fetchall()
         return [Source(*row) for row in rows]

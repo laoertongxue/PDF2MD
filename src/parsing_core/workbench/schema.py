@@ -143,6 +143,15 @@ CREATE TABLE IF NOT EXISTS wb_topic_generation_leases (
   expires_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS wb_topic_markdown_sync (
+  topic_id TEXT PRIMARY KEY REFERENCES wb_topics(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK (status IN ('PENDING', 'SYNCING', 'SYNCED', 'FAILED')),
+  error TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL,
+  owner_id TEXT NOT NULL DEFAULT '',
+  lease_expires_at INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_wb_sources_course ON wb_sources(course_id);
 CREATE INDEX IF NOT EXISTS idx_wb_chapters_course ON wb_chapters(course_id);
 CREATE INDEX IF NOT EXISTS idx_wb_cards_course ON wb_cards(course_id);
@@ -160,7 +169,28 @@ def apply_workbench_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(WORKBENCH_SCHEMA_SQL)
     topic_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_topics)")}
     if "generation_reason" not in topic_columns:
-        conn.execute(
-            "ALTER TABLE wb_topics ADD COLUMN generation_reason TEXT NOT NULL DEFAULT ''"
+        conn.execute("ALTER TABLE wb_topics ADD COLUMN generation_reason TEXT NOT NULL DEFAULT ''")
+    sync_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_topic_markdown_sync)")}
+    sync_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wb_topic_markdown_sync'"
+    ).fetchone()[0]
+    if {"owner_id", "lease_expires_at"} - sync_columns or "'SYNCING'" not in sync_sql:
+        conn.executescript(
+            """
+            ALTER TABLE wb_topic_markdown_sync RENAME TO wb_topic_markdown_sync_old;
+            CREATE TABLE wb_topic_markdown_sync (
+              topic_id TEXT PRIMARY KEY REFERENCES wb_topics(id) ON DELETE CASCADE,
+              status TEXT NOT NULL CHECK (status IN ('PENDING', 'SYNCING', 'SYNCED', 'FAILED')),
+              error TEXT NOT NULL DEFAULT '',
+              updated_at INTEGER NOT NULL,
+              owner_id TEXT NOT NULL DEFAULT '',
+              lease_expires_at INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO wb_topic_markdown_sync
+              (topic_id, status, error, updated_at, owner_id, lease_expires_at)
+            SELECT topic_id, status, error, updated_at, '', 0
+            FROM wb_topic_markdown_sync_old;
+            DROP TABLE wb_topic_markdown_sync_old;
+            """
         )
     conn.commit()

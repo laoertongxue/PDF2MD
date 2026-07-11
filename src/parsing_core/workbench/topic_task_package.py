@@ -50,20 +50,23 @@ def build_topic_task_package(
     snapshot, fingerprint = repo.topic_input_snapshot(topic_id)
     topic = snapshot["topic"]
     chapters = snapshot["chapters"]
-    if not topic["confirmed"] or not chapters or any(
-        chapter["review"]["status"] != "DONE" or chapter["review"]["stale"]
-        for chapter in chapters
+    if (
+        not topic["confirmed"]
+        or not chapters
+        or any(
+            chapter["review"]["status"] != "DONE" or chapter["review"]["stale"]
+            for chapter in chapters
+        )
     ):
         raise ValueError("topic dependencies are not ready")
     source_chapters = []
-    sources: list[tuple[str, str]] = []
-    seen_source_ids = set()
-    for chapter in chapters:
-        source_id = chapter["source"]["id"]
-        if source_id not in seen_source_ids:
-            sources.append((source_id, chapter["source"]["title"]))
-            seen_source_ids.add(source_id)
+    sources = [(source.id, source.title) for source in repo.list_sources(topic["course_id"])]
     source_names = _allocate_source_display_titles(sources)
+    source_order = {source_id: index for index, (source_id, _) in enumerate(sources)}
+    chapters = sorted(
+        chapters,
+        key=lambda chapter: (source_order[chapter["source"]["id"]], chapter["seq"], chapter["id"]),
+    )
     for chapter in chapters:
         source_title = chapter["source"]["title"]
         display_title = source_names[chapter["source"]["id"]]
@@ -84,10 +87,12 @@ def build_topic_task_package(
             )
         )
     package = TopicTaskPackage(
-        course_id=topic["course_id"], topic_id=topic["id"],
+        course_id=topic["course_id"],
+        topic_id=topic["id"],
         topic_title=topic["title"],
         source_chapters=source_chapters,
-        previous_outputs=previous_outputs or {}, input_fingerprint=fingerprint,
+        previous_outputs=previous_outputs or {},
+        input_fingerprint=fingerprint,
     )
     if len(package.as_prompt()) > 200_000:
         raise ValueError("topic task package exceeds size limit")
@@ -98,7 +103,7 @@ def _normalized_title(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
-def _allocate_source_display_titles(sources: list[tuple[str, str]]) -> dict[str, str]:
+def allocate_source_display_titles(sources: list[tuple[str, str]]) -> dict[str, str]:
     reserved = {_normalized_title(title) for _, title in sources}
     assigned = set()
     seen_real_titles = set()
@@ -124,3 +129,6 @@ def _allocate_source_display_titles(sources: list[tuple[str, str]]) -> dict[str,
         assigned.add(normalized_display)
         result[source_id] = display_title
     return result
+
+
+_allocate_source_display_titles = allocate_source_display_titles

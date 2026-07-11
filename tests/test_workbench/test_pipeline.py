@@ -82,7 +82,7 @@ flowchart LR
 
     pipeline.run_all(chapter.id)
 
-    note_path = tmp_path / "out" / "01-第一章" / "intensive-note.md"
+    note_path = tmp_path / "out" / "教材" / "战略教材" / "01-第一章" / "intensive-note.md"
     note = note_path.read_text(encoding="utf-8")
     assert "StrategyChoice[战略选择]" in note
     assert "ScenarioScan[场景扫描]" in note

@@ -865,18 +865,27 @@ def test_single_topic_writes_do_not_commit_outer_transaction(tmp_path):
 
     assert conn.in_transaction is True
     conn.rollback()
-    assert observer.execute(
-        "SELECT COUNT(*) FROM wb_topics WHERE id = ?",
-        (nested_topic.id,),
-    ).fetchone()[0] == 0
-    assert observer.execute(
-        "SELECT COUNT(*) FROM wb_topic_runs WHERE id = ?",
-        (nested_run.id,),
-    ).fetchone()[0] == 0
-    assert observer.execute(
-        "SELECT description FROM wb_courses WHERE id = ?",
-        (course.id,),
-    ).fetchone()[0] == ""
+    assert (
+        observer.execute(
+            "SELECT COUNT(*) FROM wb_topics WHERE id = ?",
+            (nested_topic.id,),
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        observer.execute(
+            "SELECT COUNT(*) FROM wb_topic_runs WHERE id = ?",
+            (nested_run.id,),
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        observer.execute(
+            "SELECT description FROM wb_courses WHERE id = ?",
+            (course.id,),
+        ).fetchone()[0]
+        == ""
+    )
     observer.close()
 
 
@@ -898,3 +907,37 @@ def test_single_topic_failures_preserve_outer_transaction(tmp_path):
     assert r.conn.in_transaction is True
     assert r.get_course(course.id).description == "outer pending"
     r.conn.rollback()
+
+
+def test_topic_markdown_sync_claim_lease_and_owner_cas(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("课程", "", str(tmp_path / "out"))
+    topic = r.create_topic(course.id, 0, "主题")
+    r.set_topic_markdown_sync_state(topic.id, "PENDING")
+
+    first = r.claim_topic_markdown_sync(topic.id, now=100, lease_ttl=600)
+    assert first.status == "SYNCING" and first.lease_expires_at == 700
+    with pytest.raises(ValueError, match="already syncing"):
+        r.claim_topic_markdown_sync(topic.id, now=699, lease_ttl=600)
+
+    second = r.claim_topic_markdown_sync(topic.id, now=701, lease_ttl=600)
+    assert second.owner_id != first.owner_id
+    with pytest.raises(ValueError, match="owner lost"):
+        r.finish_topic_markdown_sync(topic.id, first.owner_id, "SYNCED", now=702)
+    finished = r.finish_topic_markdown_sync(topic.id, second.owner_id, "SYNCED", now=703)
+    assert finished.status == "SYNCED" and finished.owner_id == ""
+
+
+def test_topic_markdown_sync_fence_validates_owner_and_renews_lease(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("课程", "", str(tmp_path / "out"))
+    topic = r.create_topic(course.id, 0, "主题")
+    r.set_topic_markdown_sync_state(topic.id, "PENDING")
+    claim = r.claim_topic_markdown_sync(topic.id, now=100, lease_ttl=10)
+
+    renewed = r.fence_topic_markdown_sync(topic.id, claim.owner_id, now=105, lease_ttl=20)
+    assert renewed.lease_expires_at == 125
+    with pytest.raises(ValueError, match="owner lost"):
+        r.fence_topic_markdown_sync(topic.id, "old-owner", now=106, lease_ttl=20)
+    with pytest.raises(ValueError, match="owner lost"):
+        r.fence_topic_markdown_sync(topic.id, claim.owner_id, now=126, lease_ttl=20)

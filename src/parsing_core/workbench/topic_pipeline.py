@@ -7,17 +7,35 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from parsing_core.workbench.repository import WorkbenchRepository
+from parsing_core.workbench.topic_markdown_sync import (
+    TopicMarkdownSyncError,
+    sync_topic_markdown,
+)
 from parsing_core.workbench.topic_task_package import build_topic_task_package
 
 TOPIC_ROUNDS = (
-    "alignment", "comparison", "plain_cases", "framework_application",
-    "mermaid", "cards", "review",
+    "alignment",
+    "comparison",
+    "plain_cases",
+    "framework_application",
+    "mermaid",
+    "cards",
+    "review",
 )
 FIXED_TOPIC_KINDS = (
-    "overview", "linked_sources", "core_concepts", "viewpoint_comparison",
-    "consensus_disagreements", "complementary_views", "plain_explanation",
-    "textbook_cases", "real_world_problem_solving", "integrated_framework",
-    "application_methods", "further_thinking", "knowledge_mermaid",
+    "overview",
+    "linked_sources",
+    "core_concepts",
+    "viewpoint_comparison",
+    "consensus_disagreements",
+    "complementary_views",
+    "plain_explanation",
+    "textbook_cases",
+    "real_world_problem_solving",
+    "integrated_framework",
+    "application_methods",
+    "further_thinking",
+    "knowledge_mermaid",
     "application_mermaid",
 )
 MAX_RESPONSE_CHARS = 40_000
@@ -75,9 +93,13 @@ class ReviewOutput(StrictOutput):
 
 
 OUTPUT_MODELS = {
-    "alignment": AlignmentOutput, "comparison": ComparisonOutput,
-    "plain_cases": PlainCasesOutput, "framework_application": FrameworkOutput,
-    "mermaid": MermaidOutput, "cards": CardsOutput, "review": ReviewOutput,
+    "alignment": AlignmentOutput,
+    "comparison": ComparisonOutput,
+    "plain_cases": PlainCasesOutput,
+    "framework_application": FrameworkOutput,
+    "mermaid": MermaidOutput,
+    "cards": CardsOutput,
+    "review": ReviewOutput,
 }
 SOURCE_LABEL_RE = re.compile(r"\[《[^\]\n]+》·第\s*\d+\s*章\]")
 MERMAID_HEADER_RE = re.compile(r"^(?:graph|flowchart)\s+(?:TB|TD|BT|RL|LR)$")
@@ -267,17 +289,17 @@ class TopicFusionPipeline:
         clock: Any = None,
         lease_ttl: int = 7_200,
         heartbeat_interval: float | None = None,
+        markdown_sync_lease_ttl: int = 600,
     ):
         self.repo = repo
         self.executor = executor
         self.clock = clock or (lambda: int(time.time()))
         self.lease_ttl = lease_ttl
+        self.markdown_sync_lease_ttl = markdown_sync_lease_ttl
         self.heartbeat_interval = (
-            min(60.0, lease_ttl / 3)
-            if heartbeat_interval is None
-            else heartbeat_interval
+            min(60.0, lease_ttl / 3) if heartbeat_interval is None else heartbeat_interval
         )
-        if self.lease_ttl <= 0 or self.heartbeat_interval <= 0:
+        if self.lease_ttl <= 0 or self.heartbeat_interval <= 0 or self.markdown_sync_lease_ttl <= 0:
             raise ValueError("lease ttl and heartbeat interval must be positive")
 
     def _heartbeat(self, topic_id: str, owner_id: str) -> None:
@@ -287,6 +309,44 @@ class TopicFusionPipeline:
             now=self.clock(),
             lease_ttl=self.lease_ttl,
         )
+
+    def retry_markdown_sync(self, topic_id: str) -> None:
+        topic = self.repo.get_topic(topic_id)
+        if topic is None or topic.status not in {"COMPLETED", "STALE", "FAILED"}:
+            raise ValueError("topic has no complete publication")
+        blocks = self.repo.list_topic_note_blocks(topic_id)
+        cards = self.repo.list_topic_cards(topic_id)
+        if {block.kind for block in blocks} != set(FIXED_TOPIC_KINDS) or not 8 <= len(cards) <= 12:
+            raise ValueError("topic has no complete publication")
+        self._sync_published_markdown(topic_id)
+
+    def _sync_published_markdown(self, topic_id: str) -> None:
+        claim = self.repo.claim_topic_markdown_sync(
+            topic_id, now=self.clock(), lease_ttl=self.markdown_sync_lease_ttl
+        )
+
+        def fence() -> None:
+            self.repo.fence_topic_markdown_sync(
+                topic_id,
+                claim.owner_id,
+                now=self.clock(),
+                lease_ttl=self.markdown_sync_lease_ttl,
+            )
+
+        try:
+            sync_topic_markdown(self.repo, topic_id, fence=fence)
+        except BaseException as exc:
+            self.repo.finish_topic_markdown_sync(
+                topic_id,
+                claim.owner_id,
+                "FAILED",
+                _safe_error(exc),
+                now=self.clock(),
+            )
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise TopicMarkdownSyncError("topic Markdown sync failed") from exc
+        self.repo.finish_topic_markdown_sync(topic_id, claim.owner_id, "SYNCED", now=self.clock())
 
     def _run_executor_with_heartbeat(
         self, topic_id: str, owner_id: str, round_key: str, prompt: str
@@ -382,6 +442,7 @@ class TopicFusionPipeline:
                         review_output=raw,
                         now=self.clock(),
                     )
+                    self._sync_published_markdown(topic_id)
                 except Exception as exc:
                     current = next(
                         item for item in self.repo.list_topic_runs(topic_id) if item.id == run.id
