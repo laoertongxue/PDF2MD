@@ -10,6 +10,10 @@ import type {
   TopicCard,
   TopicNoteBlock,
   TopicOutlineExecutor,
+  TopicCreateRequest,
+  TopicPatchRequest,
+  TopicMergeRequest,
+  TopicSplitRequest,
   TopicRun,
 } from "../api/workbenchTypes";
 
@@ -46,6 +50,10 @@ interface WorkbenchState {
   runHybridChapter: (chapterId: string) => Promise<void>;
   loadTopics: (courseId: string) => Promise<CourseTopic[]>;
   generateTopics: (courseId: string, executor?: TopicOutlineExecutor) => Promise<CourseTopic[]>;
+  createTopic: (courseId: string, body: TopicCreateRequest) => Promise<CourseTopic>;
+  patchTopic: (topicId: string, body: TopicPatchRequest) => Promise<CourseTopic>;
+  mergeTopics: (courseId: string, body: TopicMergeRequest) => Promise<CourseTopic>;
+  splitTopic: (topicId: string, body: TopicSplitRequest) => Promise<CourseTopic[]>;
   updateTopicMapping: (topicId: string, chapterIds: string[]) => Promise<CourseTopic>;
   confirmTopics: (courseId: string) => Promise<CourseTopic[]>;
   reorderTopics: (courseId: string, topicIds: string[]) => Promise<CourseTopic[]>;
@@ -313,6 +321,40 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
         () => api.generateTopics(courseId, executor),
         (topics) => saveTopics(courseId, topics),
       ),
+
+    createTopic: (courseId, body) =>
+      runAction(
+        `createTopic:${courseId}`,
+        [`courseTopics:${courseId}`],
+        () => api.createTopic(courseId, body),
+        saveTopic,
+      ),
+
+    patchTopic: (topicId, body) =>
+      runTopicAction("patchTopic", topicId, () => api.patchTopic(topicId, body)),
+
+    mergeTopics: (courseId, body) =>
+      runAction(
+        `mergeTopics:${courseId}`,
+        [`courseTopics:${courseId}`, ...body.topic_ids.map((id) => `topic:${id}`)],
+        () => api.mergeTopics(courseId, body),
+        (merged) => {
+          for (const topicId of body.topic_ids) finalizeTopicDeletion(courseId, topicId);
+          saveTopic(merged);
+        },
+        (merged) => [`topic:${merged.id}`, `courseTopics:${merged.course_id}`],
+      ),
+
+    splitTopic: (topicId, body) => {
+      const courseId = findTopicCourseId(topicId);
+      return runAction(
+        `splitTopic:${topicId}`,
+        [`topic:${topicId}`, ...(courseId ? [`courseTopics:${courseId}`] : [])],
+        () => api.splitTopic(topicId, body),
+        (topics) => topics.forEach(saveTopic),
+        (topics) => topics.flatMap((topic) => [`topic:${topic.id}`, `courseTopics:${topic.course_id}`]),
+      );
+    },
 
     updateTopicMapping: (topicId, chapterIds) =>
       runTopicAction(

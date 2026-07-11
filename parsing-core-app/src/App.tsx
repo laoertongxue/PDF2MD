@@ -1,4 +1,5 @@
-import { HashRouter, Routes, Route } from "react-router-dom";
+import { useEffect } from "react";
+import { HashRouter, Routes, Route, useParams } from "react-router-dom";
 import Layout from "./components/Layout";
 import Dashboard from "./components/Dashboard";
 import BatchSubmit from "./components/BatchSubmit";
@@ -9,6 +10,15 @@ import ChapterConfirm from "./components/workbench/ChapterConfirm";
 import ChapterWorkbench from "./components/workbench/ChapterWorkbench";
 import CardPool from "./components/workbench/CardPool";
 import Settings from "./components/workbench/Settings";
+import TopicMap from "./components/workbench/TopicMap";
+import { useWorkbenchStore } from "./store/useWorkbenchStore";
+
+function CourseTopicRoute() {
+  const { courseId, topicId } = useParams();
+  const selectCourse = useWorkbenchStore((state) => state.selectCourse);
+  useEffect(() => { if (courseId) selectCourse(courseId); }, [courseId, selectCourse]);
+  return <TopicMap initialTopicId={topicId} oldResult={!!topicId} />;
+}
 
 export default function App() {
   return (
@@ -23,6 +33,8 @@ export default function App() {
           <Route path="/workbench/chapters" element={<ChapterConfirm />} />
           <Route path="/workbench/chapter" element={<ChapterWorkbench />} />
           <Route path="/workbench/cards" element={<CardPool />} />
+          <Route path="/workbench/courses/:courseId/topics" element={<CourseTopicRoute />} />
+          <Route path="/workbench/courses/:courseId/topics/:topicId" element={<CourseTopicRoute />} />
           <Route path="/doc/:taskId" element={<DocViewer />} />
         </Route>
       </Routes>

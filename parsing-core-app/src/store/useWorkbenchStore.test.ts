@@ -14,6 +14,8 @@ vi.mock("../api/workbench", async (importOriginal) => {
     ...actual,
     listTopics: vi.fn(),
     generateTopics: vi.fn(),
+    mergeTopics: vi.fn(),
+    splitTopic: vi.fn(),
     updateTopicMapping: vi.fn(),
     confirmTopics: vi.fn(),
     reorderTopics: vi.fn(),
@@ -254,6 +256,37 @@ describe("主题工作流 Store", () => {
     expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].chapter_ids).toEqual(["chapter-2"]);
   });
 
+  it("原子合并后 tombstone 旧主题并保存新主题", async () => {
+    const merged = topic({ id: "merged", title: "Merged", chapter_ids: ["chapter-1", "chapter-2"] });
+    mocked.mergeTopics.mockResolvedValue(merged);
+    useWorkbenchStore.setState({ topicsByCourse: { "course-1": [topic(), topic({ id: "topic-2" })] } });
+    await useWorkbenchStore.getState().mergeTopics("course-1", { topic_ids: ["topic-1", "topic-2"], title: "Merged" });
+    expect(useWorkbenchStore.getState().topicsByCourse["course-1"]).toEqual([merged]);
+    expect(useWorkbenchStore.getState().deletedTopics).toMatchObject({ "topic-1": true, "topic-2": true });
+  });
+
+  it("merge 晚响应不能覆盖响应所属课程的较新列表", async () => {
+    const merging = deferred<CourseTopic>();
+    mocked.mergeTopics.mockReturnValueOnce(merging.promise);
+    mocked.listTopics.mockResolvedValueOnce([topic({ course_id: "course-2", title: "Course 2 fresh" })]);
+    useWorkbenchStore.setState({ topicsByCourse: { "course-1": [topic(), topic({ id: "topic-2" })] } });
+    const pending = useWorkbenchStore.getState().mergeTopics("course-1", { topic_ids: ["topic-1", "topic-2"], title: "Merged" });
+    await useWorkbenchStore.getState().loadTopics("course-2");
+    merging.resolve(topic({ id: "merged", course_id: "course-2", title: "Late" }));
+    await pending;
+    expect(useWorkbenchStore.getState().topicsByCourse["course-2"][0].title).toBe("Course 2 fresh");
+    expect(useWorkbenchStore.getState().deletedTopics["topic-1"]).toBeUndefined();
+  });
+
+  it("原子拆分同时保存原主题和新主题", async () => {
+    const original = topic({ chapter_ids: ["chapter-1"] });
+    const created = topic({ id: "topic-2", chapter_ids: ["chapter-2"] });
+    mocked.splitTopic.mockResolvedValue([original, created]);
+    useWorkbenchStore.setState({ topicsByCourse: { "course-1": [topic({ chapter_ids: ["chapter-1", "chapter-2"] })] } });
+    await useWorkbenchStore.getState().splitTopic("topic-1", { title: "New", new_chapter_ids: ["chapter-2"] });
+    expect(useWorkbenchStore.getState().topicsByCourse["course-1"]).toEqual([original, created]);
+  });
+
   it("确认课程主题目录并保存全部主题", async () => {
     mocked.confirmTopics.mockResolvedValue([topic({ confirmed: true })]);
 
@@ -331,6 +364,8 @@ describe("主题工作流 Store", () => {
   it.each([
     ["loadTopics", "course-1", () => useWorkbenchStore.getState().loadTopics("course-1"), mocked.listTopics],
     ["generateTopics", "course-1", () => useWorkbenchStore.getState().generateTopics("course-1"), mocked.generateTopics],
+    ["mergeTopics", "course-1", () => useWorkbenchStore.getState().mergeTopics("course-1", { topic_ids: ["topic-1", "topic-2"], title: "Merged" }), mocked.mergeTopics],
+    ["splitTopic", "topic-1", () => useWorkbenchStore.getState().splitTopic("topic-1", { title: "New", new_chapter_ids: ["chapter-1"] }), mocked.splitTopic],
     ["updateTopicMapping", "topic-1", () => useWorkbenchStore.getState().updateTopicMapping("topic-1", ["chapter-1"]), mocked.updateTopicMapping],
     ["confirmTopics", "course-1", () => useWorkbenchStore.getState().confirmTopics("course-1"), mocked.confirmTopics],
     ["reorderTopics", "course-1", () => useWorkbenchStore.getState().reorderTopics("course-1", ["topic-1"]), mocked.reorderTopics],

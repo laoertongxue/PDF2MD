@@ -3,10 +3,11 @@ import { Link, Outlet, useLocation } from "react-router-dom";
 import {
   BookOpen,
   ChevronDown,
-  FileText,
   FolderOpen,
   Home,
   Library,
+  Layers3,
+  NotebookTabs,
   Plus,
   Search,
   Settings as SettingsIcon,
@@ -53,7 +54,7 @@ export default function Layout() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-white text-zinc-900">
-      <aside className="flex w-[292px] shrink-0 flex-col border-r border-zinc-200 bg-zinc-50">
+      <aside className="hidden w-[252px] shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 lg:flex xl:w-[292px]">
         <div className="flex h-16 items-center gap-3 px-5">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500 text-white shadow-sm shadow-emerald-200">
             <BookOpen size={20} strokeWidth={2.2} />
@@ -141,7 +142,7 @@ export default function Layout() {
       </aside>
 
       {isWorkbench && (
-        <aside className="flex w-[330px] shrink-0 flex-col border-r border-zinc-200 bg-white">
+        <aside className="hidden w-[280px] shrink-0 flex-col border-r border-zinc-200 bg-white md:flex xl:w-[330px]">
           <div className="flex h-16 items-center justify-between border-b border-zinc-100 px-5">
             <div className="min-w-0">
               <p className="text-xs text-zinc-400">资料库</p>
@@ -168,15 +169,17 @@ export default function Layout() {
                   pathname === "/workbench/chapters" ? "bg-zinc-100 font-medium text-zinc-900" : "text-zinc-600 hover:bg-zinc-50"
                 }`}
               >
-                <FolderOpen size={16} /> 目录
+                <FolderOpen size={16} /> 教材
               </Link>
+              {selectedCourseId && <Link to={`/workbench/courses/${selectedCourseId}/topics`} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${pathname.includes("/topics") ? "bg-zinc-100 font-medium text-zinc-900" : "text-zinc-600 hover:bg-zinc-50"}`}><Layers3 size={16} /> 课程主题</Link>}
+              {selectedCourseId && <Link to={`/workbench/courses/${selectedCourseId}/topics`} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-zinc-600 hover:bg-zinc-50"><BookOpen size={16} /> 融合精读（先选题）</Link>}
               <Link
                 to="/workbench/cards"
                 className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${
                   pathname === "/workbench/cards" ? "bg-zinc-100 font-medium text-zinc-900" : "text-zinc-600 hover:bg-zinc-50"
                 }`}
               >
-                <FileText size={16} /> 卡片池
+                <NotebookTabs size={16} /> 写作卡片
               </Link>
             </div>
 
@@ -237,7 +240,7 @@ export default function Layout() {
         </header>
 
         <main className="min-h-0 flex-1 overflow-y-auto">
-          <div className={`${isWorkbench ? "mx-auto max-w-5xl px-8 py-8" : "mx-auto max-w-4xl px-8 py-8"}`}>
+          <div className={`${isWorkbench ? "mx-auto w-full max-w-[1500px] px-4 py-5 sm:px-6 xl:px-8 xl:py-8" : "mx-auto max-w-4xl px-8 py-8"}`}>
             <Outlet />
           </div>
         </main>

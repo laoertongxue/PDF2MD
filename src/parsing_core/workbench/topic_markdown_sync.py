@@ -65,6 +65,13 @@ class TopicMarkdownDeleteError(Exception):
     pass
 
 
+MERGE_JOURNAL_PREFIX = ".pdf2md-merge-"
+
+
+def _merge_file_hook(phase: str, parent_fd: int, topic_fd: int, name: str) -> None:
+    pass
+
+
 def _delete_race_hook(phase: str, parent_fd: int, topic_fd: int, name: str) -> None:
     pass
 
@@ -199,6 +206,286 @@ def _remove_created_placeholder(
         raise ValueError("topic placeholder lock changed during deletion")
     os.unlink(LOCK_NAME, dir_fd=topic_fd)
     os.rmdir(name, dir_fd=parent_fd)
+
+
+def _remove_detached_topic_directory(
+    parent_fd: int,
+    topic_fd: int,
+    name: str,
+    expected_identity: tuple[int, int],
+    lock_identity: tuple[int, int],
+    topic_id: str,
+) -> None:
+    _validate_delete_directory(
+        parent_fd, topic_fd, name, expected_identity, lock_identity, topic_id
+    )
+    _merge_file_hook("before_hidden_cleanup", parent_fd, topic_fd, name)
+    os.unlink("topic-map.md", dir_fd=topic_fd)
+    os.unlink(OWNER_NAME, dir_fd=topic_fd)
+    os.unlink(LOCK_NAME, dir_fd=topic_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+
+
+def _cleanup_committed_merge_journals(repo: WorkbenchRepository, parent_fd: int) -> None:
+    for name in sorted(
+        item for item in os.listdir(parent_fd) if item.startswith(MERGE_JOURNAL_PREFIX)
+    ):
+        parts = name.removeprefix(MERGE_JOURNAL_PREFIX).split("-", 1)
+        if len(parts) != 2 or repo.get_topic(parts[0]) is not None:
+            continue
+        topic_id = parts[0]
+        topic_fd = -1
+        lock_fd = -1
+        try:
+            topic_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            lock_fd = os.open(LOCK_NAME, os.O_RDWR | os.O_NOFOLLOW, dir_fd=topic_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if set(os.listdir(topic_fd)) == {LOCK_NAME}:
+                _remove_created_placeholder(
+                    parent_fd, topic_fd, name, _identity(topic_fd), _identity(lock_fd)
+                )
+            else:
+                _remove_detached_topic_directory(
+                    parent_fd,
+                    topic_fd,
+                    name,
+                    _identity(topic_fd),
+                    _identity(lock_fd),
+                    topic_id,
+                )
+        except (OSError, ValueError):
+            pass
+        finally:
+            if lock_fd >= 0:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+            if topic_fd >= 0:
+                os.close(topic_fd)
+
+
+def merge_unpublished_topics(
+    repo: WorkbenchRepository,
+    course_id: str,
+    topic_ids: list[str],
+    *,
+    title: str,
+    description: str = "",
+    chapter_ids: list[str] | None = None,
+):
+    topics = [repo.get_topic(topic_id) for topic_id in topic_ids]
+    if any(topic is None for topic in topics):
+        raise ValueError("topic not found")
+    course = repo.get_course(course_id)
+    if course is None:
+        raise ValueError("course not found")
+    if any(topic.course_id != course_id for topic in topics):
+        raise ValueError("all topics must belong to the same course")
+
+    parent_fd = open_secure_directory(Path(course.root_dir), ["课程主题"])
+    operation_id = os.urandom(8).hex()
+    records = []
+    try:
+        _cleanup_committed_merge_journals(repo, parent_fd)
+        for topic in sorted(topics, key=lambda item: (item.seq, item.id)):
+            visible = f"{topic.seq + 1:02d}-{safe_name(topic.title)}"
+            placeholder_created = False
+            _merge_file_hook("before_target_prepare", parent_fd, -1, visible)
+            try:
+                os.mkdir(visible, 0o700, dir_fd=parent_fd)
+                placeholder_created = True
+            except FileExistsError:
+                pass
+            topic_fd = os.open(
+                visible,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+            if placeholder_created:
+                lock_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            else:
+                lock_flags = os.O_RDWR | os.O_NOFOLLOW
+            try:
+                lock_fd = os.open(LOCK_NAME, lock_flags, 0o600, dir_fd=topic_fd)
+            except FileNotFoundError:
+                entries = set(os.listdir(topic_fd))
+                if not entries <= {OWNER_NAME, "topic-map.md"} or OWNER_NAME not in entries:
+                    os.close(topic_fd)
+                    raise ValueError("topic directory lock is protected") from None
+                owner = _read_regular_file_at(topic_fd, OWNER_NAME)
+                if owner.splitlines()[:1] != [f"topic:{topic.id}".encode()]:
+                    os.close(topic_fd)
+                    raise ValueError("topic directory ownership is protected") from None
+                try:
+                    lock_fd = os.open(
+                        LOCK_NAME,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=topic_fd,
+                    )
+                except FileExistsError:
+                    lock_fd = os.open(LOCK_NAME, os.O_RDWR | os.O_NOFOLLOW, dir_fd=topic_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            record = {
+                "topic": topic,
+                "visible": visible,
+                "hidden": f"{MERGE_JOURNAL_PREFIX}{topic.id}-{operation_id}",
+                "topic_fd": topic_fd,
+                "lock_fd": lock_fd,
+                "identity": _identity(topic_fd),
+                "lock_identity": _identity(lock_fd),
+                "detached": False,
+                "placeholder_created": placeholder_created,
+                "placeholder_resolved": False,
+            }
+            records.append(record)
+            if placeholder_created:
+                if (
+                    _entry_identity(parent_fd, visible) != record["identity"]
+                    or set(os.listdir(topic_fd)) != {LOCK_NAME}
+                    or _regular_entry_identity(topic_fd, LOCK_NAME) != record["lock_identity"]
+                ):
+                    raise ValueError("topic placeholder contains protected concurrent content")
+            else:
+                _validate_delete_directory(
+                    parent_fd,
+                    topic_fd,
+                    visible,
+                    record["identity"],
+                    record["lock_identity"],
+                    topic.id,
+                )
+
+        with repo._connection_lock:
+            if repo.conn.in_transaction:
+                raise ValueError("topic merge requires outermost transaction ownership")
+            for record in records:
+                current = repo.get_topic(record["topic"].id)
+                current_course = repo.get_course(current.course_id) if current else None
+                current_name = (
+                    f"{current.seq + 1:02d}-{safe_name(current.title)}" if current else ""
+                )
+                if (
+                    current != record["topic"]
+                    or current_course is None
+                    or current_course.root_dir != course.root_dir
+                    or current_name != record["visible"]
+                ):
+                    raise ValueError("topic changed during merge")
+                if current.status == "RUNNING":
+                    raise ValueError("running topic is protected")
+                if repo.has_published_topic_output(current.id):
+                    raise ValueError("topic with published output is protected")
+                if record["placeholder_created"]:
+                    if (
+                        _entry_identity(parent_fd, record["visible"]) != record["identity"]
+                        or set(os.listdir(record["topic_fd"])) != {LOCK_NAME}
+                        or _regular_entry_identity(record["topic_fd"], LOCK_NAME)
+                        != record["lock_identity"]
+                    ):
+                        raise ValueError("topic placeholder contains protected concurrent content")
+                else:
+                    _validate_delete_directory(
+                        parent_fd,
+                        record["topic_fd"],
+                        record["visible"],
+                        record["identity"],
+                        record["lock_identity"],
+                        current.id,
+                    )
+            try:
+                for record in records:
+                    _merge_file_hook(
+                        "before_detach", parent_fd, record["topic_fd"], record["visible"]
+                    )
+                    os.rename(
+                        record["visible"],
+                        record["hidden"],
+                        src_dir_fd=parent_fd,
+                        dst_dir_fd=parent_fd,
+                    )
+                    record["detached"] = True
+                os.fsync(parent_fd)
+                merged = repo.merge_topics(
+                    course_id,
+                    topic_ids,
+                    title=title,
+                    description=description,
+                    chapter_ids=chapter_ids,
+                )
+            except BaseException:
+                for record in reversed(records):
+                    if record["detached"]:
+                        if record["placeholder_created"]:
+                            _remove_created_placeholder(
+                                parent_fd,
+                                record["topic_fd"],
+                                record["hidden"],
+                                record["identity"],
+                                record["lock_identity"],
+                            )
+                            record["placeholder_resolved"] = True
+                        else:
+                            os.rename(
+                                record["hidden"],
+                                record["visible"],
+                                src_dir_fd=parent_fd,
+                                dst_dir_fd=parent_fd,
+                            )
+                        record["detached"] = False
+                os.fsync(parent_fd)
+                raise
+
+        for record in records:
+            try:
+                if record["placeholder_created"]:
+                    _merge_file_hook(
+                        "before_placeholder_cleanup",
+                        parent_fd,
+                        record["topic_fd"],
+                        record["hidden"],
+                    )
+                    _remove_created_placeholder(
+                        parent_fd,
+                        record["topic_fd"],
+                        record["hidden"],
+                        record["identity"],
+                        record["lock_identity"],
+                    )
+                    record["placeholder_resolved"] = True
+                else:
+                    _remove_detached_topic_directory(
+                        parent_fd,
+                        record["topic_fd"],
+                        record["hidden"],
+                        record["identity"],
+                        record["lock_identity"],
+                        record["topic"].id,
+                    )
+            except (OSError, ValueError):
+                pass
+        return merged
+    finally:
+        for record in reversed(records):
+            try:
+                if (
+                    record["placeholder_created"]
+                    and not record["placeholder_resolved"]
+                    and not record["detached"]
+                ):
+                    _remove_created_placeholder(
+                        parent_fd,
+                        record["topic_fd"],
+                        record["visible"],
+                        record["identity"],
+                        record["lock_identity"],
+                    )
+                    record["placeholder_resolved"] = True
+                fcntl.flock(record["lock_fd"], fcntl.LOCK_UN)
+            finally:
+                os.close(record["lock_fd"])
+                os.close(record["topic_fd"])
+        os.close(parent_fd)
 
 
 def delete_unpublished_topic(repo: WorkbenchRepository, topic_id: str) -> None:

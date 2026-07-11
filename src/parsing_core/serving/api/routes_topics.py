@@ -10,12 +10,14 @@ from parsing_core.serving.models.topics import (
     TopicCreateRequest,
     TopicGenerateRequest,
     TopicMappingRequest,
+    TopicMergeRequest,
     TopicNoteBlockResponse,
     TopicPatchRequest,
     TopicReorderRequest,
     TopicResponse,
     TopicRunRequest,
     TopicRunResponse,
+    TopicSplitRequest,
 )
 from parsing_core.workbench.codex_cli import CodexCliError, CodexCliExecutor, resolve_codex_path
 from parsing_core.workbench.deepseek import DeepSeekClient, DeepSeekError, DeepSeekExecutor
@@ -28,6 +30,7 @@ from parsing_core.workbench.settings import load_settings
 from parsing_core.workbench.topic_markdown_sync import (
     TopicMarkdownDeleteError,
     delete_unpublished_topic,
+    merge_unpublished_topics,
 )
 from parsing_core.workbench.topic_outline import generate_topic_outline
 from parsing_core.workbench.topic_pipeline import TopicFusionPipeline, TopicMarkdownSyncError
@@ -54,8 +57,19 @@ def _business_error(exc: Exception, *, conflict: bool = False) -> HTTPException:
     if "not found" in message:
         return _not_found("object not found")
     conflict_markers = (
-        "running", "ready", "confirmed", "protected", "lease", "complete publication",
-        "every topic", "no topics", "input changed", "owner lost", "already", "blocking chapter",
+        "running",
+        "ready",
+        "confirmed",
+        "protected",
+        "lease",
+        "complete publication",
+        "every topic",
+        "no topics",
+        "input changed",
+        "owner lost",
+        "already",
+        "blocking chapter",
+        "belong to the same course",
     )
     if conflict or any(marker in message for marker in conflict_markers):
         return HTTPException(409, "topic operation conflicts with current state")
@@ -195,6 +209,24 @@ def generate_topics(course_id: str, req: TopicGenerateRequest, sch: SchedulerDep
     return [_topic_response(repo, topic) for topic in topics]
 
 
+@router.post("/courses/{course_id}/topics/merge", response_model=TopicResponse)
+def merge_topics(course_id: str, req: TopicMergeRequest, sch: SchedulerDep):
+    repo = _repo(sch)
+    try:
+        topic = merge_unpublished_topics(
+            repo,
+            course_id,
+            req.topic_ids,
+            title=req.title,
+            description=req.description,
+            chapter_ids=req.chapter_ids,
+        )
+    except ValueError as exc:
+        raise _business_error(exc) from exc
+    _sync_topics(repo, [topic.id])
+    return _topic_response(repo, topic)
+
+
 @router.put("/courses/{course_id}/topics/reorder", response_model=list[TopicResponse])
 def reorder_topics(course_id: str, req: TopicReorderRequest, sch: SchedulerDep):
     repo = _repo(sch)
@@ -226,6 +258,22 @@ def get_topic(topic_id: str, sch: SchedulerDep):
     if topic is None:
         raise _not_found()
     return _topic_response(repo, topic)
+
+
+@router.post("/topics/{topic_id}/split", response_model=list[TopicResponse])
+def split_topic(topic_id: str, req: TopicSplitRequest, sch: SchedulerDep):
+    repo = _repo(sch)
+    try:
+        topics = repo.split_topic(
+            topic_id,
+            title=req.title,
+            description=req.description,
+            new_chapter_ids=req.new_chapter_ids,
+        )
+    except ValueError as exc:
+        raise _business_error(exc) from exc
+    _sync_topics(repo, [topic.id for topic in topics])
+    return [_topic_response(repo, topic) for topic in topics]
 
 
 @router.patch("/topics/{topic_id}", response_model=TopicResponse)

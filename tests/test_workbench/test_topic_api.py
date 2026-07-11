@@ -1,6 +1,7 @@
 import asyncio
 import fcntl
 import os
+import shutil
 import threading
 import time
 
@@ -21,6 +22,10 @@ from parsing_core.workbench.codex_cli import CodexCliError
 from parsing_core.workbench.executors import StubIntensiveReadingExecutor
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
+from parsing_core.workbench.topic_markdown_sync import (
+    merge_unpublished_topics,
+    sync_topic_map_markdown,
+)
 
 
 def client(tmp_path):
@@ -109,6 +114,487 @@ def test_confirm_is_atomic_when_any_topic_has_no_mapping(tmp_path):
     c.post(f"/api/workbench/courses/{course['id']}/topics", json={"title": "Empty"})
     assert c.post(f"/api/workbench/courses/{course['id']}/topics/confirm").status_code == 409
     assert c.get(f"/api/workbench/topics/{mapped['id']}").json()["confirmed"] is False
+
+
+def test_merge_topics_is_atomic_and_preserves_union_mapping(tmp_path):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    first = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "A", "chapter_ids": [chapters[0]["id"]]},
+    ).json()
+    second = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "B", "chapter_ids": [chapters[1]["id"]]},
+    ).json()
+
+    response = c.post(
+        f"/api/workbench/courses/{course['id']}/topics/merge",
+        json={"topic_ids": [first["id"], second["id"]], "title": "Merged"},
+    )
+
+    assert response.status_code == 200, response.json()
+    merged = response.json()
+    assert merged["title"] == "Merged"
+    assert merged["chapter_ids"] == [chapters[0]["id"], chapters[1]["id"]]
+    assert merged["confirmed"] is False
+    assert merged["status"] == "DRAFT"
+    assert c.get(f"/api/workbench/topics/{first['id']}").status_code == 404
+    assert c.get(f"/api/workbench/topics/{second['id']}").status_code == 404
+    topic_root = tmp_path / "course" / "课程主题"
+    assert not (topic_root / "01-A").exists()
+    assert not (topic_root / "02-B").exists()
+    assert not list(topic_root.glob(".pdf2md-merge-*"))
+
+
+def test_merge_protects_unknown_user_files_without_database_changes(tmp_path):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    topics = [
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics",
+            json={"title": title, "chapter_ids": [chapter["id"]]},
+        ).json()
+        for title, chapter in zip(["A", "B"], chapters, strict=True)
+    ]
+    user_file = tmp_path / "course" / "课程主题" / "01-A" / "notes.md"
+    user_file.write_text("keep", encoding="utf-8")
+    response = c.post(
+        f"/api/workbench/courses/{course['id']}/topics/merge",
+        json={"topic_ids": [item["id"] for item in topics], "title": "Merged"},
+    )
+    assert response.status_code == 409
+    assert user_file.read_text(encoding="utf-8") == "keep"
+    assert [
+        item["id"] for item in c.get(f"/api/workbench/courses/{course['id']}/topics").json()
+    ] == [item["id"] for item in topics]
+
+
+def test_merge_second_detach_failure_restores_first_directory(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    topics = [
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics",
+            json={"title": title, "chapter_ids": [chapter["id"]]},
+        ).json()
+        for title, chapter in zip(["A", "B"], chapters, strict=True)
+    ]
+
+    def fail_second(phase, parent_fd, topic_fd, name):
+        if phase == "before_detach" and name == "02-B":
+            raise OSError("detach failed")
+
+    monkeypatch.setattr(topic_markdown_sync, "_merge_file_hook", fail_second)
+    with pytest.raises(OSError, match="detach failed"):
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics/merge",
+            json={"topic_ids": [item["id"] for item in topics], "title": "Merged"},
+        )
+    root = tmp_path / "course" / "课程主题"
+    assert (root / "01-A").is_dir()
+    assert (root / "02-B").is_dir()
+    assert not list(root.glob(".pdf2md-merge-*"))
+
+
+def test_merge_rejects_invalid_sets_cross_course_and_published_topics(tmp_path):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    other = c.post(
+        "/api/workbench/courses",
+        json={"title": "Other", "description": "", "root_dir": str(other_root)},
+    ).json()
+    first = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "A", "chapter_ids": [chapters[0]["id"]]},
+    ).json()
+    second = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "B", "chapter_ids": [chapters[1]["id"]]},
+    ).json()
+    foreign = c.post(
+        f"/api/workbench/courses/{other['id']}/topics", json={"title": "Foreign"}
+    ).json()
+    repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
+    repo.replace_topic_note_blocks(first["id"], {"summary": "published"})
+
+    assert (
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics/merge",
+            json={"topic_ids": [first["id"]], "title": "X"},
+        ).status_code
+        == 422
+    )
+    assert (
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics/merge",
+            json={"topic_ids": [second["id"], foreign["id"]], "title": "X"},
+        ).status_code
+        == 409
+    )
+    assert (
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics/merge",
+            json={"topic_ids": [first["id"], second["id"]], "title": "X"},
+        ).status_code
+        == 409
+    )
+    assert {
+        item["id"] for item in c.get(f"/api/workbench/courses/{course['id']}/topics").json()
+    } == {first["id"], second["id"]}
+
+
+def test_merge_failure_rolls_back_every_write(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    topics = [
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics",
+            json={"title": title, "chapter_ids": [chapter["id"]]},
+        ).json()
+        for title, chapter in zip(["A", "B"], chapters, strict=True)
+    ]
+    monkeypatch.setattr(
+        WorkbenchRepository,
+        "_mark_topic_markdown_pending",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("fault")),
+    )
+
+    with pytest.raises(RuntimeError, match="fault"):
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics/merge",
+            json={"topic_ids": [item["id"] for item in topics], "title": "Merged"},
+        )
+    stored = c.get(f"/api/workbench/courses/{course['id']}/topics").json()
+    assert [item["id"] for item in stored] == [item["id"] for item in topics]
+    assert [item["chapter_ids"] for item in stored] == [[chapters[0]["id"]], [chapters[1]["id"]]]
+    root = tmp_path / "course" / "课程主题"
+    assert (root / "01-A").is_dir()
+    assert (root / "02-B").is_dir()
+
+
+@pytest.mark.parametrize("outer_transaction", ["begin", "dml"])
+def test_merge_rejects_outer_transactions_without_db_or_fs_changes(tmp_path, outer_transaction):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    topics = [
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics",
+            json={"title": title, "chapter_ids": [chapter["id"]]},
+        ).json()
+        for title, chapter in zip(["A", "B"], chapters, strict=True)
+    ]
+    repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
+    root = tmp_path / "course" / "课程主题"
+    if outer_transaction == "begin":
+        repo.conn.execute("BEGIN")
+    else:
+        shutil.rmtree(root / "01-A")
+        shutil.rmtree(root / "02-B")
+        repo.conn.execute(
+            "UPDATE wb_courses SET updated_at = updated_at WHERE id = ?", (course["id"],)
+        )
+
+    with pytest.raises(ValueError, match="outermost transaction"):
+        merge_unpublished_topics(
+            repo, course["id"], [item["id"] for item in topics], title="Merged"
+        )
+
+    assert (root / "01-A").is_dir() is (outer_transaction == "begin")
+    assert (root / "02-B").is_dir() is (outer_transaction == "begin")
+    assert [item.id for item in repo.list_topics(course["id"])] == [item["id"] for item in topics]
+    repo.conn.rollback()
+
+
+def test_corrupt_hidden_merge_journal_without_lock_does_not_leak_fds(tmp_path):
+    c = client(tmp_path)
+    course, _ = setup_course(c, tmp_path)
+    root = tmp_path / "course" / "课程主题"
+    root.mkdir(exist_ok=True)
+    hidden = root / f"{topic_markdown_sync.MERGE_JOURNAL_PREFIX}{'f' * 32}-corrupt"
+    hidden.mkdir()
+    (hidden / ".pdf2md-owner").write_text(f"topic:{'f' * 32}\n", encoding="utf-8")
+    parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
+    try:
+        before = len(os.listdir("/dev/fd"))
+        for _ in range(5):
+            topic_markdown_sync._cleanup_committed_merge_journals(repo, parent_fd)
+        assert len(os.listdir("/dev/fd")) == before
+        assert hidden.is_dir()
+    finally:
+        os.close(parent_fd)
+
+
+@pytest.mark.parametrize("missing_names", [{"01-A", "02-B"}, {"02-B"}])
+def test_merge_missing_and_mixed_topic_directories_leave_no_visible_orphans(
+    tmp_path, missing_names
+):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    topics = [
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics",
+            json={"title": title, "chapter_ids": [chapter["id"]]},
+        ).json()
+        for title, chapter in zip(["A", "B"], chapters, strict=True)
+    ]
+    root = tmp_path / "course" / "课程主题"
+    for name in missing_names:
+        shutil.rmtree(root / name)
+
+    response = c.post(
+        f"/api/workbench/courses/{course['id']}/topics/merge",
+        json={"topic_ids": [item["id"] for item in topics], "title": "Merged"},
+    )
+
+    assert response.status_code == 200, response.json()
+    assert not (root / "01-A").exists()
+    assert not (root / "02-B").exists()
+    assert not list(root.glob(".pdf2md-merge-*"))
+
+
+def test_merge_placeholder_cleanup_failure_keeps_hidden_retryable_journal(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    topics = [
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics",
+            json={"title": title, "chapter_ids": [chapter["id"]]},
+        ).json()
+        for title, chapter in zip(["A", "B"], chapters, strict=True)
+    ]
+    root = tmp_path / "course" / "课程主题"
+    shutil.rmtree(root / "01-A")
+    shutil.rmtree(root / "02-B")
+
+    def fail_placeholder_cleanup(phase, parent_fd, topic_fd, name):
+        if phase == "before_placeholder_cleanup":
+            raise OSError("defer placeholder cleanup")
+
+    monkeypatch.setattr(topic_markdown_sync, "_merge_file_hook", fail_placeholder_cleanup)
+    response = c.post(
+        f"/api/workbench/courses/{course['id']}/topics/merge",
+        json={"topic_ids": [item["id"] for item in topics], "title": "Merged"},
+    )
+    assert response.status_code == 200
+    assert not (root / "01-A").exists()
+    assert not (root / "02-B").exists()
+    assert len(list(root.glob(".pdf2md-merge-*"))) == 2
+
+    monkeypatch.setattr(topic_markdown_sync, "_merge_file_hook", lambda *args: None)
+    repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
+    parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        topic_markdown_sync._cleanup_committed_merge_journals(repo, parent_fd)
+    finally:
+        os.close(parent_fd)
+    assert not list(root.glob(".pdf2md-merge-*"))
+
+
+def test_merge_missing_target_coordinates_with_real_sync_retry_without_orphans(
+    tmp_path, monkeypatch
+):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    topics = [
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics",
+            json={"title": title, "chapter_ids": [chapter["id"]]},
+        ).json()
+        for title, chapter in zip(["A", "B"], chapters, strict=True)
+    ]
+    root = tmp_path / "course" / "课程主题"
+    shutil.rmtree(root / "01-A")
+    observed_missing = threading.Event()
+    allow_merge = threading.Event()
+    errors = []
+    repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
+
+    def coordinate(phase, parent_fd, topic_fd, name):
+        if phase == "before_target_prepare" and name == "01-A":
+            assert name not in os.listdir(parent_fd)
+            observed_missing.set()
+            assert allow_merge.wait(timeout=3)
+
+    monkeypatch.setattr(topic_markdown_sync, "_merge_file_hook", coordinate)
+
+    def run_merge():
+        try:
+            merge_unpublished_topics(
+                repo,
+                course["id"],
+                [item["id"] for item in topics],
+                title="Merged",
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    merging = threading.Thread(target=run_merge, daemon=True)
+    merging.start()
+    assert observed_missing.wait(timeout=3)
+    sync_topic_map_markdown(repo, topics[0]["id"])
+    allow_merge.set()
+    merging.join(timeout=3)
+
+    assert not merging.is_alive()
+    assert errors == []
+    assert repo.get_topic(topics[0]["id"]) is None
+    assert repo.get_topic(topics[1]["id"]) is None
+    assert not (root / "01-A").exists()
+    assert not (root / "02-B").exists()
+    assert not list(root.glob(".pdf2md-merge-*"))
+
+
+def test_merge_cleanup_failure_keeps_hidden_journal_and_next_merge_cleans_it(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+
+    def create_pair(prefix):
+        return [
+            c.post(
+                f"/api/workbench/courses/{course['id']}/topics",
+                json={"title": f"{prefix}{index}", "chapter_ids": [chapter["id"]]},
+            ).json()
+            for index, chapter in enumerate(chapters, 1)
+        ]
+
+    first_pair = create_pair("A")
+    failed = {"done": False}
+
+    def fail_cleanup(phase, parent_fd, topic_fd, name):
+        if phase == "before_hidden_cleanup" and not failed["done"]:
+            failed["done"] = True
+            raise OSError("cleanup deferred")
+
+    monkeypatch.setattr(topic_markdown_sync, "_merge_file_hook", fail_cleanup)
+    response = c.post(
+        f"/api/workbench/courses/{course['id']}/topics/merge",
+        json={"topic_ids": [item["id"] for item in first_pair], "title": "First merged"},
+    )
+    assert response.status_code == 200
+    root = tmp_path / "course" / "课程主题"
+    assert not any((root / f"0{index}-A{index}").exists() for index in (1, 2))
+    assert list(root.glob(".pdf2md-merge-*"))
+
+    monkeypatch.setattr(topic_markdown_sync, "_merge_file_hook", lambda *args: None)
+    second_pair = create_pair("B")
+    response = c.post(
+        f"/api/workbench/courses/{course['id']}/topics/merge",
+        json={"topic_ids": [item["id"] for item in second_pair], "title": "Second merged"},
+    )
+    assert response.status_code == 200
+    assert not list(root.glob(".pdf2md-merge-*"))
+
+
+def test_merge_and_split_surface_failed_sync_and_allow_retry(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    topics = [
+        c.post(
+            f"/api/workbench/courses/{course['id']}/topics",
+            json={"title": title, "chapter_ids": [chapter["id"]]},
+        ).json()
+        for title, chapter in zip(["A", "B"], chapters, strict=True)
+    ]
+    from parsing_core.workbench import topic_pipeline
+
+    real_sync = topic_pipeline.sync_topic_map_markdown
+    monkeypatch.setattr(
+        topic_pipeline,
+        "sync_topic_map_markdown",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("sync failed")),
+    )
+    merged = c.post(
+        f"/api/workbench/courses/{course['id']}/topics/merge",
+        json={"topic_ids": [item["id"] for item in topics], "title": "Merged"},
+    ).json()
+    assert merged["sync_status"] == "FAILED"
+    split = c.post(
+        f"/api/workbench/topics/{merged['id']}/split",
+        json={"title": "Split", "new_chapter_ids": [chapters[1]["id"]]},
+    ).json()
+    assert [item["sync_status"] for item in split] == ["FAILED", "FAILED"]
+    monkeypatch.setattr(topic_pipeline, "sync_topic_map_markdown", real_sync)
+    assert (
+        c.post(f"/api/workbench/topics/{split[0]['id']}/sync/retry").json()["sync_status"]
+        == "SYNCED"
+    )
+
+
+def test_split_topic_is_atomic_keeps_mapping_and_stales_published_original(tmp_path):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    original = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "Original", "chapter_ids": [item["id"] for item in chapters]},
+    ).json()
+    repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
+    repo.replace_topic_note_blocks(original["id"], {"summary": "published"})
+
+    response = c.post(
+        f"/api/workbench/topics/{original['id']}/split",
+        json={"title": "New", "new_chapter_ids": [chapters[1]["id"]]},
+    )
+
+    assert response.status_code == 200, response.json()
+    old, new = response.json()
+    assert old["id"] == original["id"]
+    assert old["chapter_ids"] == [chapters[0]["id"]]
+    assert old["status"] == "STALE"
+    assert old["stale_reason"] == "topic chapter mapping changed by split"
+    assert new["chapter_ids"] == [chapters[1]["id"]]
+    assert new["status"] == "DRAFT"
+    assert repo.list_topic_note_blocks(original["id"])
+
+
+def test_split_rejects_empty_non_subset_and_non_proper_subset_without_changes(tmp_path):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    original = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "Original", "chapter_ids": [item["id"] for item in chapters]},
+    ).json()
+    base = f"/api/workbench/topics/{original['id']}/split"
+    assert (
+        c.post(base, json={"title": "", "new_chapter_ids": [chapters[0]["id"]]}).status_code == 422
+    )
+    assert c.post(base, json={"title": "New", "new_chapter_ids": []}).status_code == 422
+    assert (
+        c.post(
+            base, json={"title": "New", "new_chapter_ids": [item["id"] for item in chapters]}
+        ).status_code
+        == 400
+    )
+    assert c.post(base, json={"title": "New", "new_chapter_ids": ["missing"]}).status_code == 400
+    assert c.get(f"/api/workbench/topics/{original['id']}").json()["chapter_ids"] == [
+        item["id"] for item in chapters
+    ]
+
+
+def test_split_failure_rolls_back_new_topic_and_original_mapping(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    original = c.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "Original", "chapter_ids": [item["id"] for item in chapters]},
+    ).json()
+    monkeypatch.setattr(
+        WorkbenchRepository,
+        "_mark_topic_markdown_pending",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("fault")),
+    )
+    with pytest.raises(RuntimeError, match="fault"):
+        c.post(
+            f"/api/workbench/topics/{original['id']}/split",
+            json={"title": "New", "new_chapter_ids": [chapters[1]["id"]]},
+        )
+    stored = c.get(f"/api/workbench/courses/{course['id']}/topics").json()
+    assert len(stored) == 1
+    assert stored[0]["id"] == original["id"]
+    assert stored[0]["chapter_ids"] == [item["id"] for item in chapters]
 
 
 def test_topic_patch_mapping_delete_and_result_views(tmp_path):

@@ -88,6 +88,19 @@ export interface TopicReorderRequest {
   topic_ids: string[];
 }
 
+export interface TopicMergeRequest {
+  topic_ids: string[];
+  title: string;
+  description?: string;
+  chapter_ids?: string[];
+}
+
+export interface TopicSplitRequest {
+  title: string;
+  description?: string;
+  new_chapter_ids: string[];
+}
+
 export interface TopicGenerateRequest {
   executor: TopicOutlineExecutor;
 }

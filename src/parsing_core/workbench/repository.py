@@ -261,6 +261,88 @@ class WorkbenchRepository:
                 raise ValueError("topic with published output is protected")
             self.delete_topic(topic_id)
 
+    def merge_topics(
+        self,
+        course_id: str,
+        topic_ids: list[str],
+        *,
+        title: str,
+        description: str = "",
+        chapter_ids: list[str] | None = None,
+    ) -> CourseTopic:
+        with self._atomic(immediate=True):
+            topics = [self._topic_by_id(topic_id) for topic_id in topic_ids]
+            if len(topic_ids) < 2 or len(topic_ids) != len(set(topic_ids)):
+                raise ValueError("at least two unique topics are required")
+            if any(topic.course_id != course_id for topic in topics):
+                raise ValueError("all topics must belong to the same course")
+            if any(topic.status == "RUNNING" for topic in topics):
+                raise ValueError("running topic is protected")
+            if any(self._has_published_topic_output(topic.id) for topic in topics):
+                raise ValueError("topic with published output is protected")
+            merged_chapter_ids = chapter_ids
+            if merged_chapter_ids is None:
+                merged_chapter_ids = list(
+                    dict.fromkeys(
+                        chapter.id
+                        for topic in topics
+                        for chapter in self.list_topic_chapters(topic.id)
+                    )
+                )
+            if not merged_chapter_ids:
+                raise ValueError("merged topic must have chapters")
+            merged = self.create_topic_with_chapters(
+                course_id, title, description, merged_chapter_ids
+            )
+            for topic in topics:
+                self.delete_topic(topic.id)
+            self.update_topic(
+                merged.id,
+                status="DRAFT",
+                confirmed=False,
+                stale_reason="",
+            )
+            self._mark_topic_markdown_pending(merged.id)
+            return self._topic_by_id(merged.id)
+
+    def split_topic(
+        self,
+        topic_id: str,
+        *,
+        title: str,
+        description: str = "",
+        new_chapter_ids: list[str],
+    ) -> tuple[CourseTopic, CourseTopic]:
+        with self._atomic(immediate=True):
+            original = self._topic_by_id(topic_id)
+            if original.status == "RUNNING":
+                raise ValueError("running topic is protected")
+            original_ids = [chapter.id for chapter in self.list_topic_chapters(topic_id)]
+            new_ids = list(dict.fromkeys(new_chapter_ids))
+            if not new_ids or not set(new_ids) < set(original_ids):
+                raise ValueError("new chapters must be a nonempty proper subset")
+            remaining_ids = [chapter_id for chapter_id in original_ids if chapter_id not in new_ids]
+            new_topic = self.create_topic_with_chapters(
+                original.course_id, title, description, new_ids
+            )
+            self.replace_topic_chapters(topic_id, remaining_ids)
+            if self._has_published_topic_output(topic_id):
+                self.update_topic(
+                    topic_id,
+                    status="STALE",
+                    stale_reason="topic chapter mapping changed by split",
+                )
+            else:
+                self.update_topic(
+                    topic_id,
+                    status="DRAFT",
+                    confirmed=False,
+                    stale_reason="",
+                )
+            self._mark_topic_markdown_pending(topic_id)
+            self._mark_topic_markdown_pending(new_topic.id)
+            return self._topic_by_id(topic_id), self._topic_by_id(new_topic.id)
+
     def get_topic(self, topic_id: str) -> CourseTopic | None:
         row = self.conn.execute("SELECT * FROM wb_topics WHERE id = ?", (topic_id,)).fetchone()
         return self._topic(row) if row else None

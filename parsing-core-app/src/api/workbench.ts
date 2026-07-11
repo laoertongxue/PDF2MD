@@ -11,6 +11,8 @@ import type {
   TopicNoteBlock,
   TopicOutlineExecutor,
   TopicPatchRequest,
+  TopicMergeRequest,
+  TopicSplitRequest,
   TopicRun,
   TopicRunStatus,
   TopicStatus,
@@ -283,6 +285,14 @@ export function reorderTopics(courseId: string, topic_ids: string[]): Promise<Co
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ topic_ids }),
   }, (value) => parseArray(value, parseTopic));
+}
+
+export function mergeTopics(courseId: string, body: TopicMergeRequest): Promise<CourseTopic> {
+  return post<CourseTopic>(`/api/workbench/courses/${courseId}/topics/merge`, body, parseTopic);
+}
+
+export function splitTopic(topicId: string, body: TopicSplitRequest): Promise<CourseTopic[]> {
+  return post<CourseTopic[]>(`/api/workbench/topics/${topicId}/split`, body, (value) => parseArray(value, parseTopic));
 }
 
 export function confirmTopics(courseId: string): Promise<CourseTopic[]> {

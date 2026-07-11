@@ -28,6 +28,33 @@ class TopicMappingRequest(StrictModel):
     chapter_ids: list[str] = Field(min_length=1)
 
 
+class TopicMergeRequest(StrictModel):
+    topic_ids: list[str] = Field(min_length=2)
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    chapter_ids: list[str] | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def normalize_and_validate(self):
+        self.title = self.title.strip()
+        if not self.title or len(self.topic_ids) != len(set(self.topic_ids)):
+            raise ValueError("title and unique topic_ids are required")
+        return self
+
+
+class TopicSplitRequest(StrictModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    new_chapter_ids: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def normalize_and_validate(self):
+        self.title = self.title.strip()
+        if not self.title or len(self.new_chapter_ids) != len(set(self.new_chapter_ids)):
+            raise ValueError("title and unique new_chapter_ids are required")
+        return self
+
+
 class TopicReorderRequest(StrictModel):
     topic_ids: list[str] = Field(min_length=1)
 
