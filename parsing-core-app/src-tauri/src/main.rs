@@ -45,6 +45,27 @@ async fn pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+async fn pick_textbooks(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let files = app
+        .dialog()
+        .file()
+        .add_filter("教材", &["pdf", "doc", "docx"])
+        .blocking_pick_files();
+    Ok(files
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|path| path.as_path())
+        .map(|path| path.to_string_lossy().to_string())
+        .collect())
+}
+
+#[tauri::command]
+fn textbook_path_is_file(path: String) -> bool {
+    std::path::Path::new(&path).is_file()
+}
+
+#[tauri::command]
 async fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let folder = app.dialog().file().blocking_pick_folder();
@@ -77,7 +98,15 @@ fn main() {
             tauri::async_runtime::spawn(sidecar::health_loop(app.handle().clone(), s));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_status, start_service, stop_service, pick_files, pick_directory])
+        .invoke_handler(tauri::generate_handler![
+            get_status,
+            start_service,
+            stop_service,
+            pick_files,
+            pick_textbooks,
+            textbook_path_is_file,
+            pick_directory
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { CheckCircle2, Loader2, PlayCircle, Sparkles } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 import type { Chapter } from "../../api/workbenchTypes";
+import { createSourceChapterGroups } from "./SourceChapterTree";
 
 type ChapterWithMeta = Chapter & {
   page?: string | number;
@@ -25,10 +26,11 @@ export default function ChapterConfirm() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const visibleChapters = useMemo(
-    () => Object.values(chapters).flat().filter((chapter) => !selectedCourseId || chapter.course_id === selectedCourseId),
-    [chapters, selectedCourseId],
+  const chapterGroups = useMemo(
+    () => createSourceChapterGroups(selectedCourseId ? (sources[selectedCourseId] ?? []) : [], chapters),
+    [chapters, selectedCourseId, sources],
   );
+  const visibleChapterCount = chapterGroups.reduce((total, group) => total + group.chapters.length, 0);
 
   useEffect(() => {
     loadCourses().catch((err: unknown) => setError(err instanceof Error ? err.message : "课程加载失败"));
@@ -40,14 +42,6 @@ export default function ChapterConfirm() {
       .then((items) => Promise.all(items.map((source) => loadChapters(source.id))))
       .catch((err: unknown) => setError(err instanceof Error ? err.message : "章节加载失败"));
   }, [loadChapters, loadSources, selectedCourseId]);
-
-  useEffect(() => {
-    if (!selectedCourseId) return;
-    const items = sources[selectedCourseId] ?? [];
-    Promise.all(items.map((source) => loadChapters(source.id))).catch((err: unknown) =>
-      setError(err instanceof Error ? err.message : "章节加载失败"),
-    );
-  }, [loadChapters, selectedCourseId, sources]);
 
   const confirm = async (chapterId: string) => {
     setBusyId(chapterId);
@@ -99,7 +93,7 @@ export default function ChapterConfirm() {
 
       {error && <p className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-600">{error}</p>}
 
-      {visibleChapters.length === 0 ? (
+      {visibleChapterCount === 0 ? (
         <div className="rounded-lg border border-dashed border-zinc-300 bg-white px-8 py-12 text-center">
           <p className="text-sm font-medium text-zinc-700">还没有可确认的章节</p>
           <p className="mt-1 text-xs text-zinc-400">先导入课程资料并识别章节。</p>
@@ -117,12 +111,18 @@ export default function ChapterConfirm() {
               <span>状态</span>
               <span className="text-right">操作</span>
             </div>
-            {visibleChapters.map((chapter) => {
+            {chapterGroups.map(({ source, chapters: sourceChapters, completedCount }) => (
+              <section key={source.id} aria-labelledby={`confirm-source-${source.id}`}>
+                <div className="flex min-h-11 items-center justify-between border-b border-zinc-100 bg-zinc-50 px-4">
+                  <h2 id={`confirm-source-${source.id}`} className="truncate text-sm font-medium text-zinc-800">{source.title}</h2>
+                  <span className="text-xs tabular-nums text-zinc-400">{completedCount}/{sourceChapters.length}</span>
+                </div>
+                {sourceChapters.map((chapter) => {
               const meta = chapter as ChapterWithMeta;
               const busy = busyId === chapter.id;
               const canRun = chapter.status === "CONFIRMED" || chapter.status === "COMPLETED";
               const canRunHybrid = chapter.status === "CONFIRMED" || chapter.status === "FAILED";
-              return (
+                  return (
                 <div
                   key={chapter.id}
                   className="grid grid-cols-[minmax(0,1fr)_80px_80px_100px_320px] items-center gap-3 border-b border-zinc-100 px-4 py-3 last:border-b-0"
@@ -173,8 +173,10 @@ export default function ChapterConfirm() {
                     </button>
                   </div>
                 </div>
-              );
-            })}
+                  );
+                })}
+              </section>
+            ))}
           </div>
         </div>
       )}

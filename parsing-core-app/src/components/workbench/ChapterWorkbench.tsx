@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { Loader2, Sparkles } from "lucide-react";
 import MermaidEditor from "./MermaidEditor";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
+import { chapterOptionLabel, createSourceChapterGroups } from "./SourceChapterTree";
 
 export default function ChapterWorkbench() {
   const {
@@ -14,6 +15,7 @@ export default function ChapterWorkbench() {
     noteBlocksByChapter,
     runHybridChapter,
     selectedCourseId,
+    sources,
   } = useWorkbenchStore();
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -21,10 +23,11 @@ export default function ChapterWorkbench() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedChapterId = searchParams.get("chapterId");
 
-  const courseChapters = useMemo(
-    () => Object.values(chapters).flat().filter((chapter) => !selectedCourseId || chapter.course_id === selectedCourseId),
-    [chapters, selectedCourseId],
+  const chapterGroups = useMemo(
+    () => createSourceChapterGroups(selectedCourseId ? (sources[selectedCourseId] ?? []) : [], chapters),
+    [chapters, selectedCourseId, sources],
   );
+  const courseChapters = useMemo(() => chapterGroups.flatMap((group) => group.chapters), [chapterGroups]);
   const activeChapter = courseChapters.find((chapter) => chapter.id === activeChapterId) ?? null;
   const blocks = activeChapterId ? (noteBlocksByChapter[activeChapterId] ?? []) : [];
   const knowledge = blocks.find((block) => block.kind === "knowledge_mermaid");
@@ -145,10 +148,10 @@ export default function ChapterWorkbench() {
             <option value="" disabled>
               选择一个章节
             </option>
-            {courseChapters.map((chapter) => (
-              <option key={chapter.id} value={chapter.id}>
-                {chapter.seq + 1}. {chapter.title}（{chapter.status}）
-              </option>
+            {chapterGroups.map(({ source, chapters: sourceChapters }) => (
+              <optgroup key={source.id} label={`《${source.title}》`}>
+                {sourceChapters.map((chapter) => <option key={chapter.id} value={chapter.id}>{chapterOptionLabel(source, chapter)}（{chapter.status}）</option>)}
+              </optgroup>
             ))}
           </select>
           <span className="mt-1 block text-xs text-zinc-400">仅 CONFIRMED 或 FAILED 章节可执行混合精读。</span>

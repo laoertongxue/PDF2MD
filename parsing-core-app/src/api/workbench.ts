@@ -3,6 +3,7 @@ import type {
   Chapter,
   Course,
   CourseTopic,
+  ImportedSource,
   NoteBlock,
   Source,
   TopicCard,
@@ -74,6 +75,21 @@ function isStringArray(value: unknown): value is string[] {
 function parseArray<T>(value: unknown, parseItem: (item: unknown) => T): T[] {
   if (!Array.isArray(value)) throw protocolError();
   return value.map(parseItem);
+}
+
+function parseImportedSource(value: unknown): ImportedSource {
+  if (
+    !isRecord(value) ||
+    typeof value.source_id !== "string" ||
+    typeof value.title !== "string" ||
+    typeof value.stored_path !== "string"
+  ) throw protocolError();
+  return value as unknown as ImportedSource;
+}
+
+function parseImportedSources(value: unknown): ImportedSource[] {
+  if (!isRecord(value)) throw protocolError();
+  return parseArray(value.items, parseImportedSource);
 }
 
 function parseTopic(value: unknown): CourseTopic {
@@ -190,6 +206,11 @@ export function createCourse(title: string, description: string, root_dir: strin
 
 export function createSource(courseId: string, file_path: string, title: string, kind = "main"): Promise<Source> {
   return post<Source>(`/api/workbench/courses/${courseId}/sources`, { kind, file_path, title });
+}
+
+export function importSources(courseId: string, paths: string[], titles?: string[]): Promise<ImportedSource[]> {
+  const payload = titles === undefined ? { paths } : { paths, titles };
+  return post<ImportedSource[]>(`/api/workbench/courses/${courseId}/sources/import`, payload, parseImportedSources);
 }
 
 export function listSources(courseId: string): Promise<Source[]> {

@@ -113,7 +113,12 @@ class _SourceSaveError(Exception):
     pass
 
 
-def _import_sources_sync(course_id: str, paths: list[str], sch: SchedulerDep):
+def _import_sources_sync(
+    course_id: str,
+    paths: list[str],
+    titles: list[str] | None,
+    sch: SchedulerDep,
+):
     repo = _repo(sch)
     course = repo.get_course(course_id)
     if course is None:
@@ -128,8 +133,12 @@ def _import_sources_sync(course_id: str, paths: list[str], sch: SchedulerDep):
             sources = repo.create_sources_guarded(
                 course_id,
                 [
-                    ("main", str(imported.stored_path), imported.title)
-                    for imported in imported_textbooks
+                    (
+                        "main",
+                        str(imported.stored_path),
+                        titles[index] if titles is not None else imported.title,
+                    )
+                    for index, imported in enumerate(imported_textbooks)
                 ],
                 batch.verify_path_identity,
             )
@@ -236,7 +245,13 @@ async def create_source(course_id: str, req: SourceCreateRequest, sch: Scheduler
 )
 async def import_sources(course_id: str, req: SourceImportRequest, sch: SchedulerDep):
     try:
-        return await run_in_threadpool(_import_sources_sync, course_id, req.paths, sch)
+        return await run_in_threadpool(
+            _import_sources_sync,
+            course_id,
+            req.paths,
+            req.titles,
+            sch,
+        )
     except _CourseNotFoundError as exc:
         raise HTTPException(404, "course not found") from exc
     except SourceImportInputError as exc:

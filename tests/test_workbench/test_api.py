@@ -190,6 +190,62 @@ def test_import_multiple_textbooks_creates_independent_sources(tmp_path):
     assert {source["file_path"] for source in sources} == {str(path) for path in stored_paths}
 
 
+def test_import_textbooks_saves_custom_titles_without_changing_stored_filenames(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    first = tmp_path / "strategy.pdf"
+    second = tmp_path / "cases.docx"
+    first.write_bytes(b"strategy")
+    second.write_bytes(b"cases")
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={
+            "paths": [str(first), str(second)],
+            "titles": [" 战略管理（第 5 版） ", "案例与实践"],
+        },
+    )
+
+    assert res.status_code == 200
+    items = res.json()["items"]
+    assert [item["title"] for item in items] == ["战略管理（第 5 版）", "案例与实践"]
+    assert [Path(item["stored_path"]).name for item in items] == ["strategy.pdf", "cases.docx"]
+    sources = c.get(f"/api/workbench/courses/{course['id']}/sources").json()
+    assert [source["title"] for source in sources] == ["战略管理（第 5 版）", "案例与实践"]
+
+
+@pytest.mark.parametrize(
+    "titles",
+    [
+        [],
+        ["一本", "多一本"],
+        ["   "],
+        ["x" * 121],
+    ],
+)
+def test_import_textbooks_rejects_invalid_custom_titles(tmp_path, titles):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source = tmp_path / "book.pdf"
+    source.write_bytes(b"book")
+
+    res = c.post(
+        f"/api/workbench/courses/{course['id']}/sources/import",
+        json={"paths": [str(source)], "titles": titles},
+    )
+
+    assert res.status_code == 422
+    assert str(source) not in res.text
+
+
 def test_import_same_source_twice_creates_two_files_and_sources(tmp_path):
     c = client(tmp_path)
     root = course_root(tmp_path)

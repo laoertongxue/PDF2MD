@@ -13,6 +13,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useWorkbenchStore } from "../store/useWorkbenchStore";
+import SourceChapterTree, { createSourceChapterGroups } from "./workbench/SourceChapterTree";
 
 const nav = [
   { to: "/", label: "开始", icon: Home },
@@ -36,10 +37,8 @@ export default function Layout() {
   } = useWorkbenchStore();
   const selectedCourse = courses.find((course) => course.id === selectedCourseId) ?? null;
   const selectedSources = selectedCourseId ? (sources[selectedCourseId] ?? []) : [];
-  const selectedChapters = Object.values(chapters)
-    .flat()
-    .filter((chapter) => !selectedCourseId || chapter.course_id === selectedCourseId)
-    .sort((a, b) => a.seq - b.seq);
+  const chapterGroups = createSourceChapterGroups(selectedSources, chapters);
+  const selectedChapterCount = chapterGroups.reduce((total, group) => total + group.chapters.length, 0);
 
   useEffect(() => {
     loadCourses().catch(() => undefined);
@@ -205,26 +204,15 @@ export default function Layout() {
             <div>
               <div className="mb-2 flex items-center justify-between text-xs font-medium text-zinc-400">
                 <span>章节</span>
-                <span>{selectedChapters.length}</span>
+                <span>{selectedChapterCount}</span>
               </div>
               <div className="space-y-1">
-                {selectedChapters.length === 0 ? (
+                {selectedChapterCount === 0 ? (
                   <Link to="/workbench/chapters" className="block rounded-lg border border-dashed border-zinc-300 px-3 py-3 text-sm text-zinc-500">
                     识别并确认章节
                   </Link>
                 ) : (
-                  selectedChapters.map((chapter) => (
-                    <Link
-                      key={chapter.id}
-                      to={`/workbench/chapter?chapterId=${chapter.id}`}
-                      className="block rounded-lg px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50"
-                    >
-                      <p className="truncate">
-                        {chapter.seq + 1}. {chapter.title}
-                      </p>
-                      <p className="mt-0.5 text-xs text-zinc-400">{chapter.status}</p>
-                    </Link>
-                  ))
+                  <SourceChapterTree groups={chapterGroups} chapterHref={(chapterId) => `/workbench/chapter?chapterId=${chapterId}`} />
                 )}
               </div>
             </div>

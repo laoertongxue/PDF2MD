@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 
 class BatchCreateRequest(BaseModel):
@@ -78,6 +78,23 @@ class SourceResponse(BaseModel):
 
 class SourceImportRequest(BaseModel):
     paths: list[str] = Field(..., min_length=1, max_length=50)
+    titles: list[str] | None = Field(default=None, max_length=50)
+
+    @field_validator("titles")
+    @classmethod
+    def validate_titles(
+        cls,
+        titles: list[str] | None,
+        info: ValidationInfo,
+    ) -> list[str] | None:
+        if titles is None:
+            return None
+        cleaned = [title.strip() for title in titles]
+        if any(not title or len(title) > 120 for title in cleaned):
+            raise ValueError("titles must be non-empty and at most 120 characters")
+        if len(cleaned) != len(info.data.get("paths", [])):
+            raise ValueError("titles must align with paths")
+        return cleaned
 
 
 class ImportedSourceResponse(BaseModel):

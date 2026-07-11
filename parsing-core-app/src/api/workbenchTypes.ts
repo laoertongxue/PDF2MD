@@ -19,6 +19,12 @@ export interface Source {
   updated_at?: number;
 }
 
+export interface ImportedSource {
+  source_id: string;
+  title: string;
+  stored_path: string;
+}
+
 export interface Chapter {
   id: string;
   source_id: string;
