@@ -2,6 +2,8 @@ import type {
   Card,
   CourseCardPatch,
   Chapter,
+  ChapterDraftSpec,
+  ChapterDraftState,
   ChapterRun,
   Course,
   CourseTopic,
@@ -178,6 +180,18 @@ function parseChapterRun(value: unknown): ChapterRun {
   return value as unknown as ChapterRun;
 }
 
+function parseChapterDraftState(value: unknown): ChapterDraftState {
+  if (!isRecord(value) || typeof value.fingerprint !== "string" || !Array.isArray(value.chapters)) throw protocolError();
+  const chapters = value.chapters.map((chapter) => {
+    if (!isRecord(chapter) || typeof chapter.id !== "string" || typeof chapter.source_id !== "string" ||
+      typeof chapter.course_id !== "string" || typeof chapter.seq !== "number" || typeof chapter.title !== "string" ||
+      typeof chapter.status !== "string" || typeof chapter.start !== "number" || typeof chapter.end !== "number" ||
+      chapter.start < 0 || chapter.end <= chapter.start) throw protocolError();
+    return chapter as unknown as ChapterDraftState["chapters"][number];
+  });
+  return { chapters, fingerprint: value.fingerprint };
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit,
@@ -258,6 +272,20 @@ export function detectChapters(sourceId: string): Promise<Chapter[]> {
 
 export function listChapters(sourceId: string): Promise<Chapter[]> {
   return request<Chapter[]>(`/api/workbench/sources/${sourceId}/chapters`);
+}
+
+export function getChapterDrafts(sourceId: string): Promise<ChapterDraftState> {
+  return request<ChapterDraftState>(`/api/workbench/sources/${sourceId}/chapter-drafts`, undefined, parseChapterDraftState);
+}
+
+export function replaceChapterDrafts(sourceId: string, expected_fingerprint: string, chapters: ChapterDraftSpec[]): Promise<ChapterDraftState> {
+  return request<ChapterDraftState>(`/api/workbench/sources/${sourceId}/chapter-drafts`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_fingerprint, chapters }),
+  }, parseChapterDraftState);
+}
+
+export function confirmChapterDrafts(sourceId: string, expected_fingerprint: string): Promise<ChapterDraftState> {
+  return post<ChapterDraftState>(`/api/workbench/sources/${sourceId}/chapter-drafts/confirm`, { expected_fingerprint }, parseChapterDraftState);
 }
 
 export function getChapter(chapterId: string): Promise<Chapter> {

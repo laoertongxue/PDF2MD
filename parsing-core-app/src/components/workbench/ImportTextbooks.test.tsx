@@ -61,7 +61,7 @@ describe("ImportTextbooks", () => {
     await waitFor(() => expect(screen.getByText("A.pdf")).toBeInTheDocument());
     expect(zone).toHaveAttribute("data-drag-active", "false");
     expect(screen.getByText("folder：不支持此文件类型")).toBeInTheDocument();
-    expect(screen.getByText("readme.txt")).toBeInTheDocument();
+    expect(screen.getByText("readme.txt：不支持此文件类型")).toBeInTheDocument();
 
     view.unmount();
     await waitFor(() => expect(unlistenDragDrop).toHaveBeenCalledTimes(1));
@@ -169,14 +169,15 @@ describe("ImportTextbooks", () => {
 
   it("advertises and accepts the complete desktop textbook format set", async () => {
     Object.defineProperty(globalThis, "__TAURI_INTERNALS__", { value: {}, configurable: true });
-    invoke.mockResolvedValue(["/books/战略.pptx", "/books/数据.xlsx", "/books/案例.png", "/books/讲义.md"]);
+    invoke.mockResolvedValue(["/books/战略.pptx", "/books/数据.xlsx", "/books/案例.png", "/books/扫描.tiff"]);
     renderImporter();
-    expect(screen.getByText(/PPT、Excel、图片、Markdown/)).toBeInTheDocument();
+    expect(screen.getByText(/PPT、Excel.*图片/)).toBeInTheDocument();
+    expect(screen.queryByText(/Markdown|CSV|文本/)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "选择教材" }));
     expect(screen.getByDisplayValue("战略")).toBeInTheDocument();
     expect(screen.getByDisplayValue("数据")).toBeInTheDocument();
     expect(screen.getByDisplayValue("案例")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("讲义")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("扫描")).toBeInTheDocument();
     delete (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
@@ -206,7 +207,7 @@ describe("ImportTextbooks", () => {
       { kind: "file", getAsFile: () => directory, webkitGetAsEntry: () => ({ isDirectory: true }) },
     ] } });
     expect(screen.getByText("财务管理.pdf")).toBeInTheDocument();
-    expect(screen.getByText("说明.txt")).toBeInTheDocument();
+    expect(screen.getByText("说明.txt：不支持此文件类型")).toBeInTheDocument();
     expect(screen.getByText("课程目录：不支持导入文件夹")).toBeInTheDocument();
   });
 

@@ -1,185 +1,75 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import { ArrowDown, ArrowUp, CheckCircle2, Loader2, Merge, Save, Scissors } from "lucide-react";
 import { Link } from "react-router-dom";
-import { CheckCircle2, Loader2, PlayCircle, Sparkles } from "lucide-react";
+import * as api from "../../api/workbench";
+import type { ChapterDraft, ChapterDraftSpec, ChapterDraftState, Source } from "../../api/workbenchTypes";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
-import type { Chapter } from "../../api/workbenchTypes";
-import { createSourceChapterGroups } from "./SourceChapterTree";
 
-type ChapterWithMeta = Chapter & {
-  page?: string | number;
-  pages?: string | number;
-  page_range?: string;
-  confidence?: number;
-};
+interface DraftEditorState extends ChapterDraftState { dirty: boolean; loading: boolean; saving: boolean; error: string | null }
 
-function pageLabel(chapter: ChapterWithMeta) {
-  return chapter.page_range ?? chapter.pages ?? chapter.page ?? "-";
-}
-
-function confidenceLabel(chapter: ChapterWithMeta) {
-  return typeof chapter.confidence === "number" ? `${Math.round(chapter.confidence * 100)}%` : "-";
-}
+const emptyState = (): DraftEditorState => ({ chapters: [], fingerprint: "", dirty: false, loading: true, saving: false, error: null });
+const isLocked = (state: DraftEditorState) => state.chapters.length > 0 && state.chapters.every((chapter) => chapter.status !== "DRAFT");
+const specs = (chapters: ChapterDraft[]): ChapterDraftSpec[] => chapters.map(({ id, title, start, end }) => ({ id: id.startsWith("local:") ? undefined : id, title: title.trim(), start, end }));
 
 export default function ChapterConfirm() {
-  const { chapters, confirmChapter, loadChapters, loadCourses, loadSources, runChapter, runHybridChapter, selectedCourseId, sources } =
-    useWorkbenchStore();
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { loadCourses, loadSources, selectedCourseId } = useWorkbenchStore();
+  const [sourceList, setSourceList] = useState<Source[]>([]);
+  const [states, setStates] = useState<Record<string, DraftEditorState>>({});
+  const [pageError, setPageError] = useState<string | null>(null);
 
-  const chapterGroups = useMemo(
-    () => createSourceChapterGroups(selectedCourseId ? (sources[selectedCourseId] ?? []) : [], chapters),
-    [chapters, selectedCourseId, sources],
-  );
-  const visibleChapterCount = chapterGroups.reduce((total, group) => total + group.chapters.length, 0);
-
+  useEffect(() => { loadCourses().catch((error: unknown) => setPageError(message(error, "课程加载失败"))); }, [loadCourses]);
   useEffect(() => {
-    loadCourses().catch((err: unknown) => setError(err instanceof Error ? err.message : "课程加载失败"));
-  }, [loadCourses]);
+    if (!selectedCourseId) { setSourceList([]); setStates({}); return; }
+    let active = true;
+    loadSources(selectedCourseId).then(async (sources) => {
+      if (!active) return;
+      setSourceList(sources);
+      setStates(Object.fromEntries(sources.map((source) => [source.id, emptyState()])));
+      await Promise.all(sources.map(async (source) => {
+        try { const state = await api.getChapterDrafts(source.id); if (active) setStates((current) => ({ ...current, [source.id]: { ...state, dirty: false, loading: false, saving: false, error: null } })); }
+        catch (error) { if (active) setStates((current) => ({ ...current, [source.id]: { ...emptyState(), loading: false, error: message(error, "章节草稿加载失败") } })); }
+      }));
+    }).catch((error: unknown) => setPageError(message(error, "教材加载失败")));
+    return () => { active = false; };
+  }, [loadSources, selectedCourseId]);
 
-  useEffect(() => {
-    if (!selectedCourseId) return;
-    loadSources(selectedCourseId)
-      .then((items) => Promise.all(items.map((source) => loadChapters(source.id))))
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : "章节加载失败"));
-  }, [loadChapters, loadSources, selectedCourseId]);
-
-  const confirm = async (chapterId: string) => {
-    setBusyId(chapterId);
-    setError(null);
-    try {
-      await confirmChapter(chapterId);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "章节确认失败");
-    } finally {
-      setBusyId(null);
-    }
+  const update = (sourceId: string, transform: (chapters: ChapterDraft[]) => ChapterDraft[]) => setStates((current) => ({ ...current, [sourceId]: { ...current[sourceId], chapters: transform(current[sourceId].chapters), dirty: true, error: null } }));
+  const save = async (sourceId: string) => {
+    const current = states[sourceId];
+    if (!valid(current.chapters) || current.saving || isLocked(current)) return;
+    setStates((all) => ({ ...all, [sourceId]: { ...all[sourceId], saving: true, error: null } }));
+    try { const next = await api.replaceChapterDrafts(sourceId, current.fingerprint, specs(current.chapters)); setStates((all) => ({ ...all, [sourceId]: { ...next, dirty: false, loading: false, saving: false, error: null } })); }
+    catch (error) { setStates((all) => ({ ...all, [sourceId]: { ...all[sourceId], saving: false, error: message(error, "章节草稿保存失败，请刷新后重试") } })); }
+  };
+  const confirm = async (sourceId: string) => {
+    const current = states[sourceId];
+    if (current.dirty || current.saving || isLocked(current) || !valid(current.chapters)) return;
+    setStates((all) => ({ ...all, [sourceId]: { ...all[sourceId], saving: true, error: null } }));
+    try { const next = await api.confirmChapterDrafts(sourceId, current.fingerprint); setStates((all) => ({ ...all, [sourceId]: { ...next, dirty: false, loading: false, saving: false, error: null } })); }
+    catch (error) { setStates((all) => ({ ...all, [sourceId]: { ...all[sourceId], saving: false, error: message(error, "章节目录确认失败，请刷新后重试") } })); }
   };
 
-  const run = async (chapterId: string) => {
-    setBusyId(chapterId);
-    setError(null);
-    try {
-      await runChapter(chapterId);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "精读任务启动失败");
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const runHybrid = async (chapterId: string) => {
-    setBusyId(chapterId);
-    setError(null);
-    try {
-      await runHybridChapter(chapterId);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "混合精读启动失败");
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  return (
-    <div className="space-y-5 animate-in">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-zinc-900">章节确认</h1>
-          <p className="mt-1 text-sm text-zinc-500">确认教材章节后，可以启动章节精读。</p>
-        </div>
-        <Link to="/workbench/chapter" className="rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-700 hover:border-zinc-300">
-          打开精读工作台
-        </Link>
-      </div>
-
-      {error && <p className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-600">{error}</p>}
-
-      {visibleChapterCount === 0 ? (
-        <div className="rounded-lg border border-dashed border-zinc-300 bg-white px-8 py-12 text-center">
-          <p className="text-sm font-medium text-zinc-700">还没有可确认的章节</p>
-          <p className="mt-1 text-xs text-zinc-400">先导入课程资料并识别章节。</p>
-          <Link to="/workbench/source" className="mt-4 inline-flex rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white">
-            导入资料
-          </Link>
-        </div>
-      ) : (
-        <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-white">
-          <div className="min-w-[760px]">
-            <div className="grid grid-cols-[minmax(0,1fr)_80px_80px_100px_320px] gap-3 border-b border-zinc-100 px-4 py-3 text-xs font-medium text-zinc-400">
-              <span>章节</span>
-              <span>页码</span>
-              <span>置信度</span>
-              <span>状态</span>
-              <span className="text-right">操作</span>
-            </div>
-            {chapterGroups.map(({ source, chapters: sourceChapters, completedCount }) => (
-              <section key={source.id} aria-labelledby={`confirm-source-${source.id}`}>
-                <div className="flex min-h-11 items-center justify-between border-b border-zinc-100 bg-zinc-50 px-4">
-                  <h2 id={`confirm-source-${source.id}`} className="truncate text-sm font-medium text-zinc-800">{source.title}</h2>
-                  <span className="text-xs tabular-nums text-zinc-400">{completedCount}/{sourceChapters.length}</span>
-                </div>
-                {sourceChapters.map((chapter) => {
-              const meta = chapter as ChapterWithMeta;
-              const busy = busyId === chapter.id;
-              const canRun = chapter.status === "CONFIRMED" || chapter.status === "COMPLETED";
-              const canRunHybrid = chapter.status === "CONFIRMED" || chapter.status === "FAILED";
-                  return (
-                <div
-                  key={chapter.id}
-                  className="grid grid-cols-[minmax(0,1fr)_80px_80px_100px_320px] items-center gap-3 border-b border-zinc-100 px-4 py-3 last:border-b-0"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-zinc-900">
-                      {chapter.seq + 1}. {chapter.title}
-                    </p>
-                  </div>
-                  <span className="text-xs text-zinc-500">{pageLabel(meta)}</span>
-                  <span className="text-xs text-zinc-500">{confidenceLabel(meta)}</span>
-                  <span className="text-xs text-zinc-500">{chapter.status}</span>
-                  <div className="flex flex-wrap justify-end gap-2">
-                    <Link
-                      to={`/workbench/chapter?chapterId=${chapter.id}`}
-                      className="inline-flex items-center rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-zinc-300"
-                    >
-                      查看
-                    </Link>
-                    <button
-                      type="button"
-                      onClick={() => confirm(chapter.id)}
-                      disabled={busy}
-                      className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-zinc-300 disabled:opacity-50"
-                    >
-                      {busy ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                      确认
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => run(chapter.id)}
-                      disabled={busy || !canRun}
-                      title={canRun ? undefined : "请先确认章节"}
-                      className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
-                    >
-                      <PlayCircle size={14} />
-                      运行精读
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => runHybrid(chapter.id)}
-                      disabled={busy || !canRunHybrid}
-                      title={canRunHybrid ? undefined : "仅支持已确认或失败章节"}
-                      className="inline-flex items-center gap-1.5 rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-200 disabled:opacity-50"
-                    >
-                      {busy ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                      混合精读
-                    </button>
-                  </div>
-                </div>
-                  );
-                })}
-              </section>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+  return <div className="space-y-5 animate-in">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-xl font-semibold">章节确认</h1><p className="mt-1 text-sm text-zinc-500">按教材校正章节名称、顺序与内容边界，保存后确认锁定。</p></div><Link to="/workbench/chapter" className="border border-zinc-200 px-3 py-2 text-sm">打开精读工作台</Link></div>
+    {pageError && <p role="alert" className="border-l-2 border-red-500 bg-red-50 px-3 py-2 text-sm text-red-700">{pageError}</p>}
+    {sourceList.length === 0 && !pageError ? <div className="border border-dashed border-zinc-300 px-8 py-12 text-center text-sm text-zinc-500">还没有可确认的教材章节</div> : sourceList.map((source) => <SourceDraftEditor key={source.id} source={source} state={states[source.id] ?? emptyState()} update={(transform) => update(source.id, transform)} save={() => void save(source.id)} confirm={() => void confirm(source.id)} />)}
+  </div>;
 }
+
+function SourceDraftEditor({ source, state, update, save, confirm }: { source: Source; state: DraftEditorState; update: (transform: (chapters: ChapterDraft[]) => ChapterDraft[]) => void; save: () => void; confirm: () => void }) {
+  const locked = isLocked(state);
+  const invalid = !valid(state.chapters);
+  const move = (index: number, delta: number) => update((items) => { const next = [...items]; [next[index], next[index + delta]] = [next[index + delta], next[index]]; return next.map((item, seq) => ({ ...item, seq })); });
+  const split = (index: number) => update((items) => { const item = items[index]; const boundary = Math.floor((item.start + item.end) / 2); if (boundary <= item.start || boundary >= item.end) return items; const next = [...items]; next.splice(index, 1, { ...item, end: boundary }, { ...item, id: `local:${crypto.randomUUID()}`, title: `${item.title}（下）`, start: boundary, seq: item.seq + 1 }); return next.map((chapter, seq) => ({ ...chapter, seq })); });
+  const merge = (index: number) => update((items) => items.filter((_, itemIndex) => itemIndex !== index + 1).map((item, seq) => itemIndexPatch(item, seq, index, items)));
+  return <section aria-label={source.title} className="border border-zinc-200 bg-white">
+    <header className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-4 py-3"><div><h2 className="text-sm font-semibold">{source.title}</h2><p className="text-xs text-zinc-500">{state.chapters.length} 个章节</p></div><div className="flex gap-2">{locked ? <span className="inline-flex items-center gap-1.5 text-sm text-emerald-700"><CheckCircle2 size={16} />章节目录已确认并锁定</span> : <><button type="button" onClick={save} disabled={!state.dirty || invalid || state.saving} className="inline-flex items-center gap-1.5 border border-zinc-200 px-3 py-2 text-sm disabled:opacity-40"><Save size={15} />保存章节草稿</button><button type="button" onClick={confirm} disabled={state.dirty || invalid || state.saving || state.chapters.length === 0} className="bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-40">确认章节目录</button></>}</div></header>
+    {state.loading ? <div className="flex min-h-28 items-center justify-center text-sm text-zinc-500"><Loader2 className="mr-2 animate-spin" size={16} />读取章节草稿</div> : <div className="divide-y divide-zinc-100">{state.chapters.map((chapter, index) => <div key={chapter.id} className="grid gap-3 px-4 py-3 lg:grid-cols-[36px_minmax(180px,1fr)_110px_110px_180px] lg:items-end"><span className="pb-2 text-sm tabular-nums text-zinc-400">{index + 1}</span><label className="text-xs text-zinc-500">章节名称<input aria-label="章节名称" disabled={locked} value={chapter.title} onChange={(event) => update((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item))} className="mt-1 h-9 w-full border border-zinc-200 px-2 text-sm disabled:bg-zinc-50" /></label><Boundary label="起始边界" value={chapter.start} disabled={locked} onChange={(value) => update((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, start: value } : item))} /><Boundary label="结束边界" value={chapter.end} disabled={locked} onChange={(value) => update((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, end: value } : item))} /><div className="flex justify-end gap-1 pb-0.5"><Icon label={`上移 ${chapter.title}`} disabled={locked || index === 0} onClick={() => move(index, -1)}><ArrowUp size={15} /></Icon><Icon label={`下移 ${chapter.title}`} disabled={locked || index === state.chapters.length - 1} onClick={() => move(index, 1)}><ArrowDown size={15} /></Icon><Icon label={`拆分 ${chapter.title}`} disabled={locked || chapter.end - chapter.start < 2} onClick={() => split(index)}><Scissors size={15} /></Icon><Icon label={`合并下一章 ${chapter.title}`} disabled={locked || index === state.chapters.length - 1} onClick={() => merge(index)}><Merge size={15} /></Icon></div></div>)}{invalid && <p role="alert" className="px-4 py-3 text-sm text-red-700">章节名称不能为空，且结束边界必须大于起始边界。</p>}{state.error && <p role="alert" className="px-4 py-3 text-sm text-red-700">{state.error}</p>}</div>}
+  </section>;
+}
+
+function Boundary({ label, value, disabled, onChange }: { label: string; value: number; disabled: boolean; onChange: (value: number) => void }) { return <label className="text-xs text-zinc-500">{label}<input type="number" min={0} aria-label={label} disabled={disabled} value={value} onChange={(event) => onChange(Number(event.target.value))} className="mt-1 h-9 w-full border border-zinc-200 px-2 text-sm tabular-nums disabled:bg-zinc-50" /></label>; }
+function Icon({ label, disabled, onClick, children }: { label: string; disabled: boolean; onClick: () => void; children: React.ReactNode }) { return <button type="button" aria-label={label} title={label} disabled={disabled} onClick={onClick} className="flex h-9 w-9 items-center justify-center text-zinc-500 hover:bg-zinc-100 disabled:opacity-30">{children}</button>; }
+function valid(chapters: ChapterDraft[]) { return chapters.length > 0 && chapters.every((chapter) => chapter.title.trim() && Number.isInteger(chapter.start) && Number.isInteger(chapter.end) && chapter.start >= 0 && chapter.end > chapter.start); }
+function itemIndexPatch(item: ChapterDraft, seq: number, mergeIndex: number, original: ChapterDraft[]) { return seq === mergeIndex ? { ...item, end: original[mergeIndex + 1].end, title: `${item.title} / ${original[mergeIndex + 1].title}`, seq } : { ...item, seq }; }
+function message(error: unknown, fallback: string) { return error instanceof Error ? error.message : fallback; }

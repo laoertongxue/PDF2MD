@@ -37,6 +37,23 @@ export interface Chapter {
   updated_at?: number;
 }
 
+export interface ChapterDraft extends Chapter {
+  start: number;
+  end: number;
+}
+
+export interface ChapterDraftSpec {
+  id?: string;
+  title: string;
+  start: number;
+  end: number;
+}
+
+export interface ChapterDraftState {
+  chapters: ChapterDraft[];
+  fingerprint: string;
+}
+
 export interface Card {
   id: string;
   origin_type: "chapter" | "topic";

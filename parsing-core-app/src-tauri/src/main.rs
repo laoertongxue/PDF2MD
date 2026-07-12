@@ -8,6 +8,10 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 type SharedState = Arc<Mutex<AppState>>;
+const TEXTBOOK_EXTENSIONS: &[&str] = &[
+    "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "png", "jpg", "jpeg", "gif",
+    "bmp", "tif", "tiff", "webp",
+];
 
 #[tauri::command]
 fn get_status(state: tauri::State<SharedState>) -> StatusPayload {
@@ -64,7 +68,7 @@ async fn pick_textbooks(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let files = app
         .dialog()
         .file()
-        .add_filter("教材", &["pdf", "doc", "docx"])
+        .add_filter("教材", TEXTBOOK_EXTENSIONS)
         .blocking_pick_files();
     Ok(files
         .unwrap_or_default()
@@ -77,6 +81,24 @@ async fn pick_textbooks(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 #[tauri::command]
 fn textbook_path_is_file(path: String) -> bool {
     std::path::Path::new(&path).is_file()
+}
+
+#[cfg(test)]
+mod textbook_picker_tests {
+    use super::TEXTBOOK_EXTENSIONS;
+
+    #[test]
+    fn picker_matches_the_supported_textbook_contract() {
+        for extension in [
+            "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "png", "jpg", "jpeg",
+            "webp", "tiff", "bmp",
+        ] {
+            assert!(TEXTBOOK_EXTENSIONS.contains(&extension));
+        }
+        for extension in ["csv", "md", "txt"] {
+            assert!(!TEXTBOOK_EXTENSIONS.contains(&extension));
+        }
+    }
 }
 
 #[tauri::command]
