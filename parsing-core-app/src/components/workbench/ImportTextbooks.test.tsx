@@ -37,10 +37,12 @@ describe("ImportTextbooks", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    delete (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.defineProperty(globalThis, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     dragDropHandler = undefined;
     loadSources.mockResolvedValue([]);
     detectChapters.mockResolvedValue([]);
@@ -59,7 +61,7 @@ describe("ImportTextbooks", () => {
     await waitFor(() => expect(screen.getByText("A.pdf")).toBeInTheDocument());
     expect(zone).toHaveAttribute("data-drag-active", "false");
     expect(screen.getByText("folder：不支持此文件类型")).toBeInTheDocument();
-    expect(screen.getByText("readme.txt：不支持此文件类型")).toBeInTheDocument();
+    expect(screen.getByText("readme.txt")).toBeInTheDocument();
 
     view.unmount();
     await waitFor(() => expect(unlistenDragDrop).toHaveBeenCalledTimes(1));
@@ -67,12 +69,14 @@ describe("ImportTextbooks", () => {
   });
 
   it("does not register Tauri drag-drop in a normal browser", async () => {
+    delete (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     renderImporter();
     await Promise.resolve();
     expect(onDragDropEvent).not.toHaveBeenCalled();
   });
 
   it("calls the import endpoint with paths and rejects malformed responses safely", async () => {
+    delete (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(new Response(JSON.stringify({ items: [{ source_id: "source-a", title: "战略管理", stored_path: "/course/战略管理.pdf" }] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ items: [{ source_id: 1, title: "bad", stored_path: "/bad.pdf" }] }), { status: 200 }));
@@ -151,19 +155,29 @@ describe("ImportTextbooks", () => {
     expect(loadSources).toHaveBeenCalledWith("course-1");
   });
 
-  it("shows a browser path error per file and sends no request for standard File objects", async () => {
-    invoke.mockRejectedValue(new Error("not running in Tauri"));
-    const { container } = renderImporter();
-    await userEvent.click(screen.getByRole("button", { name: "选择教材" }));
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-    expect(input).toHaveAttribute("multiple");
-
-    await userEvent.upload(input, new File(["book"], "营销管理.pdf", { type: "application/pdf" }));
-
-    expect(screen.getByText("营销管理.pdf")).toBeInTheDocument();
-    expect(screen.getByText("浏览器无法读取本地路径，请使用桌面客户端选择教材")).toBeInTheDocument();
+  it("disables local textbook selection in a browser and explains why before any failure", async () => {
+    delete (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    renderImporter();
+    const picker = screen.getByRole("button", { name: "选择教材" });
+    expect(picker).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("浏览器版无法读取教材的本地路径，请使用桌面客户端导入");
+    await userEvent.click(picker);
+    expect(invoke).not.toHaveBeenCalled();
     expect(importSources).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "导入全部" })).not.toBeInTheDocument();
+  });
+
+  it("advertises and accepts the complete desktop textbook format set", async () => {
+    Object.defineProperty(globalThis, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+    invoke.mockResolvedValue(["/books/战略.pptx", "/books/数据.xlsx", "/books/案例.png", "/books/讲义.md"]);
+    renderImporter();
+    expect(screen.getByText(/PPT、Excel、图片、Markdown/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "选择教材" }));
+    expect(screen.getByDisplayValue("战略")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("数据")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("案例")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("讲义")).toBeInTheDocument();
+    delete (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
   it("accepts a compatible File carrying an absolute path and uses the import API", async () => {
@@ -192,7 +206,7 @@ describe("ImportTextbooks", () => {
       { kind: "file", getAsFile: () => directory, webkitGetAsEntry: () => ({ isDirectory: true }) },
     ] } });
     expect(screen.getByText("财务管理.pdf")).toBeInTheDocument();
-    expect(screen.getByText("说明.txt：不支持此文件类型")).toBeInTheDocument();
+    expect(screen.getByText("说明.txt")).toBeInTheDocument();
     expect(screen.getByText("课程目录：不支持导入文件夹")).toBeInTheDocument();
   });
 

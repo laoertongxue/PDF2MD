@@ -108,7 +108,7 @@ export default function TopicFusion({ courseId, topicId }: { courseId: string; t
     <div className="grid min-w-0 border-y border-zinc-200 md:grid-cols-[220px_minmax(0,1fr)]">
       <aside className="border-b border-zinc-200 bg-zinc-50 md:border-b-0 md:border-r" aria-label="课程主题列表">
         <div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">课程主题</div>
-        {topics.map((item) => <Link key={item.id} to={`/workbench/courses/${courseId}/topics/${item.id}`} className={`block border-b border-zinc-100 px-4 py-3 ${item.id === topicId ? "bg-emerald-50" : "hover:bg-white"}`}><span className="block break-words text-sm font-medium">{item.title}</span><span className="mt-1 block text-xs text-zinc-500">{STATUS[item.status] ?? item.status}</span></Link>)}
+        {topics.map((item) => <Link key={item.id} to={`/workbench/courses/${courseId}/fusion/${item.id}`} className={`block border-b border-zinc-100 px-4 py-3 ${item.id === topicId ? "bg-emerald-50" : "hover:bg-white"}`}><span className="block break-words text-sm font-medium">{item.title}</span><span className="mt-1 block text-xs text-zinc-500">{STATUS[item.status] ?? item.status}</span></Link>)}
       </aside>
       <main className="min-w-0 px-4 py-5 sm:px-6 lg:px-10">
         <header className="border-b border-zinc-200 pb-5">

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, Outlet, useLocation } from "react-router-dom";
+import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   BookOpen,
   ChevronDown,
@@ -8,6 +8,8 @@ import {
   Library,
   Layers3,
   NotebookTabs,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Search,
   Settings as SettingsIcon,
@@ -16,6 +18,28 @@ import {
 import { getServiceStatus, retryService, type ServiceStatus } from "../api/runtime";
 import { useWorkbenchStore } from "../store/useWorkbenchStore";
 import SourceChapterTree, { createSourceChapterGroups } from "./workbench/SourceChapterTree";
+import type { Card, Chapter, Course, Source } from "../api/workbenchTypes";
+
+interface SearchData {
+  courses: Course[];
+  sources: Record<string, Source[]>;
+  chapters: Record<string, Chapter[]>;
+  cardsByCourse: Record<string, Card[]>;
+}
+
+export interface SearchResult { id: string; kind: string; label: string; detail: string; to: string; courseId?: string }
+
+export function buildSearchResults(data: SearchData, query: string): SearchResult[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [];
+  const matches = (values: string[]) => values.some((value) => value.toLocaleLowerCase().includes(needle));
+  return [
+    ...data.courses.filter((course) => matches([course.title, course.description])).map((course) => ({ id: `course:${course.id}`, kind: "课程", label: course.title, detail: course.description, to: "/workbench", courseId: course.id })),
+    ...Object.values(data.sources).flat().filter((source) => matches([source.title, source.file_path])).map((source) => ({ id: `source:${source.id}`, kind: "教材", label: source.title, detail: source.file_path, to: "/workbench/chapters", courseId: source.course_id })),
+    ...Object.values(data.chapters).flat().filter((chapter) => matches([chapter.title])).map((chapter) => ({ id: `chapter:${chapter.id}`, kind: "章节", label: chapter.title, detail: "打开章节精读", to: `/workbench/chapter?chapterId=${chapter.id}`, courseId: chapter.course_id })),
+    ...Object.entries(data.cardsByCourse).flatMap(([courseId, cards]) => cards.filter((card) => matches([card.title, card.content, card.origin_title])).map((card) => ({ id: `card:${card.id}`, kind: "卡片", label: card.title, detail: card.origin_title, to: `/workbench/cards?cardId=${card.id}`, courseId }))),
+  ].slice(0, 12);
+}
 
 const nav = [
   { to: "/", label: "开始", icon: Home },
@@ -41,6 +65,11 @@ export function ServiceStatusView({ service, onRetry }: { service: ServiceStatus
 
 export default function Layout() {
   const [service, setService] = useState<ServiceStatus>({ state: "starting", port: 0 });
+  const [primaryOpen, setPrimaryOpen] = useState(() => window.innerWidth >= 1280);
+  const [libraryOpen, setLibraryOpen] = useState(() => window.innerWidth >= 1024);
+  const [search, setSearch] = useState("");
+  const [activeResult, setActiveResult] = useState(0);
+  const navigate = useNavigate();
 
   useEffect(() => {
     const refresh = () => void getServiceStatus().then(setService).catch((error) => setService({ state: "failed", port: 0, error: { category: "status", message: String(error) } }));
@@ -52,9 +81,11 @@ export default function Layout() {
   const isWorkbench = pathname.startsWith("/workbench");
   const {
     chapters,
+    cardsByCourse,
     courses,
     loadChapters,
     loadCourses,
+    loadCourseCards,
     loadSources,
     selectCourse,
     selectedCourseId,
@@ -64,6 +95,7 @@ export default function Layout() {
   const selectedSources = selectedCourseId ? (sources[selectedCourseId] ?? []) : [];
   const chapterGroups = createSourceChapterGroups(selectedSources, chapters);
   const selectedChapterCount = chapterGroups.reduce((total, group) => total + group.chapters.length, 0);
+  const searchResults = buildSearchResults({ courses, sources, chapters, cardsByCourse }, search);
 
   useEffect(() => {
     loadCourses().catch(() => undefined);
@@ -71,14 +103,19 @@ export default function Layout() {
 
   useEffect(() => {
     if (!selectedCourseId) return;
-    loadSources(selectedCourseId)
-      .then((items) => Promise.all(items.map((source) => loadChapters(source.id))))
+    Promise.all([loadSources(selectedCourseId).then((items) => Promise.all(items.map((source) => loadChapters(source.id)))), loadCourseCards(selectedCourseId)])
       .catch(() => undefined);
-  }, [loadChapters, loadSources, selectedCourseId]);
+  }, [loadChapters, loadCourseCards, loadSources, selectedCourseId]);
+
+  const openResult = (result: SearchResult) => {
+    if (result.courseId) selectCourse(result.courseId);
+    setSearch("");
+    navigate(result.to);
+  };
 
   return (
     <div className="flex h-screen overflow-hidden bg-white text-zinc-900">
-      <aside className="hidden w-[252px] shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 lg:flex xl:w-[292px]">
+      <aside aria-label="主导航" className={`${primaryOpen ? "fixed inset-y-0 left-0 z-40 flex xl:static" : "hidden"} w-[252px] shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 shadow-xl xl:w-[292px] xl:shadow-none`}>
         <div className="flex h-16 items-center gap-3 px-5">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500 text-white shadow-sm shadow-emerald-200">
             <BookOpen size={20} strokeWidth={2.2} />
@@ -92,11 +129,17 @@ export default function Layout() {
           </div>
         </div>
 
-        <div className="px-4 pb-3">
-          <div className="flex h-10 items-center gap-2 rounded-lg bg-white px-3 text-sm text-zinc-400 shadow-sm ring-1 ring-zinc-200">
+        <div className="relative px-4 pb-3">
+          <div className="flex h-10 items-center gap-2 rounded-lg bg-white px-3 text-sm text-zinc-500 shadow-sm ring-1 ring-zinc-200 focus-within:ring-2 focus-within:ring-emerald-500">
             <Search size={16} />
-            <span>搜索课程、章节、卡片</span>
+            <input value={search} onChange={(event) => { setSearch(event.target.value); setActiveResult(0); }} onKeyDown={(event) => {
+              if (event.key === "ArrowDown") { event.preventDefault(); setActiveResult((current) => Math.min(current + 1, searchResults.length - 1)); }
+              if (event.key === "ArrowUp") { event.preventDefault(); setActiveResult((current) => Math.max(current - 1, 0)); }
+              if (event.key === "Enter" && searchResults[activeResult]) { event.preventDefault(); openResult(searchResults[activeResult]); }
+              if (event.key === "Escape") setSearch("");
+            }} role="combobox" aria-label="搜索课程、教材、章节、卡片" aria-expanded={searchResults.length > 0} aria-controls="global-search-results" placeholder="搜索课程、教材、章节、卡片" className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-zinc-400" />
           </div>
+          {search && <ul id="global-search-results" role="listbox" className="absolute left-4 right-4 top-11 z-50 max-h-80 overflow-y-auto border border-zinc-200 bg-white py-1 shadow-xl">{searchResults.length ? searchResults.map((result, index) => <li key={result.id} role="option" aria-selected={index === activeResult}><button type="button" onMouseEnter={() => setActiveResult(index)} onClick={() => openResult(result)} className={`w-full px-3 py-2 text-left ${index === activeResult ? "bg-emerald-50" : "hover:bg-zinc-50"}`}><span className="block truncate text-sm font-medium">{result.label}</span><span className="block truncate text-xs text-zinc-500">{result.kind} · {result.detail}</span></button></li>) : <li className="px-3 py-3 text-sm text-zinc-500">没有匹配结果</li>}</ul>}
         </div>
 
         <nav className="space-y-1 px-3 py-2">
@@ -155,7 +198,7 @@ export default function Layout() {
       </aside>
 
       {isWorkbench && (
-        <aside className="hidden w-[280px] shrink-0 flex-col border-r border-zinc-200 bg-white md:flex xl:w-[330px]">
+        <aside aria-label="课程资料导航" className={`${libraryOpen ? "hidden lg:flex" : "hidden"} w-[280px] shrink-0 flex-col border-r border-zinc-200 bg-white xl:w-[330px]`}>
           <div className="flex h-16 items-center justify-between border-b border-zinc-100 px-5">
             <div className="min-w-0">
               <p className="text-xs text-zinc-400">资料库</p>
@@ -185,7 +228,7 @@ export default function Layout() {
                 <FolderOpen size={16} /> 教材
               </Link>
               {selectedCourseId && <Link to={`/workbench/courses/${selectedCourseId}/topics`} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${pathname.includes("/topics") ? "bg-zinc-100 font-medium text-zinc-900" : "text-zinc-600 hover:bg-zinc-50"}`}><Layers3 size={16} /> 课程主题</Link>}
-              {selectedCourseId && <Link to={`/workbench/courses/${selectedCourseId}/topics`} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-zinc-600 hover:bg-zinc-50"><BookOpen size={16} /> 融合精读</Link>}
+              {selectedCourseId && <Link to={`/workbench/courses/${selectedCourseId}/fusion`} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${pathname.includes("/fusion") ? "bg-zinc-100 font-medium text-zinc-900" : "text-zinc-600 hover:bg-zinc-50"}`}><BookOpen size={16} /> 融合精读</Link>}
               <Link
                 to="/workbench/cards"
                 className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${
@@ -238,9 +281,13 @@ export default function Layout() {
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
         <header className="flex h-16 shrink-0 items-center justify-between gap-4 border-b border-zinc-200 px-4 sm:px-6 lg:px-7">
-          <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <button type="button" onClick={() => setPrimaryOpen((open) => !open)} aria-label={primaryOpen ? "收起主导航" : "展开主导航"} title={primaryOpen ? "收起主导航" : "展开主导航"} className="flex h-9 w-9 shrink-0 items-center justify-center text-zinc-500 hover:bg-zinc-100">{primaryOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}</button>
+            {isWorkbench && <button type="button" onClick={() => setLibraryOpen((open) => !open)} aria-label={libraryOpen ? "收起课程资料栏" : "展开课程资料栏"} title={libraryOpen ? "收起课程资料栏" : "展开课程资料栏"} className="hidden h-9 w-9 shrink-0 items-center justify-center text-zinc-500 hover:bg-zinc-100 lg:flex">{libraryOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}</button>}
+            <div className="min-w-0">
             <p className="text-xs text-zinc-400">{isWorkbench ? "精读文档" : "文档解析"}</p>
             <h1 className="truncate text-sm font-semibold">{isWorkbench ? selectedCourse?.title ?? "课程精读" : "PDF2MD"}</h1>
+            </div>
           </div>
           <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
             <Link to="/workbench/chapter" className="rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50">

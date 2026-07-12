@@ -2,6 +2,7 @@ import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, FileText, Loader2, RefreshCw, Upload } from "lucide-react";
 import type { Chapter, ImportedSource, Source } from "../../api/workbenchTypes";
 import { SafeApiError } from "../../api/workbench";
+import { isTauriRuntime } from "../../api/runtime";
 
 type QueueStatus = "等待" | "导入" | "识别章节" | "成功" | "失败" | "结果待确认";
 type QueuePhase = "import" | "detect";
@@ -26,8 +27,7 @@ interface Props {
   loadSources: (courseId: string) => Promise<Source[]>;
 }
 
-const supportedExtension = /\.(pdf|doc|docx)$/i;
-const browserPathError = "浏览器无法读取本地路径，请使用桌面客户端选择教材";
+const supportedExtension = /\.(pdf|doc|docx|ppt|pptx|xls|xlsx|csv|png|jpe?g|webp|md|markdown|txt)$/i;
 const uncertainImportError = "请刷新教材列表核对导入结果，系统不会自动重复导入";
 
 function safeName(path: string) {
@@ -52,6 +52,7 @@ function canRetryImport(error: unknown) {
 }
 
 export default function ImportTextbooks({ courseId, currentSources, importSources, detectChapters, loadSources }: Props) {
+  const desktop = isTauriRuntime();
   const [items, setItems] = useState<QueueItem[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
   const [dragActive, setDragActive] = useState(false);
@@ -85,7 +86,7 @@ export default function ImportTextbooks({ courseId, currentSources, importSource
           path,
           status: path ? "等待" as const : "失败" as const,
           phase: "import" as const,
-          error: path ? undefined : browserPathError,
+          error: path ? undefined : "无法读取本地文件路径",
         }];
       });
       return [...current, ...additions];
@@ -143,6 +144,7 @@ export default function ImportTextbooks({ courseId, currentSources, importSource
   }, []);
 
   const chooseFiles = async () => {
+    if (!desktop) return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const paths = await invoke<string[]>("pick_textbooks");
@@ -281,11 +283,12 @@ export default function ImportTextbooks({ courseId, currentSources, importSource
     <div className="space-y-4">
       <div data-testid="textbook-drop-zone" data-drag-active={dragActive} onDragEnter={() => setDragActive(true)} onDragLeave={() => setDragActive(false)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { setDragActive(false); dropped(event); }} className={`flex min-h-40 flex-col items-center justify-center border-2 border-dashed px-6 py-8 text-center transition-colors ${dragActive ? "border-emerald-500 bg-emerald-50" : "border-zinc-300 hover:border-zinc-400"}`}>
         <Upload size={28} className="mb-3 text-zinc-400" aria-hidden="true" />
-        <p className="text-sm font-medium text-zinc-800">拖放 PDF 或 Word 教材</p>
-        <p className="mt-1 text-xs text-zinc-500">支持 PDF、DOC、DOCX，可一次选择多本</p>
-        <button type="button" onClick={chooseFiles} title="选择多本教材" className="mt-4 inline-flex h-9 items-center gap-2 rounded-md bg-zinc-900 px-4 text-sm font-medium text-white hover:bg-zinc-800"><FileText size={15} aria-hidden="true" />选择教材</button>
-        <input ref={inputRef} type="file" multiple accept=".pdf,.doc,.docx" onChange={webFiles} className="sr-only" aria-label="选择教材文件" />
+        <p className="text-sm font-medium text-zinc-800">拖放或选择课程教材</p>
+        <p className="mt-1 text-xs text-zinc-500">支持 PDF、Word、PPT、Excel、图片、Markdown 与文本，可一次选择多本</p>
+        <button type="button" onClick={chooseFiles} disabled={!desktop} title={desktop ? "选择多本教材" : "请使用桌面客户端导入"} className="mt-4 inline-flex h-9 items-center gap-2 rounded-md bg-zinc-900 px-4 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"><FileText size={15} aria-hidden="true" />选择教材</button>
+        <input ref={inputRef} type="file" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.png,.jpg,.jpeg,.webp,.md,.markdown,.txt" onChange={webFiles} className="sr-only" aria-label="选择教材文件" />
       </div>
+      {!desktop && <div role="alert" className="border-l-2 border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-800">浏览器版无法读取教材的本地路径，请使用桌面客户端导入。</div>}
       {errors.length > 0 && <div role="alert" className="space-y-1 text-sm text-red-600">{errors.map((error, index) => <p key={`${error}-${index}`}>{error}</p>)}</div>}
       {items.length > 0 && (
         <div className="border-y border-zinc-200">

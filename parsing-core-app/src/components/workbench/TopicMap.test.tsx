@@ -81,6 +81,26 @@ describe("TopicMap", () => {
     expect(actions.deleteTopic).toHaveBeenCalledWith("c1", "t1");
   });
 
+  it("traps dialog focus, closes on Escape and restores focus to its trigger", async () => {
+    renderMap();
+    const trigger = screen.getByRole("button", { name: "新建主题" });
+    trigger.focus();
+    await userEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "新建主题" });
+    const name = within(dialog).getByRole("textbox", { name: "新主题名称" });
+    expect(name).toHaveFocus();
+    await userEvent.type(name, "新主题");
+    const close = within(dialog).getByRole("button", { name: "关闭" });
+    close.focus();
+    await userEvent.tab({ shift: true });
+    expect(within(dialog).getByRole("button", { name: "创建" })).toHaveFocus();
+    await userEvent.tab();
+    expect(close).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+    expect(dialog).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
   it("requires every topic to have chapters before confirming and saves checkbox mappings", async () => {
     reset({ topicsByCourse: { c1: [topic({ chapter_ids: [] })] } });
     renderMap();

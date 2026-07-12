@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { BookOpen, FolderOpen, Loader2, PlusCircle } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
+import { isTauriRuntime } from "../../api/runtime";
 
 export default function CourseList() {
   const { courses, createCourse, loadCourseCards, loadCourses, loadSources, selectCourse, selectedCourseId } = useWorkbenchStore();
@@ -11,6 +12,7 @@ export default function CourseList() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const desktop = isTauriRuntime();
 
   useEffect(() => {
     loadCourses().catch((e: unknown) => setError(e instanceof Error ? e.message : "加载失败")).finally(() => setLoading(false));
@@ -41,6 +43,7 @@ export default function CourseList() {
   };
 
   const chooseRootDir = async () => {
+    if (!desktop) return;
     setError(null);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -105,14 +108,16 @@ export default function CourseList() {
             <button
               type="button"
               onClick={chooseRootDir}
-              className="inline-flex shrink-0 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+              disabled={!desktop}
+              className="inline-flex shrink-0 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
             >
               <FolderOpen size={15} />
               选择文件夹
             </button>
           </div>
         </label>
-        {error && <p className="text-sm text-red-500">{error}</p>}
+        {!desktop && <p role="alert" className="text-sm text-amber-700">浏览器版不支持选择本地课程目录，请使用桌面客户端或粘贴目录路径。</p>}
+        {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
         <button
           type="submit"
           disabled={saving || !title.trim() || !rootDir.trim()}

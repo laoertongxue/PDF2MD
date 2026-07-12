@@ -156,6 +156,24 @@ function SyncLabel({ topic, detail = false }: { topic: CourseTopic; detail?: boo
 }
 
 function ModalView({ type, name, setName, ids, setIds, topics, selected, chapters, close, submit, busy }: { type: Exclude<Modal, null>; name: string; setName: (name: string) => void; ids: string[]; setIds: (ids: string[]) => void; topics: CourseTopic[]; selected: CourseTopic | null; chapters: Chapter[]; close: () => void; submit: () => void; busy: boolean }) {
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useEffect(() => {
+    const restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+    const focusable = () => [...(dialog?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])];
+    focusable().find((element) => element.tagName === "INPUT")?.focus();
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); closeRef.current(); return; }
+      if (event.key !== "Tab") return;
+      const nodes = focusable();
+      const first = nodes[0]; const last = nodes[nodes.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener("keydown", keydown);
+    return () => { document.removeEventListener("keydown", keydown); restoreFocus?.focus(); };
+  }, []);
   const labels = type === "create" ? ["新建主题", "新主题名称", "创建"] : type === "merge" ? ["合并主题", "合并后名称", "确认合并"] : ["拆分主题", "拆分主题名称", "确认拆分"];
   const options = type === "merge" ? topics.map((topic) => ({ id: topic.id, label: topic.title })) : chapters.filter((chapter) => selected?.chapter_ids.includes(chapter.id)).map((chapter) => ({ id: chapter.id, label: `${chapter.title} · ${topics.filter((topic) => topic.chapter_ids.includes(chapter.id)).length} 个主题` }));
   const valid = !!name.trim() && (type === "create" || (type === "merge" ? ids.length >= 2 : ids.length >= 1 && ids.length < options.length));
