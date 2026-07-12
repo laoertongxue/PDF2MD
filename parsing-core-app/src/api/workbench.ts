@@ -1,6 +1,7 @@
 import type {
   Card,
   Chapter,
+  ChapterRun,
   Course,
   CourseTopic,
   ImportedSource,
@@ -64,6 +65,7 @@ export function getSafeApiErrorMessage(error: unknown): string | null {
 const TOPIC_STATUSES = new Set<TopicStatus>(["DRAFT", "NOT_READY", "READY", "RUNNING", "COMPLETED", "STALE", "FAILED"]);
 const TOPIC_SYNC_STATUSES = new Set<TopicSyncStatus>(["PENDING", "SYNCING", "SYNCED", "FAILED"]);
 const TOPIC_RUN_STATUSES = new Set<TopicRunStatus>(["RUNNING", "COMPLETED", "FAILED"]);
+const CHAPTER_RUN_STATUSES = new Set(["PENDING", "RUNNING", "COMPLETED", "FAILED"]);
 
 function protocolError(): SafeApiError {
   return new SafeApiError("protocol");
@@ -156,6 +158,21 @@ function parseCourseCard(value: unknown): Card {
     typeof value.card_type !== "string" || typeof value.title !== "string" ||
     typeof value.content !== "string" || !isStringArray(value.source_refs)) throw protocolError();
   return value as unknown as Card;
+}
+
+function parseNoteBlock(value: unknown): NoteBlock {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.chapter_id !== "string" ||
+    typeof value.kind !== "string" || typeof value.title !== "string" || typeof value.body !== "string" ||
+    typeof value.seq !== "number" || (value.updated_at !== undefined && typeof value.updated_at !== "number")) throw protocolError();
+  return value as unknown as NoteBlock;
+}
+
+function parseChapterRun(value: unknown): ChapterRun {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.chapter_id !== "string" ||
+    typeof value.round_key !== "string" || typeof value.executor !== "string" || typeof value.status !== "string" ||
+    !CHAPTER_RUN_STATUSES.has(value.status) || typeof value.output !== "string" || typeof value.error !== "string" ||
+    typeof value.stale !== "boolean" || typeof value.created_at !== "number" || typeof value.updated_at !== "number") throw protocolError();
+  return value as unknown as ChapterRun;
 }
 
 async function request<T>(
@@ -277,7 +294,17 @@ export function listCourseCards(courseId: string): Promise<Card[]> {
 }
 
 export function listChapterNoteBlocks(chapterId: string): Promise<NoteBlock[]> {
-  return request<NoteBlock[]>(`/api/workbench/chapters/${chapterId}/note-blocks`);
+  return request<NoteBlock[]>(`/api/workbench/chapters/${chapterId}/note-blocks`, undefined, (value) => parseArray(value, parseNoteBlock));
+}
+
+export function listChapterRuns(chapterId: string): Promise<ChapterRun[]> {
+  return request<ChapterRun[]>(`/api/workbench/chapters/${chapterId}/runs`, undefined, (value) => parseArray(value, parseChapterRun));
+}
+
+export function saveChapterBlock(chapterId: string, kind: string, body: string, expectedBody: string): Promise<NoteBlock> {
+  return request<NoteBlock>(`/api/workbench/chapters/${chapterId}/note-blocks/${kind}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body, expected_body: expectedBody }),
+  }, parseNoteBlock, false, { 507: "edit_saved_sync_failed" });
 }
 
 export function listTopics(courseId: string): Promise<CourseTopic[]> {

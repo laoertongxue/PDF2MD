@@ -3,6 +3,7 @@ import * as api from "../api/workbench";
 import type {
   Card,
   Chapter,
+  ChapterRun,
   Course,
   CourseTopic,
   NoteBlock,
@@ -28,6 +29,7 @@ interface WorkbenchState {
   chapters: Record<string, Chapter[]>;
   cardsByCourse: Record<string, Card[]>;
   noteBlocksByChapter: Record<string, NoteBlock[]>;
+  chapterRunsById: Record<string, ChapterRun[]>;
   topicsByCourse: Record<string, CourseTopic[]>;
   topicBlocksById: Record<string, TopicNoteBlock[]>;
   topicCardsById: Record<string, TopicCard[]>;
@@ -42,6 +44,8 @@ interface WorkbenchState {
   loadChapters: (sourceId: string) => Promise<Chapter[]>;
   loadCourseCards: (courseId: string) => Promise<Card[]>;
   loadChapterNoteBlocks: (chapterId: string) => Promise<NoteBlock[]>;
+  loadChapterRuns: (chapterId: string) => Promise<ChapterRun[]>;
+  saveChapterBlock: (chapterId: string, kind: string, body: string, expectedBody: string) => Promise<NoteBlock>;
   createCourse: (title: string, description: string, rootDir: string) => Promise<Course>;
   addSource: (courseId: string, filePath: string, title: string, kind?: string) => Promise<Source>;
   detectChapters: (sourceId: string) => Promise<Chapter[]>;
@@ -236,6 +240,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
     chapters: {},
     cardsByCourse: {},
     noteBlocksByChapter: {},
+    chapterRunsById: {},
     topicsByCourse: {},
     topicBlocksById: {},
     topicCardsById: {},
@@ -273,6 +278,23 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
       const blocks = await api.listChapterNoteBlocks(chapterId);
       set((state) => ({ noteBlocksByChapter: { ...state.noteBlocksByChapter, [chapterId]: blocks } }));
       return blocks;
+    },
+
+    loadChapterRuns: async (chapterId) => {
+      const runs = await api.listChapterRuns(chapterId);
+      set((state) => ({ chapterRunsById: { ...state.chapterRunsById, [chapterId]: runs } }));
+      return runs;
+    },
+
+    saveChapterBlock: async (chapterId, kind, body, expectedBody) => {
+      const block = await api.saveChapterBlock(chapterId, kind, body, expectedBody);
+      set((state) => ({
+        noteBlocksByChapter: {
+          ...state.noteBlocksByChapter,
+          [chapterId]: (state.noteBlocksByChapter[chapterId] ?? []).map((item) => item.id === block.id || item.kind === block.kind ? block : item),
+        },
+      }));
+      return block;
     },
 
     createCourse: async (title, description, rootDir) => {

@@ -58,6 +58,21 @@ export interface NoteBlock {
   updated_at?: number;
 }
 
+export type ChapterRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+
+export interface ChapterRun {
+  id: string;
+  chapter_id: string;
+  round_key: string;
+  executor: string;
+  status: ChapterRunStatus;
+  output: string;
+  error: string;
+  stale: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface WorkbenchSettings {
   deepseek_model: string;
   deepseek_key_masked: string | null;
