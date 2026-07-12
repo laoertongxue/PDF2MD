@@ -1,9 +1,11 @@
 import argparse
+import inspect
 import ipaddress
 import os
 import shutil
 import sqlite3
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -61,9 +63,24 @@ def build_app(
     orch_factory: Callable,
     max_global_concurrency: int = MAX_GLOBAL_CONCURRENCY,
     health_token: str | None = None,
+    lifespan: Callable | None = None,
     shutdown_hook: Callable[[], None] | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="parsing-core-serving")
+    @asynccontextmanager
+    async def combined_lifespan(app: FastAPI):
+        try:
+            if lifespan is None:
+                yield
+            else:
+                async with lifespan(app):
+                    yield
+        finally:
+            if shutdown_hook is not None:
+                result = shutdown_hook()
+                if inspect.isawaitable(result):
+                    await result
+
+    app = FastAPI(title="parsing-core-serving", lifespan=combined_lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_cors_origins(),
@@ -73,9 +90,6 @@ def build_app(
 
     sch = Scheduler(orch_factory, max_global_concurrency=max_global_concurrency)
     set_scheduler(sch)
-
-    if shutdown_hook is not None:
-        app.add_event_handler("shutdown", shutdown_hook)
 
     @app.get("/health")
     async def health(x_pdf2md_health_token: str | None = Header(default=None)):
