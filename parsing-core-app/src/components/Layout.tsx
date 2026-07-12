@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import {
   BookOpen,
@@ -13,6 +13,7 @@ import {
   Settings as SettingsIcon,
   Sparkles,
 } from "lucide-react";
+import { getApiBase } from "../api/runtime";
 import { useWorkbenchStore } from "../store/useWorkbenchStore";
 import SourceChapterTree, { createSourceChapterGroups } from "./workbench/SourceChapterTree";
 
@@ -24,6 +25,11 @@ const nav = [
 ];
 
 export default function Layout() {
+  const [apiBase, setApiBase] = useState("http://127.0.0.1:8000");
+
+  useEffect(() => {
+    void getApiBase().then(setApiBase);
+  }, []);
   const { pathname } = useLocation();
   const isWorkbench = pathname.startsWith("/workbench");
   const {
@@ -126,18 +132,13 @@ export default function Layout() {
         </div>
 
         <div className="mt-auto px-4 py-3">
-          <a
-            href="http://127.0.0.1:8000/health"
-            target="_blank"
-            rel="noopener"
-            className="flex items-center gap-2 text-xs text-zinc-500 transition-colors hover:text-zinc-700"
-          >
+          <div className="flex items-center gap-2 text-xs text-zinc-500">
             <span className="relative flex h-2 w-2">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
             </span>
-            服务运行中 :8000
-          </a>
+            服务运行中 :{new URL(apiBase).port}
+          </div>
         </div>
       </aside>
 

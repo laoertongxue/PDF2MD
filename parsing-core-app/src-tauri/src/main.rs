@@ -3,7 +3,7 @@
 mod sidecar;
 mod state;
 
-use state::{AppState, StatusPayload};
+use state::{ApiConfig, AppState, StatusPayload};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
@@ -20,6 +20,12 @@ fn get_status(state: tauri::State<SharedState>) -> StatusPayload {
 }
 
 #[tauri::command]
+fn get_api_config(state: tauri::State<SharedState>) -> ApiConfig {
+    let s = state.lock().unwrap();
+    ApiConfig { api_base: format!("http://127.0.0.1:{}", s.port), port: s.port }
+}
+
+#[tauri::command]
 async fn start_service(
     app: tauri::AppHandle,
     state: tauri::State<'_, SharedState>,
@@ -30,7 +36,7 @@ async fn start_service(
 
 #[tauri::command]
 async fn stop_service(state: tauri::State<'_, SharedState>) -> Result<String, String> {
-    sidecar::stop_sidecar(state.inner().clone()).await?;
+    sidecar::stop_sidecar(state.inner().clone())?;
     Ok("stopped".into())
 }
 
@@ -77,13 +83,17 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let (port_guard, port) = sidecar::reserve_loopback_port()
+                .map_err(|error| format!("failed to reserve sidecar port: {error}"))?;
             let s = SharedState::new(Mutex::new(AppState {
-                port: 8000,
+                port,
+                health_token: uuid::Uuid::new_v4().to_string(),
                 running: false,
-                logs: vec!["[init] starting local service on 127.0.0.1:8000".into()],
+                logs: vec![format!("[init] starting local service on 127.0.0.1:{port}")],
                 health_failures: 0,
                 sidecar_child: None,
             }));
+            drop(port_guard);
             app.manage(s.clone());
             let app_handle = app.handle().clone();
             let state = s.clone();
@@ -100,6 +110,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
+            get_api_config,
             start_service,
             stop_service,
             pick_files,
@@ -107,6 +118,12 @@ fn main() {
             textbook_path_is_file,
             pick_directory
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+                let state = app.state::<SharedState>().inner().clone();
+                let _ = sidecar::stop_sidecar(state);
+            }
+        });
 }

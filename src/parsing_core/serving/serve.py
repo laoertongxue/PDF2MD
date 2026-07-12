@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from parsing_core.serving.api.deps import set_scheduler
@@ -58,6 +58,7 @@ def allowed_cors_origins() -> list[str]:
 def build_app(
     orch_factory: Callable,
     max_global_concurrency: int = MAX_GLOBAL_CONCURRENCY,
+    health_token: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="parsing-core-serving")
     app.add_middleware(
@@ -71,8 +72,13 @@ def build_app(
     set_scheduler(sch)
 
     @app.get("/health")
-    async def health():
-        return {"status": "ok"}
+    async def health(x_pdf2md_health_token: str | None = Header(default=None)):
+        if health_token is not None and x_pdf2md_health_token != health_token:
+            raise HTTPException(status_code=403, detail="wrong instance token")
+        payload = {"status": "ok"}
+        if health_token is not None:
+            payload["instance"] = health_token
+        return payload
 
     app.include_router(batches_router)
     app.include_router(tasks_router)
@@ -88,6 +94,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--global-concurrency", type=int, default=MAX_GLOBAL_CONCURRENCY)
     parser.add_argument("--parent-pid", type=int, default=None)
+    parser.add_argument("--health-token", default=None)
     args = parser.parse_args()
     require_loopback_host(args.host)
 
@@ -133,7 +140,11 @@ def main() -> int:
         repo = Repository(conn)
         return Orchestrator(repo=repo, fs=fs, llm=StubLLMClient(), db_path=db_path)
 
-    app = build_app(orch_factory=orch_factory, max_global_concurrency=args.global_concurrency)
+    app = build_app(
+        orch_factory=orch_factory,
+        max_global_concurrency=args.global_concurrency,
+        health_token=args.health_token,
+    )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 

@@ -19,8 +19,7 @@ import type {
   TopicSyncStatus,
   WorkbenchSettings,
 } from "./workbenchTypes";
-
-const BASE = "http://127.0.0.1:8000";
+import { getApiBase } from "./runtime";
 
 export type SafeApiErrorCategory =
   | "invalid_request"
@@ -167,7 +166,7 @@ async function request<T>(
   statusCategories: Partial<Record<number, SafeApiErrorCategory>> = {},
 ): Promise<T> {
   try {
-    const res = await fetch(`${BASE}${path}`, init);
+    const res = await fetch(`${await getApiBase()}${path}`, init);
     if (!res.ok) {
       const categories: Record<number, SafeApiErrorCategory> = {
         400: "invalid_request",

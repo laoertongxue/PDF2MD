@@ -1,4 +1,5 @@
 import type { WsEvent } from "./types";
+import { getWsBase } from "./runtime";
 
 export function connectBatchWs(
   batchId: string,
@@ -6,11 +7,18 @@ export function connectBatchWs(
   onEvent: (e: WsEvent) => void,
   onClose?: () => void,
 ): () => void {
-  const url = `ws://127.0.0.1:8000/ws/batch/${batchId}?since=${since}`;
-  const ws = new WebSocket(url);
-  ws.onmessage = (msg) => {
-    try { onEvent(JSON.parse(msg.data)); } catch { /* ignore */ }
+  let ws: WebSocket | undefined;
+  let canceled = false;
+  void getWsBase().then((base) => {
+    if (canceled) return;
+    ws = new WebSocket(`${base}/ws/batch/${batchId}?since=${since}`);
+    ws.onmessage = (msg) => {
+      try { onEvent(JSON.parse(msg.data)); } catch { /* ignore */ }
+    };
+    ws.onclose = () => { onClose?.(); };
+  });
+  return () => {
+    canceled = true;
+    ws?.close();
   };
-  ws.onclose = () => { onClose?.(); };
-  return () => { ws.close(); };
 }

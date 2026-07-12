@@ -12,7 +12,7 @@ from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
 
 
-def make_test_app(tmp_path, monkeypatch):
+def make_test_app(tmp_path, monkeypatch, *, health_token=None):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     base = tmp_path / "data"
     base.mkdir()
@@ -27,7 +27,11 @@ def make_test_app(tmp_path, monkeypatch):
         repo = Repository(conn)
         return Orchestrator(repo=repo, fs=fs, llm=StubLLMClient(), db_path=str(db_path))
 
-    app = build_app(orch_factory=orch_factory, max_global_concurrency=4)
+    app = build_app(
+        orch_factory=orch_factory,
+        max_global_concurrency=4,
+        health_token=health_token,
+    )
     return TestClient(app)
 
 
@@ -36,6 +40,17 @@ def test_health_returns_ok(tmp_path, monkeypatch):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
+
+
+def test_health_requires_matching_instance_token(tmp_path, monkeypatch):
+    client = make_test_app(tmp_path, monkeypatch, health_token="instance-two")
+
+    assert client.get("/health").status_code == 403
+    assert client.get("/health", headers={"X-PDF2MD-Health-Token": "instance-one"}).status_code == 403
+    response = client.get("/health", headers={"X-PDF2MD-Health-Token": "instance-two"})
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "instance": "instance-two"}
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "example.com"])
