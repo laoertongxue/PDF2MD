@@ -273,7 +273,7 @@ def _assert_unique_source_labels(package: Any) -> None:
 
 def _safe_error(exc: Exception) -> str:
     if (
-        isinstance(exc, (ValueError, ValidationError))
+        isinstance(exc, ValueError | ValidationError)
         and "/" not in str(exc)
         and "\\" not in str(exc)
     ):
@@ -351,7 +351,7 @@ class TopicFusionPipeline:
                 _safe_error(exc),
                 now=self.clock(),
             )
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            if isinstance(exc, KeyboardInterrupt | SystemExit):
                 raise
             raise TopicMarkdownSyncError("topic Markdown sync failed") from exc
         self.repo.finish_topic_markdown_sync(topic_id, claim.owner_id, "SYNCED", now=self.clock())
