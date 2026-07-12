@@ -8,6 +8,11 @@ from starlette.concurrency import run_in_threadpool
 from parsing_core.parser.markitdown_adapter import MarkItDownAdapter
 from parsing_core.serving.api.deps import SchedulerDep
 from parsing_core.serving.models.api import (
+    AttachmentImportRequest,
+    AttachmentResponse,
+    ChapterDraftReplaceRequest,
+    ChapterDraftResponse,
+    ChapterDraftState,
     ChapterResponse,
     CourseCardFavoriteRequest,
     CourseCardPatchRequest,
@@ -15,6 +20,7 @@ from parsing_core.serving.models.api import (
     CourseCreateRequest,
     CourseResponse,
     DeepSeekSettingsRequest,
+    FingerprintRequest,
     NoteBlockResponse,
     RunChapterRequest,
     SourceCreateRequest,
@@ -38,11 +44,13 @@ from parsing_core.workbench.pipeline import (
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.settings import WorkbenchSettings, load_settings, save_settings
 from parsing_core.workbench.source_import import (
+    ATTACHMENT_DIRECTORY_NAME,
     AtomicImportUnsupportedError,
     CourseStorageChangedError,
     CourseStorageError,
     SourceImportInputError,
     TextbookImportBatch,
+    parse_imported_source,
 )
 from parsing_core.workbench.topic_pipeline import (
     FIXED_TOPIC_KINDS,
@@ -335,9 +343,135 @@ async def detect_source_chapters(source_id: str, sch: SchedulerDep):
                 seq=candidate.seq,
                 title=candidate.title,
                 source_md_path=str(chapter_path),
+                source_start=candidate.start,
+                source_end=candidate.end,
             )
         )
     return [_chapter_response(chapter) for chapter in chapters]
+
+
+def _chapter_draft_state(repo: WorkbenchRepository, source_id: str) -> ChapterDraftState:
+    chapters = repo.list_chapters(source_id)
+    return ChapterDraftState(
+        chapters=[
+            ChapterDraftResponse(
+                **_chapter_response(chapter).model_dump(),
+                start=chapter.source_start,
+                end=chapter.source_end,
+            )
+            for chapter in chapters
+        ],
+        fingerprint=repo.chapter_draft_snapshot(source_id)[1],
+    )
+
+
+@router.get("/sources/{source_id}/chapter-drafts", response_model=ChapterDraftState)
+async def get_chapter_drafts(source_id: str, sch: SchedulerDep):
+    repo = _repo(sch)
+    if repo.get_source(source_id) is None:
+        raise HTTPException(404, "source not found")
+    return _chapter_draft_state(repo, source_id)
+
+
+@router.put("/sources/{source_id}/chapter-drafts", response_model=ChapterDraftState)
+async def replace_chapter_drafts(
+    source_id: str, req: ChapterDraftReplaceRequest, sch: SchedulerDep
+):
+    repo = _repo(sch)
+    source = repo.get_source(source_id)
+    if source is None:
+        raise HTTPException(404, "source not found")
+    source_path = Path(source.file_path)
+    markdown = (
+        source_path.read_text(encoding="utf-8")
+        if source_path.suffix.lower() in {".md", ".txt"}
+        else await run_in_threadpool(MarkItDownAdapter().parse, str(source_path))
+    )
+    course = repo.get_course(source.course_id)
+    out_dir = Path(course.root_dir) / _safe_dir_name(source.title)
+    specs = []
+    try:
+        for seq, item in enumerate(req.chapters):
+            if item.end > len(markdown) or item.end <= item.start:
+                raise ValueError("invalid chapter boundary")
+            chapter_path = out_dir / _chapter_filename(seq, item.title)
+            chapter_path.write_text(markdown[item.start : item.end].strip(), encoding="utf-8")
+            specs.append({**item.model_dump(), "source_md_path": str(chapter_path)})
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(400, "chapter draft files could not be written") from exc
+    try:
+        repo.replace_chapter_drafts(
+            source_id,
+            specs,
+            expected_fingerprint=req.expected_fingerprint,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _chapter_draft_state(repo, source_id)
+
+
+@router.post("/sources/{source_id}/chapter-drafts/confirm", response_model=ChapterDraftState)
+async def confirm_chapter_drafts(source_id: str, req: FingerprintRequest, sch: SchedulerDep):
+    repo = _repo(sch)
+    if repo.get_source(source_id) is None:
+        raise HTTPException(404, "source not found")
+    try:
+        repo.confirm_chapter_drafts(source_id, req.expected_fingerprint)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _chapter_draft_state(repo, source_id)
+
+
+@router.post("/chapters/{chapter_id}/attachments/import", response_model=list[AttachmentResponse])
+async def import_chapter_attachments(
+    chapter_id: str, req: AttachmentImportRequest, sch: SchedulerDep
+):
+    repo = _repo(sch)
+    chapter = repo.get_chapter(chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "chapter not found")
+    course = repo.get_course(chapter.course_id)
+    parser = MarkItDownAdapter()
+    try:
+        with TextbookImportBatch(
+            Path(course.root_dir), target_directory=ATTACHMENT_DIRECTORY_NAME
+        ) as batch:
+            imported = [batch.import_file(Path(path)) for path in req.paths]
+            records = []
+            for item in imported:
+                text, content_hash, anchors = await run_in_threadpool(
+                    parse_imported_source, item.stored_path, parser
+                )
+                records.append(
+                    repo.create_attachment(
+                        chapter.course_id,
+                        chapter.source_id,
+                        chapter.id,
+                        str(item.stored_path),
+                        item.title,
+                        item.stored_path.suffix.lower().lstrip("."),
+                        text,
+                        content_hash,
+                        anchors,
+                    )
+                )
+            batch.commit()
+    except SourceImportInputError as exc:
+        raise HTTPException(400, "attachment file could not be imported") from exc
+    return [
+        AttachmentResponse(
+            id=item.id,
+            course_id=item.course_id,
+            source_id=item.source_id,
+            chapter_id=item.chapter_id,
+            file_path=item.file_path,
+            title=item.title,
+            kind=item.kind,
+            content_hash=item.content_hash,
+            anchors=json.loads(item.anchors_json),
+        )
+        for item in records
+    ]
 
 
 @router.get("/sources/{source_id}/chapters", response_model=list[ChapterResponse])

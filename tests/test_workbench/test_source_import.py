@@ -17,8 +17,24 @@ def course_root(tmp_path: Path) -> Path:
     return root
 
 
-def test_supported_textbook_extensions_are_exactly_pdf_and_word():
-    assert SUPPORTED_TEXTBOOK_EXTENSIONS == {".pdf", ".doc", ".docx"}
+def test_supported_textbook_extensions_cover_office_and_common_images():
+    assert {
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".ppt",
+        ".pptx",
+        ".xls",
+        ".xlsx",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".webp",
+    } <= SUPPORTED_TEXTBOOK_EXTENSIONS
 
 
 @pytest.mark.parametrize("suffix", [".pdf", ".PDF", ".doc", ".DOCX"])

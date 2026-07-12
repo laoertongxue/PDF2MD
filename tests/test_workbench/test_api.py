@@ -203,6 +203,77 @@ def test_create_source_rejects_file_outside_course_root(tmp_path):
     assert res.status_code == 400
 
 
+def test_attachment_import_parses_with_markitdown_and_returns_citations(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post("/api/workbench/courses", json={"title": "战略", "root_dir": str(root)}).json()
+    main = root / "book.md"
+    main.write_text("## 第一章\n正文", encoding="utf-8")
+    source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"file_path": str(main), "title": "教材", "kind": "main"},
+    ).json()
+    chapter = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters").json()[0]
+    attachment = tmp_path / "case.pptx"
+    attachment.write_bytes(b"pptx")
+    monkeypatch.setattr(
+        routes_workbench.MarkItDownAdapter, "parse", lambda self, path: "案例第一页\n\n案例第二段"
+    )
+
+    res = c.post(
+        f"/api/workbench/chapters/{chapter['id']}/attachments/import",
+        json={"paths": [str(attachment)]},
+    )
+
+    assert res.status_code == 200
+    item = res.json()[0]
+    assert item["source_id"] == source["id"]
+    assert item["content_hash"]
+    assert [anchor["paragraph"] for anchor in item["anchors"]] == [1, 2]
+    assert all(anchor["citation_id"] for anchor in item["anchors"])
+
+
+def test_chapter_draft_batch_edit_and_atomic_confirm_api(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post("/api/workbench/courses", json={"title": "战略", "root_dir": str(root)}).json()
+    main = root / "book.md"
+    main.write_text("## 第一章\nA\n## 第二章\nB", encoding="utf-8")
+    source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"file_path": str(main), "title": "教材", "kind": "main"},
+    ).json()
+    chapters = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters").json()
+    state = c.get(f"/api/workbench/sources/{source['id']}/chapter-drafts").json()
+    edited = c.put(
+        f"/api/workbench/sources/{source['id']}/chapter-drafts",
+        json={
+            "expected_fingerprint": state["fingerprint"],
+            "chapters": [
+                {"id": chapters[1]["id"], "title": "第二章改名", "start": 0, "end": 8},
+                {
+                    "id": chapters[0]["id"],
+                    "title": "第一章",
+                    "start": 8,
+                    "end": len(main.read_text()),
+                },
+            ],
+        },
+    )
+    assert edited.status_code == 200
+    confirmed = c.post(
+        f"/api/workbench/sources/{source['id']}/chapter-drafts/confirm",
+        json={"expected_fingerprint": edited.json()["fingerprint"]},
+    )
+    assert confirmed.status_code == 200
+    assert all(item["status"] == "CONFIRMED" for item in confirmed.json()["chapters"])
+    rejected = c.put(
+        f"/api/workbench/sources/{source['id']}/chapter-drafts",
+        json={"expected_fingerprint": confirmed.json()["fingerprint"], "chapters": []},
+    )
+    assert rejected.status_code == 409
+
+
 def test_import_multiple_textbooks_creates_independent_sources(tmp_path):
     c = client(tmp_path)
     root = course_root(tmp_path)

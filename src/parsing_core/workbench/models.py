@@ -35,6 +35,10 @@ class Chapter:
     status: str
     created_at: int
     updated_at: int
+    source_start: int
+    source_end: int
+    confirmed_snapshot_json: str
+    confirmed_at: int | None
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,10 @@ class Attachment:
     title: str
     kind: str
     created_at: int
+    source_id: str | None
+    parsed_text: str
+    content_hash: str
+    anchors_json: str
 
 
 @dataclass(frozen=True)

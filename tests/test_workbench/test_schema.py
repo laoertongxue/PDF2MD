@@ -65,6 +65,11 @@ def test_apply_workbench_schema_is_idempotent(tmp_path):
     stored_title = conn.execute("SELECT title FROM wb_courses WHERE id = 'course-1'").fetchone()[0]
     assert stored_title == "战略管理"
 
+    chapter_cols = {r[1] for r in conn.execute("PRAGMA table_info(wb_chapters)")}
+    assert {"source_start", "source_end", "confirmed_snapshot_json", "confirmed_at"} <= chapter_cols
+    attachment_cols = {r[1] for r in conn.execute("PRAGMA table_info(wb_attachments)")}
+    assert {"source_id", "parsed_text", "content_hash", "anchors_json"} <= attachment_cols
+
 
 def test_apply_schema_adds_topic_generation_leases_to_old_database(tmp_path):
     conn = init_db(str(tmp_path / "serve.db"))

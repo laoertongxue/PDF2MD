@@ -30,6 +30,56 @@ def test_create_course_source_and_chapter(tmp_path):
     assert chapter.status == "DRAFT"
 
 
+def test_chapter_drafts_can_be_replaced_and_confirmed_as_atomic_snapshot(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    first = r.create_chapter(course.id, source.id, 0, "第一章", "/tmp/1.md", 0, 20)
+    second = r.create_chapter(course.id, source.id, 1, "第二章", "/tmp/2.md", 20, 40)
+    fingerprint = r.chapter_draft_snapshot(source.id)[1]
+
+    drafts = r.replace_chapter_drafts(
+        source.id,
+        [
+            {"id": second.id, "title": "第二章（改）", "start": 0, "end": 10},
+            {"id": first.id, "title": "第一章", "start": 10, "end": 40},
+        ],
+        expected_fingerprint=fingerprint,
+    )
+    confirmed = r.confirm_chapter_drafts(source.id, r.chapter_draft_snapshot(source.id)[1])
+
+    assert [(item.seq, item.title, item.source_start, item.source_end) for item in drafts] == [
+        (0, "第二章（改）", 0, 10),
+        (1, "第一章", 10, 40),
+    ]
+    assert all(item.status == "CONFIRMED" and item.confirmed_snapshot_json for item in confirmed)
+    with pytest.raises(ValueError, match="confirmed"):
+        r.replace_chapter_drafts(
+            source.id, [], expected_fingerprint=r.chapter_draft_snapshot(source.id)[1]
+        )
+
+
+def test_attachment_is_related_and_changes_chapter_input_fingerprint(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", "/tmp/1.md")
+    before = r.chapter_input_snapshot(chapter.id)[1]
+    attachment = r.create_attachment(
+        course.id,
+        source.id,
+        chapter.id,
+        "/tmp/case.pptx",
+        "案例",
+        "pptx",
+        "第 1 页\n案例内容",
+        "abc123",
+        [{"citation_id": "att:x:p1", "page": 1, "paragraph": 1, "text": "案例内容"}],
+    )
+    assert r.list_attachments(chapter.id) == [attachment]
+    assert r.chapter_input_snapshot(chapter.id)[1] != before
+
+
 def test_cards_can_be_edited_and_favorited(tmp_path):
     r = repo(tmp_path)
     course = r.create_course("营销管理", "", str(tmp_path / "out"))

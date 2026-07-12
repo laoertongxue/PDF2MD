@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS wb_chapters (
   status TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  source_start INTEGER NOT NULL DEFAULT 0,
+  source_end INTEGER NOT NULL DEFAULT 0,
+  confirmed_snapshot_json TEXT NOT NULL DEFAULT '',
+  confirmed_at INTEGER,
   UNIQUE(source_id, seq)
 );
 
@@ -42,7 +46,11 @@ CREATE TABLE IF NOT EXISTS wb_attachments (
   file_path TEXT NOT NULL,
   title TEXT NOT NULL,
   kind TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  source_id TEXT REFERENCES wb_sources(id) ON DELETE CASCADE,
+  parsed_text TEXT NOT NULL DEFAULT '',
+  content_hash TEXT NOT NULL DEFAULT '',
+  anchors_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS wb_note_blocks (
@@ -199,6 +207,24 @@ CREATE INDEX IF NOT EXISTS idx_wb_topic_runs_topic ON wb_topic_runs(topic_id, st
 def apply_workbench_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(WORKBENCH_SCHEMA_SQL)
+    chapter_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_chapters)")}
+    for name, definition in {
+        "source_start": "INTEGER NOT NULL DEFAULT 0",
+        "source_end": "INTEGER NOT NULL DEFAULT 0",
+        "confirmed_snapshot_json": "TEXT NOT NULL DEFAULT ''",
+        "confirmed_at": "INTEGER",
+    }.items():
+        if name not in chapter_columns:
+            conn.execute(f"ALTER TABLE wb_chapters ADD COLUMN {name} {definition}")
+    attachment_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_attachments)")}
+    for name, definition in {
+        "source_id": "TEXT REFERENCES wb_sources(id) ON DELETE CASCADE",
+        "parsed_text": "TEXT NOT NULL DEFAULT ''",
+        "content_hash": "TEXT NOT NULL DEFAULT ''",
+        "anchors_json": "TEXT NOT NULL DEFAULT '[]'",
+    }.items():
+        if name not in attachment_columns:
+            conn.execute(f"ALTER TABLE wb_attachments ADD COLUMN {name} {definition}")
     topic_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_topics)")}
     if "generation_reason" not in topic_columns:
         conn.execute("ALTER TABLE wb_topics ADD COLUMN generation_reason TEXT NOT NULL DEFAULT ''")

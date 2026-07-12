@@ -4,6 +4,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from uuid import uuid4
 
 from parsing_core.storage.connection_lock import (
@@ -12,6 +13,7 @@ from parsing_core.storage.connection_lock import (
     register_connection_lock,
 )
 from parsing_core.workbench.models import (
+    Attachment,
     Card,
     Chapter,
     ChapterGenerationLease,
@@ -1783,6 +1785,8 @@ class WorkbenchRepository:
         seq: int,
         title: str,
         source_md_path: str,
+        source_start: int = 0,
+        source_end: int = 0,
     ) -> Chapter:
         source = self.conn.execute(
             "SELECT course_id FROM wb_sources WHERE id = ?",
@@ -1799,17 +1803,24 @@ class WorkbenchRepository:
             "title": title,
             "source_md_path": source_md_path,
             "status": "DRAFT",
+            "source_start": source_start,
+            "source_end": source_end,
+            "confirmed_snapshot_json": "",
+            "confirmed_at": None,
             "created_at": _now(),
             "updated_at": _now(),
         }
         self.conn.execute(
             """
             INSERT INTO wb_chapters
-              (id, source_id, course_id, seq, title, source_md_path, status, created_at, updated_at)
+              (id, source_id, course_id, seq, title, source_md_path, status,
+               source_start, source_end, confirmed_snapshot_json, confirmed_at,
+               created_at, updated_at)
             VALUES
               (
                 :id, :source_id, :course_id, :seq, :title, :source_md_path,
-                :status, :created_at, :updated_at
+                :status, :source_start, :source_end, :confirmed_snapshot_json,
+                :confirmed_at, :created_at, :updated_at
               )
             """,
             row,
@@ -1854,6 +1865,165 @@ class WorkbenchRepository:
             (status, _now(), chapter_id),
         )
         self.conn.commit()
+
+    def chapter_draft_snapshot(self, source_id: str) -> tuple[dict, str]:
+        chapters = self.list_chapters(source_id)
+        value = {
+            "source_id": source_id,
+            "chapters": [
+                {
+                    "id": item.id,
+                    "seq": item.seq,
+                    "title": item.title,
+                    "start": item.source_start,
+                    "end": item.source_end,
+                    "status": item.status,
+                }
+                for item in chapters
+            ],
+        }
+        return value, _stable_fingerprint(value)
+
+    def replace_chapter_drafts(
+        self, source_id: str, drafts: list[dict], *, expected_fingerprint: str
+    ) -> list[Chapter]:
+        with self._atomic(immediate=True):
+            current, fingerprint = self.chapter_draft_snapshot(source_id)
+            if fingerprint != expected_fingerprint:
+                raise ValueError("chapter drafts changed")
+            if any(item["status"] != "DRAFT" for item in current["chapters"]):
+                raise ValueError("chapter drafts already confirmed")
+            existing = {item.id: item for item in self.list_chapters(source_id)}
+            ids = [item.get("id") or uuid4().hex for item in drafts]
+            if len(ids) != len(set(ids)):
+                raise ValueError("duplicate chapter id")
+            self.conn.execute("DELETE FROM wb_chapters WHERE source_id = ?", (source_id,))
+            now = _now()
+            source = self.get_source(source_id)
+            for seq, (chapter_id, draft) in enumerate(zip(ids, drafts, strict=True)):
+                old = existing.get(chapter_id)
+                start, end = int(draft["start"]), int(draft["end"])
+                if start < 0 or end <= start:
+                    raise ValueError("invalid chapter boundary")
+                self.conn.execute(
+                    """
+                    INSERT INTO wb_chapters
+                      (id, source_id, course_id, seq, title, source_md_path, status,
+                       source_start, source_end, confirmed_snapshot_json, confirmed_at,
+                       created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, '', NULL, ?, ?)
+                    """,
+                    (
+                        chapter_id,
+                        source_id,
+                        source.course_id,
+                        seq,
+                        str(draft["title"]).strip(),
+                        str(draft.get("source_md_path") or (old.source_md_path if old else "")),
+                        start,
+                        end,
+                        old.created_at if old else now,
+                        now,
+                    ),
+                )
+        return self.list_chapters(source_id)
+
+    def confirm_chapter_drafts(self, source_id: str, expected_fingerprint: str) -> list[Chapter]:
+        with self._atomic(immediate=True):
+            snapshot, fingerprint = self.chapter_draft_snapshot(source_id)
+            if fingerprint != expected_fingerprint:
+                raise ValueError("chapter drafts changed")
+            if not snapshot["chapters"] or any(
+                x["status"] != "DRAFT" for x in snapshot["chapters"]
+            ):
+                raise ValueError("chapter drafts already confirmed")
+            payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+            now = _now()
+            self.conn.execute(
+                "UPDATE wb_chapters SET status = 'CONFIRMED', confirmed_snapshot_json = ?, "
+                "confirmed_at = ?, updated_at = ? WHERE source_id = ? AND status = 'DRAFT'",
+                (payload, now, now, source_id),
+            )
+        return self.list_chapters(source_id)
+
+    def create_attachment(
+        self,
+        course_id: str,
+        source_id: str,
+        chapter_id: str | None,
+        file_path: str,
+        title: str,
+        kind: str,
+        parsed_text: str,
+        content_hash: str,
+        anchors: list[dict],
+    ) -> Attachment:
+        if self.get_source(source_id) is None or self.get_source(source_id).course_id != course_id:
+            raise ValueError("source does not belong to course")
+        if chapter_id is not None:
+            chapter = self.get_chapter(chapter_id)
+            if chapter is None or chapter.course_id != course_id or chapter.source_id != source_id:
+                raise ValueError("chapter does not belong to source")
+        row = (
+            uuid4().hex,
+            course_id,
+            chapter_id,
+            file_path,
+            title,
+            kind,
+            _now(),
+            source_id,
+            parsed_text,
+            content_hash,
+            json.dumps(anchors, ensure_ascii=False),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO wb_attachments
+              (id, course_id, chapter_id, file_path, title, kind, created_at,
+               source_id, parsed_text, content_hash, anchors_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            row,
+        )
+        self.conn.commit()
+        return Attachment(*row)
+
+    def list_attachments(self, chapter_id: str) -> list[Attachment]:
+        rows = self.conn.execute(
+            """
+            SELECT id, course_id, chapter_id, file_path, title, kind, created_at,
+                   source_id, parsed_text, content_hash, anchors_json
+            FROM wb_attachments WHERE chapter_id = ? ORDER BY created_at, id
+            """,
+            (chapter_id,),
+        ).fetchall()
+        return [Attachment(*row) for row in rows]
+
+    def chapter_input_snapshot(self, chapter_id: str) -> tuple[dict, str]:
+        chapter = self.get_chapter(chapter_id)
+        if chapter is None:
+            raise ValueError("chapter not found")
+        attachments = self.list_attachments(chapter_id)
+        source_path = Path(chapter.source_md_path)
+        source_hash = (
+            hashlib.sha256(source_path.read_bytes()).hexdigest() if source_path.is_file() else ""
+        )
+        value = {
+            "chapter": {
+                "id": chapter.id,
+                "title": chapter.title,
+                "start": chapter.source_start,
+                "end": chapter.source_end,
+                "snapshot": chapter.confirmed_snapshot_json,
+                "content_hash": source_hash,
+            },
+            "attachments": [
+                {"id": item.id, "hash": item.content_hash, "anchors": json.loads(item.anchors_json)}
+                for item in attachments
+            ],
+        }
+        return value, _stable_fingerprint(value)
 
     def upsert_note_block(
         self,

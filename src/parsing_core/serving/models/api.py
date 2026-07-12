@@ -118,6 +118,48 @@ class ChapterResponse(BaseModel):
     status: str
 
 
+class ChapterDraftResponse(ChapterResponse):
+    start: int
+    end: int
+
+
+class ChapterDraftSpec(BaseModel):
+    id: str | None = None
+    title: str = Field(..., min_length=1, max_length=200)
+    start: int = Field(..., ge=0)
+    end: int = Field(..., gt=0)
+
+
+class ChapterDraftReplaceRequest(BaseModel):
+    expected_fingerprint: str
+    chapters: list[ChapterDraftSpec]
+
+
+class FingerprintRequest(BaseModel):
+    expected_fingerprint: str
+
+
+class ChapterDraftState(BaseModel):
+    chapters: list[ChapterDraftResponse]
+    fingerprint: str
+
+
+class AttachmentImportRequest(BaseModel):
+    paths: list[str] = Field(..., min_length=1, max_length=50)
+
+
+class AttachmentResponse(BaseModel):
+    id: str
+    course_id: str
+    source_id: str
+    chapter_id: str
+    file_path: str
+    title: str
+    kind: str
+    content_hash: str
+    anchors: list[dict]
+
+
 class WorkbenchSettingsResponse(BaseModel):
     deepseek_model: str
     deepseek_key_masked: str | None = None

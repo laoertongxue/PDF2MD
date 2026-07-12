@@ -1,5 +1,6 @@
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -8,8 +9,25 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-SUPPORTED_TEXTBOOK_EXTENSIONS = {".pdf", ".doc", ".docx"}
+SUPPORTED_TEXTBOOK_EXTENSIONS = {
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".ppt",
+    ".pptx",
+    ".xls",
+    ".xlsx",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
 TEXTBOOK_DIRECTORY_NAME = "教材原文件"
+ATTACHMENT_DIRECTORY_NAME = "附件原文件"
 IMPORT_JOURNAL_SUFFIX = ".import-journal"
 MAX_JOURNAL_BYTES = 16_384
 
@@ -104,9 +122,11 @@ class TextbookImportBatch:
         self,
         course_root: Path,
         registered_source_paths: set[str] | None = None,
+        target_directory: str = TEXTBOOK_DIRECTORY_NAME,
     ):
         self.course_root = _resolve_course_root(course_root)
-        self.target_path = self.course_root / TEXTBOOK_DIRECTORY_NAME
+        self.target_directory = target_directory
+        self.target_path = self.course_root / target_directory
         self._directory_fd = self._open_directory()
         self._directory_stat = os.fstat(self._directory_fd)
         self._records: list[_PublishedRecord] = []
@@ -123,11 +143,11 @@ class TextbookImportBatch:
             _raise_storage_error(exc)
         try:
             try:
-                os.mkdir(TEXTBOOK_DIRECTORY_NAME, dir_fd=root_fd)
+                os.mkdir(self.target_directory, dir_fd=root_fd)
             except FileExistsError:
                 pass
             try:
-                return os.open(TEXTBOOK_DIRECTORY_NAME, flags, dir_fd=root_fd)
+                return os.open(self.target_directory, flags, dir_fd=root_fd)
             except OSError as exc:
                 _raise_storage_error(exc)
         finally:
@@ -523,3 +543,28 @@ def import_textbook_file(course_root: Path, source_path: Path) -> ImportedTextbo
         batch.verify_path_identity()
         batch.commit()
         return imported
+
+
+def source_anchors(text: str, namespace: str, prefix: str = "att") -> list[dict]:
+    anchors = []
+    paragraph = 0
+    page = 1
+    for block in (part.strip() for part in text.replace("\f", "\n\n\f\n\n").split("\n\n")):
+        if not block:
+            continue
+        if block == "\f":
+            page += 1
+            paragraph = 0
+            continue
+        paragraph += 1
+        citation_id = f"{prefix}:{namespace}:p{page}:para{paragraph}"
+        anchors.append(
+            {"citation_id": citation_id, "page": page, "paragraph": paragraph, "text": block}
+        )
+    return anchors
+
+
+def parse_imported_source(path: Path, parser) -> tuple[str, str, list[dict]]:
+    parsed_text = parser.parse(str(path))
+    content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    return parsed_text, content_hash, source_anchors(parsed_text, content_hash[:12])
