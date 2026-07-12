@@ -88,6 +88,15 @@ def build_app(
     return app
 
 
+def run_uvicorn(app: FastAPI, *, host: str, port: int, socket_fd: int | None = None) -> None:
+    import uvicorn
+
+    if socket_fd is not None:
+        uvicorn.run(app, fd=socket_fd)
+    else:
+        uvicorn.run(app, host=host, port=port)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="parsing-core serve")
     parser.add_argument("--host", default=HOST)
@@ -95,6 +104,7 @@ def main() -> int:
     parser.add_argument("--global-concurrency", type=int, default=MAX_GLOBAL_CONCURRENCY)
     parser.add_argument("--parent-pid", type=int, default=None)
     parser.add_argument("--health-token", default=None)
+    parser.add_argument("--socket-fd", type=int, default=None)
     args = parser.parse_args()
     require_loopback_host(args.host)
 
@@ -116,8 +126,6 @@ def main() -> int:
                 _t.sleep(3)
 
         threading.Thread(target=_watchdog, daemon=True, name="parent-watchdog").start()
-
-    import uvicorn
 
     from parsing_core.llm.stub_client import StubLLMClient
     from parsing_core.orchestrator import Orchestrator
@@ -145,7 +153,7 @@ def main() -> int:
         max_global_concurrency=args.global_concurrency,
         health_token=args.health_token,
     )
-    uvicorn.run(app, host=args.host, port=args.port)
+    run_uvicorn(app, host=args.host, port=args.port, socket_fd=args.socket_fd)
     return 0
 
 

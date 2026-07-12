@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from parsing_core.llm.stub_client import StubLLMClient
 from parsing_core.orchestrator import Orchestrator
-from parsing_core.serving.serve import allowed_cors_origins, build_app, require_loopback_host
+from parsing_core.serving.serve import allowed_cors_origins, build_app, require_loopback_host, run_uvicorn
 from parsing_core.storage.fs_layout import FsLayout
 from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
@@ -54,6 +54,16 @@ def test_health_requires_matching_instance_token(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "instance": "instance-two"}
+
+
+def test_uvicorn_uses_inherited_socket_instead_of_rebinding(monkeypatch):
+    calls = []
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: calls.append((app, kwargs)))
+    app = object()
+
+    run_uvicorn(app, host="127.0.0.1", port=8000, socket_fd=17)
+
+    assert calls == [(app, {"fd": 17})]
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "example.com"])

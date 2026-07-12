@@ -4,10 +4,12 @@ use serde::Serialize;
 pub struct AppState {
     pub port: u16,
     pub health_token: String,
+    pub starting: bool,
     pub running: bool,
     pub logs: Vec<String>,
     pub health_failures: u8,
     pub sidecar_child: Option<std::process::Child>,
+    pub reserved_listener: Option<std::net::TcpListener>,
 }
 
 #[derive(Serialize)]

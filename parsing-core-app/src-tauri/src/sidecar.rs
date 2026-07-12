@@ -1,6 +1,7 @@
 use crate::state::AppState;
 use std::fs::{create_dir_all, OpenOptions};
 use std::net::TcpListener;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -15,19 +16,75 @@ pub fn reserve_loopback_port() -> std::io::Result<(TcpListener, u16)> {
     Ok((listener, port))
 }
 
-fn sidecar_command(script: &Path, port: u16, parent_pid: u32, health_token: &str) -> Command {
+pub fn make_socket_inheritable(listener: &TcpListener) -> std::io::Result<()> {
+    let fd = listener.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn sidecar_command(script: &Path, socket_fd: RawFd, parent_pid: u32, health_token: &str) -> Command {
     let mut command = Command::new("/bin/bash");
     command.arg(script).args([
-        "--port",
-        &port.to_string(),
         "--parent-pid",
         &parent_pid.to_string(),
-        "--host",
-        "127.0.0.1",
+        "--socket-fd",
+        &socket_fd.to_string(),
         "--health-token",
         health_token,
     ]);
     command
+}
+
+pub struct StartupGuard {
+    state: Arc<Mutex<AppState>>,
+    committed: bool,
+}
+
+impl StartupGuard {
+    pub fn new(state: Arc<Mutex<AppState>>) -> Self {
+        Self { state, committed: false }
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for StartupGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Ok(mut state) = self.state.lock() {
+                state.starting = false;
+                state.running = false;
+            }
+        }
+    }
+}
+
+struct ChildGuard(Option<std::process::Child>);
+
+impl ChildGuard {
+    fn child_mut(&mut self) -> &mut std::process::Child {
+        self.0.as_mut().expect("child guard must contain child")
+    }
+
+    fn take(mut self) -> std::process::Child {
+        self.0.take().expect("child guard must contain child")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = terminate_child(child);
+        }
+    }
 }
 
 pub fn child_exited(child: &mut std::process::Child) -> std::io::Result<bool> {
@@ -57,14 +114,24 @@ async fn instance_is_healthy(client: &reqwest::Client, port: u16, token: &str) -
 }
 
 pub async fn start_sidecar(_app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) -> Result<(), String> {
-    let (port, health_token) = {
+    let (listener, port, health_token) = {
         let mut s = state.lock().map_err(|e| e.to_string())?;
-        if s.running {
+        if s.running || s.starting {
             return Err("already running".into());
         }
-        s.running = true;
-        (s.port, s.health_token.clone())
+        let (listener, port) = match s.reserved_listener.take() {
+            Some(listener) => {
+                let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+                (listener, port)
+            }
+            None => reserve_loopback_port().map_err(|e| e.to_string())?,
+        };
+        s.starting = true;
+        s.port = port;
+        (listener, port, s.health_token.clone())
     };
+    let startup_guard = StartupGuard::new(state.clone());
+    make_socket_inheritable(&listener).map_err(|e| format!("failed to inherit sidecar socket: {e}"))?;
 
     let parent_pid = std::process::id();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -86,65 +153,73 @@ pub async fn start_sidecar(_app: &tauri::AppHandle, state: Arc<Mutex<AppState>>)
     let stderr = stdout
         .try_clone()
         .map_err(|e| format!("failed to clone {}: {}", log_path.display(), e))?;
-    let spawn_result = sidecar_command(&python, port, parent_pid, &health_token)
+    let spawn_result = sidecar_command(&python, listener.as_raw_fd(), parent_pid, &health_token)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn();
-    let mut child = match spawn_result {
+    let child = match spawn_result {
         Ok(child) => child,
         Err(error) => {
-            state.lock().map_err(|e| e.to_string())?.running = false;
             return Err(format!("failed to start {}: {}", python.display(), error));
         }
     };
+    let mut child_guard = ChildGuard(Some(child));
 
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(HEALTH_STARTUP_GRACE_SECS);
     loop {
-        if child_exited(&mut child).map_err(|e| e.to_string())? {
-            state.lock().map_err(|e| e.to_string())?.running = false;
+        if child_exited(child_guard.child_mut()).map_err(|e| e.to_string())? {
             return Err("sidecar exited before becoming healthy".into());
         }
         if instance_is_healthy(&client, port, &health_token).await {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
-            let _ = terminate_child(&mut child);
-            state.lock().map_err(|e| e.to_string())?.running = false;
             return Err("sidecar did not become healthy before timeout".into());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    let mut s = state.lock().map_err(|e| e.to_string())?;
-    s.sidecar_child = Some(child);
-    s.logs.push(format!("[sidecar] started on port {}, log {}", port, log_path.display()));
+    drop(listener);
+    {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.sidecar_child = Some(child_guard.take());
+        s.starting = false;
+        s.running = true;
+        s.logs.push(format!("[sidecar] started on port {}, log {}", port, log_path.display()));
+    }
+    startup_guard.commit();
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{child_exited, reserve_loopback_port, sidecar_command, terminate_child};
+    use super::{
+        child_exited, make_socket_inheritable, reserve_loopback_port, sidecar_command,
+        terminate_child, StartupGuard,
+    };
+    use crate::state::AppState;
     use std::ffi::OsStr;
+    use std::net::TcpListener;
+    use std::os::fd::AsRawFd;
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn sidecar_uses_fixed_shell_and_loopback_host() {
-        let command = sidecar_command(Path::new("/bundle/python3"), 8000, 42, "instance-token");
+        let command = sidecar_command(Path::new("/bundle/python3"), 9, 42, "instance-token");
         assert_eq!(command.get_program(), OsStr::new("/bin/bash"));
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(
             args,
             [
                 "/bundle/python3",
-                "--port",
-                "8000",
                 "--parent-pid",
                 "42",
-                "--host",
-                "127.0.0.1",
+                "--socket-fd",
+                "9",
                 "--health-token",
                 "instance-token",
             ]
@@ -158,6 +233,33 @@ mod tests {
         assert_eq!(first_listener.local_addr().unwrap().port(), first_port);
         assert_eq!(second_listener.local_addr().unwrap().port(), second_port);
         assert_ne!(first_port, second_port);
+    }
+
+    #[test]
+    fn reserved_socket_cannot_be_stolen_before_sidecar_inherits_it() {
+        let (listener, port) = reserve_loopback_port().expect("reserve port");
+        make_socket_inheritable(&listener).expect("make socket inheritable");
+
+        let competitor = TcpListener::bind(("127.0.0.1", port));
+
+        assert_eq!(competitor.unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
+        let flags = unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_GETFD) };
+        assert_eq!(flags & libc::FD_CLOEXEC, 0);
+    }
+
+    #[test]
+    fn startup_guard_rolls_back_running_state_after_failure() {
+        let state = Arc::new(Mutex::new(AppState {
+            starting: true,
+            running: false,
+            ..Default::default()
+        }));
+
+        drop(StartupGuard::new(state.clone()));
+
+        let state = state.lock().unwrap();
+        assert!(!state.starting);
+        assert!(!state.running);
     }
 
     #[test]

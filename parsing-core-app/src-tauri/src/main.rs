@@ -88,12 +88,13 @@ fn main() {
             let s = SharedState::new(Mutex::new(AppState {
                 port,
                 health_token: uuid::Uuid::new_v4().to_string(),
+                starting: false,
                 running: false,
                 logs: vec![format!("[init] starting local service on 127.0.0.1:{port}")],
                 health_failures: 0,
                 sidecar_child: None,
+                reserved_listener: Some(port_guard),
             }));
-            drop(port_guard);
             app.manage(s.clone());
             let app_handle = app.handle().clone();
             let state = s.clone();

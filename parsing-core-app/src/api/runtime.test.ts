@@ -21,4 +21,16 @@ describe("runtime API endpoint", () => {
 
     await expect(getApiBase()).resolves.toBe("http://127.0.0.1:43127");
   });
+
+  it("refreshes the Tauri endpoint after a failed startup is retried", async () => {
+    (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    const invoke = vi.fn()
+      .mockResolvedValueOnce({ apiBase: "http://127.0.0.1:43127", port: 43127 })
+      .mockResolvedValueOnce({ apiBase: "http://127.0.0.1:43128", port: 43128 });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const { getApiBase } = await import("./runtime");
+
+    await expect(getApiBase()).resolves.toBe("http://127.0.0.1:43127");
+    await expect(getApiBase()).resolves.toBe("http://127.0.0.1:43128");
+  });
 });
