@@ -82,6 +82,15 @@ parsing-core-app/src-tauri/target/release/bundle/dmg/
 - SQLite
 - Mermaid
 
+### Task 12 验收
+
+多教材主题融合流程已完成 1440x900 与 1024x768 双视口验收，覆盖多教材导入队列、
+同名章节区分、主题映射、融合来源跳转、卡片筛选、后端错误恢复和同页双 Mermaid 预览。
+截图与机器可读结果见 [Task 12 验收证据](docs/acceptance/task-12/README.md)。
+
+Release 摘要：版本一致性与真实网络 E2E 已加入发布门禁；Mermaid 11 预览已通过真实解析、
+安全渲染、错误节点清理和响应式无溢出验证。
+
 ### 路线图
 
 - macOS Apple Silicon Release 下载

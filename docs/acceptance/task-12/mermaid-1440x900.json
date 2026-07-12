@@ -1,0 +1,31 @@
+{
+  "viewport": "1440x900",
+  "svg": 2,
+  "role_alert": 0,
+  "syntax_error": 0,
+  "document": {
+    "scrollWidth": 1440,
+    "clientWidth": 1440,
+    "fits": true
+  },
+  "diagrams": [
+    {
+      "index": 1,
+      "scrollWidth": 454,
+      "clientWidth": 454,
+      "fits": true,
+      "svgWidth": 140,
+      "svgHeight": 278,
+      "labels": ["核心概念", "融合框架", "组织设计"]
+    },
+    {
+      "index": 2,
+      "scrollWidth": 454,
+      "clientWidth": 454,
+      "fits": true,
+      "svgWidth": 454,
+      "svgHeight": 65.109375,
+      "labels": ["识别问题", "应用框架", "复盘改进"]
+    }
+  ]
+}

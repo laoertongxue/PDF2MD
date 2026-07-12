@@ -15,3 +15,5 @@ parsing-core-app/src-tauri/sidecar-runtime/
 parsing-core-app/src-tauri/binaries/python3*
 parsing-core-app/node_modules/
 .worktrees/
+.playwright-cli/
+output/
