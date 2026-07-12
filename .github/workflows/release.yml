@@ -24,6 +24,12 @@ jobs:
           cache: npm
           cache-dependency-path: parsing-core-app/package-lock.json
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
       - name: Require Apple Silicon runner
         run: |
           test "$(uname -m)" = "arm64" || {
@@ -35,8 +41,26 @@ jobs:
         working-directory: parsing-core-app
         run: npm ci
 
+      - name: Install Python dependencies
+        run: python -m pip install -e '.[dev,serve]'
+
+      - name: Run Python quality gates
+        run: |
+          ruff check src tests
+          pytest
+
+      - name: Run frontend quality gates
+        working-directory: parsing-core-app
+        run: |
+          npm test
+          npm run build
+
       - name: Prepare embedded Python runtime
         run: ./parsing-core-app/scripts/prepare-sidecar-python.sh
+
+      - name: Run Rust quality gate
+        working-directory: parsing-core-app/src-tauri
+        run: cargo check
 
       - name: Build desktop app
         working-directory: parsing-core-app
@@ -54,13 +78,19 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${apps[0]}/Contents/Info.plist")" = "0.1.2"
           ./scripts/check-release-sidecar.sh "${apps[0]}"
           codesign --verify --deep --strict --verbose=2 "${apps[0]}"
-          shasum -a 256 "${dmgs[0]}" > "${dmgs[0]}.sha256"
-          printf 'DMG_PATH=%s\nSHA_PATH=%s\n' "${dmgs[0]}" "${dmgs[0]}.sha256" >> "$GITHUB_ENV"
+          ./scripts/test-release-sidecar.sh "${apps[0]}"
+          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
+          PDF2MD_APP_PATH="${apps[0]}" pytest -q tests/test_version_consistency.py
+          app_zip="parsing-core-app/src-tauri/target/release/bundle/macos/PDF2MD_0.1.2_aarch64.app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "${apps[0]}" "$app_zip"
+          (cd "$(dirname "${dmgs[0]}")" && shasum -a 256 "$(basename "${dmgs[0]}")") > "${dmgs[0]}.sha256"
+          printf 'APP_PATH=%s\nDMG_PATH=%s\nSHA_PATH=%s\n' "$app_zip" "${dmgs[0]}" "${dmgs[0]}.sha256" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            ${{ env.APP_PATH }}
             ${{ env.DMG_PATH }}
             ${{ env.SHA_PATH }}
           fail_on_unmatched_files: true

@@ -142,21 +142,35 @@ def test_real_uvicorn_multi_textbook_topic_fusion_survives_restart(tmp_path):
                 blocks = _ok(client.get(
                     f"/api/workbench/chapters/{chapter['id']}/note-blocks"
                 ))
-                assert {block["kind"] for block in blocks} >= {
-                    "knowledge_mermaid", "application_mermaid"
+                assert {block["kind"] for block in blocks} == {
+                    "summary",
+                    "concepts",
+                    "plain_explain",
+                    "application",
+                    "knowledge_mermaid",
+                    "application_mermaid",
+                    "reflection",
                 }
 
+        generated = _ok(client.post(
+            f"/api/workbench/courses/{course['id']}/topics/generate",
+            json={"executor": "stub"},
+        ))
+        assert len(generated) == 4
         shared_chapter_id = chapters_by_source[0][0]["id"]
         mappings = [
             [shared_chapter_id, chapters_by_source[0][1]["id"], chapters_by_source[1][0]["id"]],
             [shared_chapter_id, chapters_by_source[1][1]["id"]],
         ]
-        topics = []
-        for index, chapter_ids in enumerate(mappings, start=1):
-            topics.append(_ok(client.post(
-                f"/api/workbench/courses/{course['id']}/topics",
-                json={"title": f"主题{index}", "description": "", "chapter_ids": chapter_ids},
-            )))
+        topics = [
+            _ok(client.put(
+                f"/api/workbench/topics/{topic['id']}/chapters",
+                json={"chapter_ids": chapter_ids},
+            ))
+            for topic, chapter_ids in zip(generated[:2], mappings, strict=True)
+        ]
+        for unused in generated[2:]:
+            assert client.delete(f"/api/workbench/topics/{unused['id']}").status_code == 204
         assert all(shared_chapter_id in topic["chapter_ids"] for topic in topics)
         confirmed = _ok(client.post(f"/api/workbench/courses/{course['id']}/topics/confirm"))
         assert len(confirmed) == 2
