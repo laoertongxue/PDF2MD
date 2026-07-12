@@ -13,7 +13,7 @@ import {
   Settings as SettingsIcon,
   Sparkles,
 } from "lucide-react";
-import { getApiBase } from "../api/runtime";
+import { getServiceStatus, retryService, type ServiceStatus } from "../api/runtime";
 import { useWorkbenchStore } from "../store/useWorkbenchStore";
 import SourceChapterTree, { createSourceChapterGroups } from "./workbench/SourceChapterTree";
 
@@ -24,11 +24,29 @@ const nav = [
   { to: "/workbench/settings", label: "精读设置", icon: SettingsIcon },
 ];
 
+export function ServiceStatusView({ service, onRetry }: { service: ServiceStatus; onRetry: () => void }) {
+  return (
+    <div className="flex items-start gap-2 text-xs text-zinc-500" aria-live="polite">
+      <span className="relative flex h-2 w-2">
+        {service.state === "running" && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />}
+        <span className={`relative inline-flex h-2 w-2 rounded-full ${service.state === "running" ? "bg-emerald-500" : service.state === "failed" ? "bg-red-500" : "bg-amber-500"}`} />
+      </span>
+      <div className="min-w-0">
+        <p>{service.state === "running" ? `服务运行中 :${service.port}` : service.state === "failed" ? "服务启动失败" : service.state === "restarting" ? "服务正在重启" : "服务正在启动"}</p>
+        {service.state === "failed" && <><p className="mt-1 break-words text-red-600">{service.error?.message ?? "请查看运行日志"}</p>{service.logPath && <p className="mt-1 break-all text-zinc-400">日志：{service.logPath}</p>}<button type="button" onClick={onRetry} className="mt-2 font-medium text-emerald-700 hover:text-emerald-800">重试启动</button></>}
+      </div>
+    </div>
+  );
+}
+
 export default function Layout() {
-  const [apiBase, setApiBase] = useState("http://127.0.0.1:8000");
+  const [service, setService] = useState<ServiceStatus>({ state: "starting", port: 0 });
 
   useEffect(() => {
-    void getApiBase().then(setApiBase);
+    const refresh = () => void getServiceStatus().then(setService).catch((error) => setService({ state: "failed", port: 0, error: { category: "status", message: String(error) } }));
+    refresh();
+    const timer = window.setInterval(refresh, 1500);
+    return () => window.clearInterval(timer);
   }, []);
   const { pathname } = useLocation();
   const isWorkbench = pathname.startsWith("/workbench");
@@ -132,13 +150,7 @@ export default function Layout() {
         </div>
 
         <div className="mt-auto px-4 py-3">
-          <div className="flex items-center gap-2 text-xs text-zinc-500">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-            </span>
-            服务运行中 :{new URL(apiBase).port}
-          </div>
+          <ServiceStatusView service={service} onRetry={() => void retryService().then(() => setService((current) => ({ ...current, state: "restarting", error: null })))} />
         </div>
       </aside>
 

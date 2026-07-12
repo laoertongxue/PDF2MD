@@ -14,7 +14,9 @@ fn get_status(state: tauri::State<SharedState>) -> StatusPayload {
     let s = state.lock().unwrap();
     StatusPayload {
         port: s.port,
-        running: s.running,
+        state: s.service_state.clone(),
+        error: s.error.clone(),
+        log_path: s.log_path.clone(),
         logs: s.logs.clone(),
     }
 }
@@ -38,6 +40,12 @@ async fn start_service(
 async fn stop_service(state: tauri::State<'_, SharedState>) -> Result<String, String> {
     sidecar::stop_sidecar(state.inner().clone())?;
     Ok("stopped".into())
+}
+
+#[tauri::command]
+async fn retry_service(app: tauri::AppHandle, state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    sidecar::restart_sidecar(&app, state.inner().clone()).await?;
+    Ok("restarting".into())
 }
 
 #[tauri::command]
@@ -90,6 +98,9 @@ fn main() {
                 health_token: uuid::Uuid::new_v4().to_string(),
                 starting: false,
                 running: false,
+                service_state: "starting".into(),
+                error: None,
+                log_path: None,
                 logs: vec![format!("[init] starting local service on 127.0.0.1:{port}")],
                 health_failures: 0,
                 sidecar_child: None,
@@ -100,10 +111,8 @@ fn main() {
             let state = s.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = sidecar::start_sidecar(&app_handle, state.clone()).await {
-                    if let Ok(mut s) = state.lock() {
-                        s.running = false;
-                        s.logs.push(format!("[sidecar] failed to start: {}", err));
-                    }
+                    let category = sidecar::classify_startup_error(&err);
+                    sidecar::record_failure(&state, category, err);
                 }
             });
             tauri::async_runtime::spawn(sidecar::health_loop(app.handle().clone(), s));
@@ -114,6 +123,7 @@ fn main() {
             get_api_config,
             start_service,
             stop_service,
+            retry_service,
             pick_files,
             pick_textbooks,
             textbook_path_is_file,

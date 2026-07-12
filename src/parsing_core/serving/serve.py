@@ -1,6 +1,8 @@
 import argparse
 import ipaddress
 import os
+import shutil
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
@@ -59,6 +61,7 @@ def build_app(
     orch_factory: Callable,
     max_global_concurrency: int = MAX_GLOBAL_CONCURRENCY,
     health_token: str | None = None,
+    shutdown_hook: Callable[[], None] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="parsing-core-serving")
     app.add_middleware(
@@ -70,6 +73,9 @@ def build_app(
 
     sch = Scheduler(orch_factory, max_global_concurrency=max_global_concurrency)
     set_scheduler(sch)
+
+    if shutdown_hook is not None:
+        app.add_event_handler("shutdown", shutdown_hook)
 
     @app.get("/health")
     async def health(x_pdf2md_health_token: str | None = Header(default=None)):
@@ -86,6 +92,20 @@ def build_app(
     app.include_router(workbench_router)
     app.include_router(ws_router)
     return app
+
+
+def recover_interrupted_work(db_path: Path, temp_dir: Path) -> None:
+    if db_path.exists():
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE tasks SET status = 'INTERRUPTED', error_msg = ? WHERE status = 'RUNNING'",
+                ("recoverable: interrupted by service shutdown",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def run_uvicorn(app: FastAPI, *, host: str, port: int, socket_fd: int | None = None) -> None:
@@ -139,6 +159,8 @@ def main() -> int:
     serve_base = os.path.join(base, SERVE_FS_DIRNAME)
     Path(serve_base).mkdir(parents=True, exist_ok=True)
     db_path = os.path.join(serve_base, SERVE_DB_NAME)
+    temp_dir = Path(serve_base) / "tmp"
+    temp_dir.mkdir(exist_ok=True)
 
     def orch_factory():
         fs = FsLayout(base_dir=serve_base)
@@ -152,6 +174,7 @@ def main() -> int:
         orch_factory=orch_factory,
         max_global_concurrency=args.global_concurrency,
         health_token=args.health_token,
+        shutdown_hook=lambda: recover_interrupted_work(Path(db_path), temp_dir),
     )
     run_uvicorn(app, host=args.host, port=args.port, socket_fd=args.socket_fd)
     return 0

@@ -9,6 +9,29 @@ use std::sync::{Arc, Mutex};
 const HEALTH_INTERVAL_SECS: u64 = 3;
 const HEALTH_STARTUP_GRACE_SECS: u64 = 60;
 const MAX_HEALTH_FAILURES: u8 = 3;
+const TERMINATION_TIMEOUT_MS: u64 = 2_000;
+
+pub fn record_failure(state: &Arc<Mutex<AppState>>, category: &str, message: String) {
+    if let Ok(mut s) = state.lock() {
+        s.starting = false;
+        s.running = false;
+        s.service_state = "failed".into();
+        s.error = Some(crate::state::ServiceError { category: category.into(), message: message.clone() });
+        s.logs.push(format!("[sidecar] {category} failure: {message}"));
+    }
+}
+
+pub fn classify_startup_error(message: &str) -> &'static str {
+    if message.contains("exited before becoming healthy") {
+        "early_exit"
+    } else if message.contains("healthy before timeout") {
+        "health_timeout"
+    } else if message.contains("failed to start") {
+        "spawn"
+    } else {
+        "configuration"
+    }
+}
 
 pub fn reserve_loopback_port() -> std::io::Result<(TcpListener, u16)> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -93,6 +116,16 @@ pub fn child_exited(child: &mut std::process::Child) -> std::io::Result<bool> {
 
 pub fn terminate_child(child: &mut std::process::Child) -> std::io::Result<()> {
     if !child_exited(child)? {
+        if unsafe { libc::kill(child.id() as i32, libc::SIGTERM) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(TERMINATION_TIMEOUT_MS);
+        while std::time::Instant::now() < deadline {
+            if child_exited(child)? {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         child.kill()?;
         child.wait()?;
     }
@@ -127,6 +160,8 @@ pub async fn start_sidecar(_app: &tauri::AppHandle, state: Arc<Mutex<AppState>>)
             None => reserve_loopback_port().map_err(|e| e.to_string())?,
         };
         s.starting = true;
+        s.service_state = "starting".into();
+        s.error = None;
         s.port = port;
         (listener, port, s.health_token.clone())
     };
@@ -145,6 +180,9 @@ pub async fn start_sidecar(_app: &tauri::AppHandle, state: Arc<Mutex<AppState>>)
         .join("logs");
     create_dir_all(&log_dir).map_err(|e| format!("failed to create log dir {}: {}", log_dir.display(), e))?;
     let log_path = log_dir.join("sidecar.log");
+    if let Ok(mut s) = state.lock() {
+        s.log_path = Some(log_path.to_string_lossy().into_owned());
+    }
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -187,6 +225,7 @@ pub async fn start_sidecar(_app: &tauri::AppHandle, state: Arc<Mutex<AppState>>)
         s.sidecar_child = Some(child_guard.take());
         s.starting = false;
         s.running = true;
+        s.service_state = "running".into();
         s.logs.push(format!("[sidecar] started on port {}, log {}", port, log_path.display()));
     }
     startup_guard.commit();
@@ -263,6 +302,32 @@ mod tests {
     }
 
     #[test]
+    fn records_a_structured_failure_for_status_consumers() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+
+        super::record_failure(&state, "startup", "runtime missing".into());
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.service_state, "failed");
+        let error = state.error.as_ref().expect("structured error");
+        assert_eq!(error.category, "startup");
+        assert_eq!(error.message, "runtime missing");
+    }
+
+    #[test]
+    fn classifies_actionable_startup_failures() {
+        assert_eq!(super::classify_startup_error("failed to start python3"), "spawn");
+        assert_eq!(
+            super::classify_startup_error("sidecar exited before becoming healthy"),
+            "early_exit"
+        );
+        assert_eq!(
+            super::classify_startup_error("sidecar did not become healthy before timeout"),
+            "health_timeout"
+        );
+    }
+
+    #[test]
     fn detects_and_reaps_an_early_child_exit() {
         let mut child = std::process::Command::new("/usr/bin/false").spawn().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -277,9 +342,14 @@ mod tests {
 
     #[test]
     fn terminates_and_reaps_a_running_child() {
-        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let marker = std::env::temp_dir().join(format!("pdf2md-term-{}", std::process::id()));
+        let script = format!("trap 'touch {} ; exit 0' TERM; while :; do sleep 1; done", marker.display());
+        let mut child = std::process::Command::new("/bin/sh").args(["-c", &script]).spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
         terminate_child(&mut child).expect("terminate child");
         assert!(child.try_wait().unwrap().is_some());
+        assert!(marker.exists(), "child must receive SIGTERM before any SIGKILL fallback");
+        let _ = std::fs::remove_file(marker);
     }
 }
 
@@ -290,6 +360,23 @@ pub fn stop_sidecar(state: Arc<Mutex<AppState>>) -> Result<(), String> {
         s.logs.push("[sidecar] stopped".into());
     }
     s.running = false;
+    if s.service_state != "restarting" {
+        s.service_state = "failed".into();
+    }
+    Ok(())
+}
+
+pub async fn restart_sidecar(app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) -> Result<(), String> {
+    {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.service_state = "restarting".into();
+        s.error = None;
+    }
+    stop_sidecar(state.clone())?;
+    if let Err(error) = start_sidecar(app, state.clone()).await {
+        record_failure(&state, classify_startup_error(&error), error.clone());
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -310,6 +397,7 @@ pub async fn health_loop(app: tauri::AppHandle, state: Arc<Mutex<AppState>>) {
                     let mut s = state.lock().unwrap();
                     s.health_failures += 1;
                     if s.health_failures >= MAX_HEALTH_FAILURES {
+                        s.service_state = "restarting".into();
                         s.logs.push("[health] 3 failures, restarting sidecar...".into());
                         true
                     } else {
@@ -317,9 +405,10 @@ pub async fn health_loop(app: tauri::AppHandle, state: Arc<Mutex<AppState>>) {
                     }
                 };
                 if should_restart {
-                    let _ = stop_sidecar(state.clone());
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    let _ = start_sidecar(&app, state.clone()).await;
+                    if let Err(error) = restart_sidecar(&app, state.clone()).await {
+                        record_failure(&state, "health", error);
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(
                         HEALTH_STARTUP_GRACE_SECS,
                     ))

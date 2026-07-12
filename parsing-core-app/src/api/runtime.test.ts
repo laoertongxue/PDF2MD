@@ -33,4 +33,22 @@ describe("runtime API endpoint", () => {
     await expect(getApiBase()).resolves.toBe("http://127.0.0.1:43127");
     await expect(getApiBase()).resolves.toBe("http://127.0.0.1:43128");
   });
+
+  it("reads structured sidecar status and retries through Tauri", async () => {
+    (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    const failed = {
+      state: "failed",
+      error: { category: "startup", message: "backend exited" },
+      logPath: "/tmp/sidecar.log",
+      port: 43127,
+    };
+    const invoke = vi.fn().mockResolvedValueOnce(failed).mockResolvedValueOnce("restarting");
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const { getServiceStatus, retryService } = await import("./runtime");
+
+    await expect(getServiceStatus()).resolves.toEqual(failed);
+    await expect(retryService()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenNthCalledWith(1, "get_status");
+    expect(invoke).toHaveBeenNthCalledWith(2, "retry_service");
+  });
 });
