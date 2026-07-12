@@ -45,10 +45,10 @@ Gatekeeper 拦截，请在 Finder 中按住 Control 点按 `PDF2MD.app`，选择
 
 每个 CI Release 同时提供 DMG、ZIP 及各自的 `.sha256`。Actions artifact 名称包含 workflow
 run ID，发布资产由同一次 run 的 artifact 下载后创建，并带有 GitHub artifact attestation。
-CI 在标准 `macos-14` Intel runner 上交叉构建并验证 arm64 Mach-O、包结构、版本、校验值和
-ad-hoc 签名；它不会把 Intel runner 上无法执行的 Apple Silicon 冷启动描述为已通过。
-手工 Release 记录只有在 Apple Silicon 真机完成安装、启动与本地服务检查后，才会单独标注
-“Apple Silicon 实机验证通过”。
+CI 在公开仓库的标准 `macos-14` M1 runner 上原生构建，并明确断言 `arm64` 架构。发布门禁
+验证 arm64 Mach-O、包结构、版本和 ad-hoc 签名，还会在受限 `PATH=/usr/bin:/bin` 的干净
+环境中冷启动打包后的 sidecar、检查 `/health`，并在运行前后分别验证签名。手工 Release
+记录单独描述 Finder 安装、Gatekeeper 和用户环境验收，不与 CI 结果混写。
 
 ### 典型流程
 
@@ -157,11 +157,12 @@ an app downloaded from this repository's Releases whose checksum matches.
 Each CI release includes the DMG, ZIP, and a `.sha256` file for each. The Actions artifact
 name contains the workflow run ID; release assets are downloaded from that same run before
 the GitHub Release is created, and GitHub artifact attestations record their provenance.
-CI cross-compiles on a standard Intel `macos-14` runner and verifies the arm64 Mach-O files,
-bundle structure, version, checksums, and ad-hoc signature. It does not claim an Apple Silicon
-cold launch on hardware that cannot execute the app. A manual release record says **Apple
-Silicon hardware verified** only after install, launch, and local-service checks on an Apple
-Silicon Mac.
+CI builds natively on the standard M1 `macos-14` runner for public repositories and explicitly
+requires `arm64`. The release gate verifies the arm64 Mach-O files, bundle structure, version,
+checksums, and ad-hoc signature. It also cold-starts the packaged sidecar in a clean environment
+with `PATH=/usr/bin:/bin`, checks `/health`, and verifies the signature both before and after the
+run. Manual release notes separately report Finder installation, Gatekeeper, and user-environment
+acceptance instead of presenting those checks as CI results.
 
 ### Development
 

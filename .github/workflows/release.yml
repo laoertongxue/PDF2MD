@@ -46,6 +46,13 @@ jobs:
         id: metadata
         run: printf 'artifact-name=pdf2md-v%s-run-%s\n' "$VERSION" "${{ github.run_id }}" >> "$GITHUB_OUTPUT"
 
+      - name: Require native Apple Silicon runner
+        run: |
+          test "$(uname -m)" = "arm64" || {
+            echo "release requires the arm64 macos-14 runner" >&2
+            exit 1
+          }
+
       - name: Install frontend dependencies
         working-directory: parsing-core-app
         run: npm ci
@@ -64,24 +71,21 @@ jobs:
           npm test
           npm run build
 
-      - name: Install Apple Silicon Rust target
-        run: rustup target add aarch64-apple-darwin
-
-      - name: Prepare embedded Apple Silicon Python runtime
+      - name: Prepare embedded Python runtime
         run: ./parsing-core-app/scripts/prepare-sidecar-python.sh
 
       - name: Run Rust quality gate
         working-directory: parsing-core-app/src-tauri
-        run: cargo check --target aarch64-apple-darwin
+        run: cargo check
 
-      - name: Build Apple Silicon desktop app
+      - name: Build desktop app natively
         working-directory: parsing-core-app
-        run: npm run tauri build -- --target aarch64-apple-darwin
+        run: npm run tauri build
 
       - name: Verify and stage release assets
         shell: bash
         run: |
-          bundle="parsing-core-app/src-tauri/target/aarch64-apple-darwin/release/bundle"
+          bundle="parsing-core-app/src-tauri/target/release/bundle"
           app="$bundle/macos/PDF2MD.app"
           dmg="$bundle/dmg/PDF2MD_${VERSION}_aarch64.dmg"
           test -d "$app"
@@ -92,6 +96,8 @@ jobs:
           file "${app_executables[0]}" | grep -q 'arm64'
           file "$app/Contents/Resources/python-runtime/bin/python3.13" | grep -q 'arm64'
           ./scripts/check-release-sidecar.sh "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          ./scripts/test-release-sidecar.sh "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           PDF2MD_APP_PATH="$app" pytest -q tests/test_version_consistency.py
 

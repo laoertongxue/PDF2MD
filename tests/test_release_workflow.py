@@ -8,13 +8,23 @@ def _workflow() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
 
-def test_release_uses_standard_runner_and_explicit_apple_silicon_target():
+def test_release_uses_native_apple_silicon_runner():
     workflow = _workflow()
 
     assert "runs-on: macos-14\n" in workflow
     assert "macos-14-xlarge" not in workflow
-    assert "rustup target add aarch64-apple-darwin" in workflow
-    assert "npm run tauri build -- --target aarch64-apple-darwin" in workflow
+    assert 'test "$(uname -m)" = "arm64"' in workflow
+    assert "rustup target add aarch64-apple-darwin" not in workflow
+    assert "--target aarch64-apple-darwin" not in workflow
+
+
+def test_packaged_sidecar_cold_start_is_between_signature_checks():
+    workflow = _workflow()
+    first_verify = workflow.index("codesign --verify --deep --strict")
+    cold_start = workflow.index('./scripts/test-release-sidecar.sh "$app"')
+    second_verify = workflow.index("codesign --verify --deep --strict", first_verify + 1)
+
+    assert first_verify < cold_start < second_verify
 
 
 def test_build_is_uploaded_and_attested_before_release_job():
