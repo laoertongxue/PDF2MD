@@ -46,7 +46,10 @@ def test_health_requires_matching_instance_token(tmp_path, monkeypatch):
     client = make_test_app(tmp_path, monkeypatch, health_token="instance-two")
 
     assert client.get("/health").status_code == 403
-    assert client.get("/health", headers={"X-PDF2MD-Health-Token": "instance-one"}).status_code == 403
+    stale_response = client.get(
+        "/health", headers={"X-PDF2MD-Health-Token": "instance-one"}
+    )
+    assert stale_response.status_code == 403
     response = client.get("/health", headers={"X-PDF2MD-Health-Token": "instance-two"})
 
     assert response.status_code == 200
