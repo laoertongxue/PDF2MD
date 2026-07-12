@@ -166,6 +166,89 @@ def test_review_must_return_exact_fixed_blocks(tmp_path):
     assert repo.get_chapter(chapter.id).status == "FAILED"
 
 
+@pytest.mark.parametrize(
+    ("failure_step", "trigger_sql"),
+    [
+        (
+            "blocks",
+            "CREATE TRIGGER fail_publish BEFORE INSERT ON wb_note_blocks "
+            "BEGIN SELECT RAISE(ABORT, 'blocks failed'); END",
+        ),
+        (
+            "cards",
+            "CREATE TRIGGER fail_publish BEFORE INSERT ON wb_cards "
+            "BEGIN SELECT RAISE(ABORT, 'cards failed'); END",
+        ),
+        (
+            "runs",
+            "CREATE TRIGGER fail_publish BEFORE UPDATE ON wb_runs "
+            "BEGIN SELECT RAISE(ABORT, 'runs failed'); END",
+        ),
+        (
+            "review",
+            "CREATE TRIGGER fail_publish BEFORE UPDATE ON wb_chapter_generation_runs "
+            "BEGIN SELECT RAISE(ABORT, 'review failed'); END",
+        ),
+        (
+            "chapter",
+            "CREATE TRIGGER fail_publish BEFORE UPDATE ON wb_chapters "
+            "WHEN NEW.status = 'COMPLETED' BEGIN SELECT RAISE(ABORT, 'chapter failed'); END",
+        ),
+        (
+            "lease",
+            "CREATE TRIGGER fail_publish BEFORE DELETE ON wb_chapter_generation_leases "
+            "BEGIN SELECT RAISE(ABORT, 'lease failed'); END",
+        ),
+    ],
+)
+def test_publish_chapter_generation_rolls_back_every_table_on_each_step_failure(
+    tmp_path, failure_step, trigger_sql
+):
+    repo, chapter = setup_chapter(tmp_path)
+    repo.upsert_note_block(chapter.id, "summary", "本章概要", "旧块", 0)
+    repo.create_card(chapter.course_id, chapter.id, "topic", "旧卡", "旧卡内容")
+    repo.upsert_run(chapter.id, "structure", "old", "DONE", "old-in", "old-out", "旧轮次")
+    repo.update_chapter_status(chapter.id, "FAILED")
+    start = repo.start_chapter_generation(chapter.id, now=100, lease_ttl=10_000_000_000)
+    candidate = repo.create_chapter_generation_run(chapter.id, start.owner_id, "structure", now=101)
+    repo.finish_chapter_generation_run(
+        candidate.id, start.owner_id, "COMPLETED", output="新候选", now=102
+    )
+    review = repo.create_chapter_generation_run(chapter.id, start.owner_id, "review", now=103)
+
+    tracked_tables = (
+        "wb_note_blocks",
+        "wb_cards",
+        "wb_runs",
+        "wb_chapter_generation_runs",
+        "wb_chapter_generation_candidates",
+        "wb_chapters",
+        "wb_chapter_generation_leases",
+    )
+    before = {
+        table: repo.conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+        for table in tracked_tables
+    }
+    repo.conn.execute(trigger_sql)
+
+    with pytest.raises(sqlite3.IntegrityError, match=f"{failure_step} failed"):
+        repo.publish_chapter_generation(
+            chapter.id,
+            start.owner_id,
+            {"summary": ("本章概要", "新块", 0)},
+            ("新卡", "新卡内容"),
+            review.id,
+            '{"passed":true,"issues":[],"revised_blocks":{}}',
+            {"structure": ("new-in", "new-out")},
+        )
+
+    after = {
+        table: repo.conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+        for table in tracked_tables
+    }
+    assert after == before
+
+
 def test_pipeline_materializes_generated_mermaid_output(tmp_path):
     class CustomMermaidExecutor(StubIntensiveReadingExecutor):
         def run(self, round_key: str, task_package: str) -> str:

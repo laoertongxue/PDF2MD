@@ -1153,22 +1153,98 @@ def test_workbench_list_endpoints_return_not_found(tmp_path):
     assert c.get("/api/workbench/chapters/missing/note-blocks").status_code == 404
 
 
+def test_chapter_note_block_patch_matches_frontend_contract_and_syncs_markdown(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    assert (
+        c.post(
+            f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"}
+        ).status_code
+        == 200
+    )
+    endpoint = f"/api/workbench/chapters/{chapter['id']}/note-blocks/knowledge_mermaid"
+    original = next(
+        item["body"]
+        for item in c.get(f"/api/workbench/chapters/{chapter['id']}/note-blocks").json()
+        if item["kind"] == "knowledge_mermaid"
+    )
+    source = "flowchart LR\nA[编辑] --> B[保存]"
+
+    response = c.patch(endpoint, json={"body": source, "expected_body": original})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["body"] == source
+    assert any(
+        source in path.read_text(encoding="utf-8") for path in root.rglob("intensive-note.md")
+    )
+    conflict = c.patch(
+        endpoint,
+        json={"body": "flowchart LR\nX-->Y", "expected_body": original},
+    )
+    assert conflict.status_code == 409
+
+
+@pytest.mark.parametrize("kind", ["unknown", "cards"])
+def test_chapter_note_block_patch_rejects_non_fixed_kind(tmp_path, kind):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    response = c.patch(
+        f"/api/workbench/chapters/{chapter['id']}/note-blocks/{kind}",
+        json={"body": "内容", "expected_body": "旧内容"},
+    )
+    assert response.status_code == 422
+
+
+def test_chapter_note_block_patch_rejects_invalid_mermaid(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    response = c.patch(
+        f"/api/workbench/chapters/{chapter['id']}/note-blocks/knowledge_mermaid",
+        json={"body": "not mermaid", "expected_body": "old"},
+    )
+    assert response.status_code == 422
+
+
+def test_chapter_note_block_patch_disk_failure_returns_507_and_retains_db_edit(
+    tmp_path, monkeypatch
+):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    c.post(f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"})
+    repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
+    block = next(item for item in repo.list_note_blocks(chapter["id"]) if item.kind == "summary")
+    monkeypatch.setattr(
+        routes_workbench,
+        "sync_chapter_markdown",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    response = c.patch(
+        f"/api/workbench/chapters/{chapter['id']}/note-blocks/summary",
+        json={"body": "数据库已保存", "expected_body": block.body},
+    )
+
+    assert response.status_code == 507
+    saved = next(item for item in repo.list_note_blocks(chapter["id"]) if item.kind == "summary")
+    assert saved.body == "数据库已保存"
+
+
 def test_course_cards_unify_chapter_and_topic_origins_and_topic_block_patch(tmp_path):
     c = client(tmp_path)
     root = course_root(tmp_path)
     course, source, chapter = confirmed_chapter(c, root)
-    run_chapter = c.post(
-        f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"}
-    )
+    run_chapter = c.post(f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"})
     assert run_chapter.status_code == 200
     topic = c.post(
         f"/api/workbench/courses/{course['id']}/topics",
         json={"title": "战略融合", "chapter_ids": [chapter["id"]]},
     ).json()
     assert c.post(f"/api/workbench/courses/{course['id']}/topics/confirm").status_code == 200
-    run_topic = c.post(
-        f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"}
-    )
+    run_topic = c.post(f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"})
     assert run_topic.status_code == 200
 
     cards = c.get(f"/api/workbench/courses/{course['id']}/cards").json()
@@ -1187,9 +1263,7 @@ def test_course_cards_unify_chapter_and_topic_origins_and_topic_block_patch(tmp_
             "content": "flowchart LR\nA[更新] --> B[保存]",
             "expected_content": next(
                 item["content"]
-                for item in c.get(
-                    f"/api/workbench/topics/{topic['id']}/note-blocks"
-                ).json()
+                for item in c.get(f"/api/workbench/topics/{topic['id']}/note-blocks").json()
                 if item["kind"] == "knowledge_mermaid"
             ),
         },
@@ -1199,15 +1273,16 @@ def test_course_cards_unify_chapter_and_topic_origins_and_topic_block_patch(tmp_
     listed = c.get(f"/api/workbench/topics/{topic['id']}/note-blocks").json()
     saved = next(item for item in listed if item["kind"] == "knowledge_mermaid")
     assert saved["content"] == block.json()["content"]
-    assert c.patch(
-        f"/api/workbench/topics/{topic['id']}/note-blocks/not-a-block",
-        json={"content": "x"},
-    ).status_code == 422
+    assert (
+        c.patch(
+            f"/api/workbench/topics/{topic['id']}/note-blocks/not-a-block",
+            json={"content": "x"},
+        ).status_code
+        == 422
+    )
 
 
-def test_topic_block_patch_sync_failure_retains_edit_and_retry_publishes(
-    tmp_path, monkeypatch
-):
+def test_topic_block_patch_sync_failure_retains_edit_and_retry_publishes(tmp_path, monkeypatch):
     c = client(tmp_path)
     root = course_root(tmp_path)
     course, _, chapter = confirmed_chapter(c, root)
@@ -1223,15 +1298,14 @@ def test_topic_block_patch_sync_failure_retains_edit_and_retry_publishes(
     def fail_sync(*_args, **_kwargs):
         raise OSError("/private/key sk-secret")
 
-    monkeypatch.setattr(
-        "parsing_core.workbench.topic_pipeline.sync_topic_markdown", fail_sync
-    )
+    monkeypatch.setattr("parsing_core.workbench.topic_pipeline.sync_topic_markdown", fail_sync)
     failed = c.patch(
         f"/api/workbench/topics/{topic['id']}/note-blocks/knowledge_mermaid",
         json={
             "content": source,
             "expected_content": next(
-                block.content for block in WorkbenchRepository(
+                block.content
+                for block in WorkbenchRepository(
                     get_scheduler()._query_orch.repo.conn
                 ).list_topic_note_blocks(topic["id"])
                 if block.kind == "knowledge_mermaid"
@@ -1242,7 +1316,8 @@ def test_topic_block_patch_sync_failure_retains_edit_and_retry_publishes(
     assert failed.json() == {"detail": "topic Markdown sync failed; database edit retained"}
     repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
     saved = next(
-        block for block in repo.list_topic_note_blocks(topic["id"])
+        block
+        for block in repo.list_topic_note_blocks(topic["id"])
         if block.kind == "knowledge_mermaid"
     )
     assert saved.content == source
@@ -1270,27 +1345,31 @@ def test_topic_block_patch_uses_cas_and_preserves_first_window_db_and_markdown(t
     c.post(f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"})
     endpoint = f"/api/workbench/topics/{topic['id']}/note-blocks/knowledge_mermaid"
     original = next(
-        item["content"] for item in c.get(
-            f"/api/workbench/topics/{topic['id']}/note-blocks"
-        ).json() if item["kind"] == "knowledge_mermaid"
+        item["content"]
+        for item in c.get(f"/api/workbench/topics/{topic['id']}/note-blocks").json()
+        if item["kind"] == "knowledge_mermaid"
     )
     first_source = "flowchart LR\nA[窗口一] --> B[成功]"
-    assert c.patch(
-        endpoint, json={"content": first_source, "expected_content": original}
-    ).status_code == 200
+    assert (
+        c.patch(endpoint, json={"content": first_source, "expected_content": original}).status_code
+        == 200
+    )
     second = c.patch(
         endpoint,
         json={"content": "flowchart LR\nA[窗口二] --> B[冲突]", "expected_content": original},
     )
     assert second.status_code == 409
     repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
-    assert next(
-        block.content for block in repo.list_topic_note_blocks(topic["id"])
-        if block.kind == "knowledge_mermaid"
-    ) == first_source
+    assert (
+        next(
+            block.content
+            for block in repo.list_topic_note_blocks(topic["id"])
+            if block.kind == "knowledge_mermaid"
+        )
+        == first_source
+    )
     assert any(
-        first_source in path.read_text(encoding="utf-8")
-        for path in root.rglob("intensive-note.md")
+        first_source in path.read_text(encoding="utf-8") for path in root.rglob("intensive-note.md")
     )
 
 
@@ -1307,7 +1386,8 @@ def test_topic_block_patch_protects_live_sync_owner_and_recovers_expired_lease(t
     c.post(f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"})
     repo = WorkbenchRepository(get_scheduler()._query_orch.repo.conn)
     original = next(
-        block.content for block in repo.list_topic_note_blocks(topic["id"])
+        block.content
+        for block in repo.list_topic_note_blocks(topic["id"])
         if block.kind == "knowledge_mermaid"
     )
     repo.set_topic_markdown_sync_state(topic["id"], "PENDING")

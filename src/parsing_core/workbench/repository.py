@@ -283,15 +283,15 @@ class WorkbenchRepository:
             chapter = self.get_chapter(chapter_id)
             self.conn.execute("DELETE FROM wb_note_blocks WHERE chapter_id = ?", (chapter_id,))
             for kind, (title, body, seq) in blocks.items():
-                self.upsert_note_block(chapter_id, kind, title, body, seq)
+                self._upsert_note_block_no_commit(chapter_id, kind, title, body, seq)
             self.conn.execute(
                 "DELETE FROM wb_cards WHERE chapter_id = ? AND kind = 'topic'", (chapter_id,)
             )
-            self.create_card(chapter.course_id, chapter_id, "topic", card[0], card[1])
+            self._create_card_no_commit(chapter.course_id, chapter_id, "topic", card[0], card[1])
             candidates = self.chapter_generation_candidates(chapter_id, owner_id)
             for round_key, output in candidates.items():
                 input_path, output_path = (run_paths or {}).get(round_key, ("", ""))
-                self.upsert_run(
+                self._upsert_run_no_commit(
                     chapter_id,
                     round_key,
                     "generation",
@@ -301,7 +301,7 @@ class WorkbenchRepository:
                     output,
                     False,
                 )
-            self.upsert_run(
+            self._upsert_run_no_commit(
                 chapter_id, "review", "generation", "DONE", "", "", review_output, False
             )
             self.conn.execute(
@@ -1862,6 +1862,18 @@ class WorkbenchRepository:
         body: str,
         seq: int,
     ) -> NoteBlock:
+        block = self._upsert_note_block_no_commit(chapter_id, kind, title, body, seq)
+        self.conn.commit()
+        return block
+
+    def _upsert_note_block_no_commit(
+        self,
+        chapter_id: str,
+        kind: str,
+        title: str,
+        body: str,
+        seq: int,
+    ) -> NoteBlock:
         now = _now()
         self.conn.execute(
             """
@@ -1877,12 +1889,34 @@ class WorkbenchRepository:
             """,
             (uuid4().hex, chapter_id, kind, title, body, seq, now),
         )
-        self.conn.commit()
         row = self.conn.execute(
             "SELECT * FROM wb_note_blocks WHERE chapter_id = ? AND kind = ?",
             (chapter_id, kind),
         ).fetchone()
         return NoteBlock(*row)
+
+    def patch_chapter_note_block(
+        self, chapter_id: str, kind: str, body: str, expected_body: str
+    ) -> NoteBlock:
+        with self._atomic(immediate=True):
+            cursor = self.conn.execute(
+                "UPDATE wb_note_blocks SET body = ?, updated_at = ? "
+                "WHERE chapter_id = ? AND kind = ? AND body = ?",
+                (body, _now(), chapter_id, kind, expected_body),
+            )
+            if cursor.rowcount != 1:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM wb_note_blocks WHERE chapter_id = ? AND kind = ?",
+                    (chapter_id, kind),
+                ).fetchone()
+                if exists is None:
+                    raise ValueError("chapter note block not found")
+                raise ValueError("chapter note block changed")
+            row = self.conn.execute(
+                "SELECT * FROM wb_note_blocks WHERE chapter_id = ? AND kind = ?",
+                (chapter_id, kind),
+            ).fetchone()
+            return NoteBlock(*row)
 
     def list_note_blocks(self, chapter_id: str) -> list[NoteBlock]:
         rows = self.conn.execute(
@@ -1892,6 +1926,30 @@ class WorkbenchRepository:
         return [NoteBlock(*row) for row in rows]
 
     def upsert_run(
+        self,
+        chapter_id: str,
+        round_key: str,
+        executor: str,
+        status: str,
+        input_path: str,
+        output_path: str,
+        output: str,
+        stale: bool = False,
+    ) -> RunRecord:
+        run = self._upsert_run_no_commit(
+            chapter_id,
+            round_key,
+            executor,
+            status,
+            input_path,
+            output_path,
+            output,
+            stale,
+        )
+        self.conn.commit()
+        return run
+
+    def _upsert_run_no_commit(
         self,
         chapter_id: str,
         round_key: str,
@@ -1935,7 +1993,6 @@ class WorkbenchRepository:
                 now,
             ),
         )
-        self.conn.commit()
         row = self.conn.execute(
             "SELECT * FROM wb_runs WHERE chapter_id = ? AND round_key = ?",
             (chapter_id, round_key),
@@ -1964,6 +2021,18 @@ class WorkbenchRepository:
         self.conn.commit()
 
     def create_card(
+        self,
+        course_id: str,
+        chapter_id: str,
+        kind: str,
+        title: str,
+        body: str,
+    ) -> Card:
+        card = self._create_card_no_commit(course_id, chapter_id, kind, title, body)
+        self.conn.commit()
+        return card
+
+    def _create_card_no_commit(
         self,
         course_id: str,
         chapter_id: str,
@@ -2001,7 +2070,6 @@ class WorkbenchRepository:
             """,
             {**row, "favorite": int(row["favorite"])},
         )
-        self.conn.commit()
         return Card(**row)
 
     def list_cards(self, course_id: str) -> list[Card]:

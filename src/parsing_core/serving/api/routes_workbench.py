@@ -27,7 +27,12 @@ from parsing_core.workbench.deepseek import DeepSeekClient, DeepSeekError, DeepS
 from parsing_core.workbench.executors import StubIntensiveReadingExecutor
 from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
 from parsing_core.workbench.keychain import KeychainError, mask_secret, read_secret, save_secret
-from parsing_core.workbench.pipeline import ChapterMarkdownSyncError, IntensiveReadingPipeline
+from parsing_core.workbench.markdown_sync import sync_chapter_markdown
+from parsing_core.workbench.pipeline import (
+    FIXED_CHAPTER_KINDS,
+    ChapterMarkdownSyncError,
+    IntensiveReadingPipeline,
+)
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.settings import WorkbenchSettings, load_settings, save_settings
 from parsing_core.workbench.source_import import (
@@ -72,6 +77,12 @@ class TopicBlockPatchResponse(BaseModel):
     kind: str
     content: str
     updated_at: int
+
+
+class ChapterBlockPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    body: str = Field(min_length=1, max_length=20_000)
+    expected_body: str = Field(max_length=20_000)
 
 
 def _repo(sch: SchedulerDep) -> WorkbenchRepository:
@@ -464,6 +475,31 @@ async def list_note_blocks(chapter_id: str, sch: SchedulerDep):
     if repo.get_chapter(chapter_id) is None:
         raise HTTPException(404, "chapter not found")
     return [_note_block_response(block) for block in repo.list_note_blocks(chapter_id)]
+
+
+@router.patch("/chapters/{chapter_id}/note-blocks/{kind}", response_model=NoteBlockResponse)
+async def patch_chapter_note_block(
+    chapter_id: str, kind: str, req: ChapterBlockPatchRequest, sch: SchedulerDep
+):
+    if kind not in FIXED_CHAPTER_KINDS:
+        raise HTTPException(422, "unknown chapter block kind")
+    if kind.endswith("_mermaid"):
+        try:
+            validate_mermaid_subset(req.body)
+        except ValueError as exc:
+            raise HTTPException(422, "invalid Mermaid source") from exc
+    repo = _repo(sch)
+    try:
+        block = repo.patch_chapter_note_block(chapter_id, kind, req.body, req.expected_body)
+    except ValueError as exc:
+        if "changed" in str(exc):
+            raise HTTPException(409, "chapter block edit conflicts with current state") from exc
+        raise HTTPException(404, "chapter note block not found") from exc
+    try:
+        sync_chapter_markdown(repo, chapter_id)
+    except OSError as exc:
+        raise HTTPException(507, "chapter Markdown sync failed; database edit retained") from exc
+    return _note_block_response(block)
 
 
 @router.post("/chapters/{chapter_id}/run", response_model=ChapterResponse)
