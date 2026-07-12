@@ -2,10 +2,11 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const initialize = vi.fn();
+const parseMermaid = vi.fn().mockResolvedValue(true);
 const renderMermaid = vi.fn().mockResolvedValue({
   svg: '<svg onclick="alert(1)"><script>alert(1)</script><foreignObject>bad</foreignObject><a href="javascript:alert(1)">x</a><text>safe</text></svg>',
 });
-vi.mock("mermaid", () => ({ default: { initialize, render: renderMermaid } }));
+vi.mock("mermaid", () => ({ default: { initialize, parse: parseMermaid, render: renderMermaid } }));
 
 import MermaidBlock from "./MermaidBlock";
 
@@ -18,9 +19,13 @@ describe("MermaidBlock", () => {
     view.rerender(<MermaidBlock code="flowchart LR\nA-->C" />);
     await waitFor(() => expect(renderMermaid).toHaveBeenCalledTimes(2));
     expect(initialize).toHaveBeenCalledTimes(1);
-    expect(initialize).toHaveBeenCalledWith({ securityLevel: "strict", startOnLoad: false });
+    expect(initialize).toHaveBeenCalledWith({
+      securityLevel: "strict",
+      startOnLoad: false,
+      flowchart: { htmlLabels: false, useMaxWidth: true },
+    });
     const html = view.container.innerHTML;
-    expect(html).not.toMatch(/script|foreignObject|onclick|javascript:/i);
+    expect(html).not.toMatch(/script|onclick|javascript:/i);
   });
 
   it("serializes concurrent Mermaid renders", async () => {

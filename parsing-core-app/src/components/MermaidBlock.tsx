@@ -7,7 +7,11 @@ let renderQueue: Promise<void> = Promise.resolve();
 function loadMermaid() {
   if (!mermaidModule) {
     mermaidModule = import("mermaid").then((module) => {
-      module.default.initialize({ securityLevel: "strict", startOnLoad: false });
+      module.default.initialize({
+        securityLevel: "strict",
+        startOnLoad: false,
+        flowchart: { htmlLabels: false, useMaxWidth: true },
+      });
       return module;
     });
   }
@@ -16,9 +20,9 @@ function loadMermaid() {
 
 function sanitizeSvg(svg: string) {
   const documentNode = new DOMParser().parseFromString(svg, "image/svg+xml");
-  documentNode.querySelectorAll("script, foreignObject").forEach((node) => node.remove());
+  documentNode.querySelectorAll("script, iframe, object, embed, img, audio, video, link").forEach((node) => node.remove());
   documentNode.querySelectorAll("*").forEach((node) => {
-    for (const attribute of [...node.attributes]) {
+    for (const attribute of Array.from(node.attributes)) {
       const value = attribute.value.trim().toLowerCase();
       if (attribute.name.toLowerCase().startsWith("on") || value.startsWith("javascript:")) {
         node.removeAttribute(attribute.name);
@@ -28,8 +32,19 @@ function sanitizeSvg(svg: string) {
   return documentNode.documentElement.outerHTML;
 }
 
+function removeTemporaryNode(id: string) {
+  document.getElementById(`d${id}`)?.remove();
+}
+
 function renderMermaid(module: typeof import("mermaid"), id: string, code: string) {
-  const render = renderQueue.then(() => module.default.render(id, code));
+  const render = renderQueue.then(async () => {
+    await module.default.parse(code);
+    try {
+      return await module.default.render(id, code);
+    } finally {
+      removeTemporaryNode(id);
+    }
+  });
   renderQueue = render.then(() => undefined, () => undefined);
   return render;
 }
@@ -57,16 +72,16 @@ export default function MermaidBlock({ code }: { code: string }) {
             setError(true);
           }
         })
-        .finally(() => document.getElementById(`d${renderId}`)?.remove());
+        .finally(() => removeTemporaryNode(renderId));
     });
     return () => { c = true; };
   }, [code]);
 
   if (error) {
     return (
-      <div className="flex items-start gap-2.5 rounded-xl bg-amber-50 border border-amber-200 p-3.5">
+      <div role="alert" className="flex min-w-0 max-w-full items-start gap-2.5 overflow-hidden rounded-lg border border-amber-200 bg-amber-50 p-3.5">
         <AlertCircle size={16} className="text-amber-500 shrink-0 mt-0.5" />
-        <pre className="text-[11px] text-amber-800 overflow-auto whitespace-pre-wrap">{code}</pre>
+        <pre className="min-w-0 max-w-full overflow-auto whitespace-pre-wrap break-words text-[11px] text-amber-800">{code}</pre>
       </div>
     );
   }
@@ -80,6 +95,6 @@ export default function MermaidBlock({ code }: { code: string }) {
   }
 
   return (
-    <div className="flex justify-center overflow-x-auto" dangerouslySetInnerHTML={{ __html: svg }} />
+    <div className="mermaid-preview flex min-w-0 max-w-full justify-center overflow-auto" dangerouslySetInnerHTML={{ __html: svg }} />
   );
 }
