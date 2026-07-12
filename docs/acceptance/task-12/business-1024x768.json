@@ -1,79 +1,515 @@
 {
-  "fixtureBaseUrl": "http://127.0.0.1:4178/acceptance/task-12.html",
-  "screenshotMode": "fullPage=false",
+  "passed": true,
   "viewport": {
     "width": 1024,
     "height": 768
   },
-  "scenarios": {
-    "import-queue": {
-      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=import-queue",
-      "assertions": {
-        "twoQueuedFiles": true,
-        "independentStatuses": true,
-        "existingTextbooksVisible": true,
-        "exactViewport": true,
-        "noHorizontalOverflow": true
-      },
-      "passed": true
+  "route": "http://127.0.0.1:4178/acceptance/task-12.html#/workbench/cards?cardId=card-1",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
     },
-    "topic-map": {
-      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=topic-map",
-      "assertions": {
-        "duplicateChaptersSeparated": true,
-        "twoSourceGroups": true,
-        "mappingsVisible": true,
-        "saveActionAvailable": true,
-        "exactViewport": true,
-        "noHorizontalOverflow": true
-      },
-      "passed": true
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
     },
-    "fusion-sources": {
-      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=fusion-sources",
-      "assertions": {
-        "twoSourceLinks": true,
-        "strategicRoute": true,
-        "organizationRoute": true,
-        "exactViewport": true,
-        "noHorizontalOverflow": true
-      },
-      "passed": true
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
     },
-    "card-filter": {
-      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=card-filter",
-      "assertions": {
-        "fusionFilterSelected": true,
-        "onlyTopicCardsVisible": true,
-        "chapterCardsHidden": true,
-        "exactViewport": true,
-        "noHorizontalOverflow": true
-      },
-      "passed": true
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
     },
-    "error-stop": {
-      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=error-stop",
-      "assertions": {
-        "errorVisible": true,
-        "loadingStopped": true,
-        "recoveryAvailable": true,
-        "failedRoundRecorded": true,
-        "exactViewport": true,
-        "noHorizontalOverflow": true
-      },
-      "passed": true
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
     },
-    "recovery-complete": {
-      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=recovery-complete",
-      "assertions": {
-        "failedStateRestored": true,
-        "recoveryMessageVisible": true,
-        "regenerateEnabled": true,
-        "recoveryActionRemoved": true,
-        "exactViewport": true,
-        "noHorizontalOverflow": true
-      },
-      "passed": true
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapters"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workbench/courses",
+      "body": {
+        "title": "验收新课程",
+        "description": "",
+        "root_dir": "/fixture/new-course"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-2/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-2/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-2/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-2/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapter-drafts"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapter-drafts"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/workbench/sources/source-1/chapter-drafts",
+      "body": {
+        "expected_fingerprint": "fp-source-1-1",
+        "chapters": [
+          {
+            "id": "chapter-1",
+            "title": "第一章 战略管理导论",
+            "start": 0,
+            "end": 5
+          },
+          {
+            "title": "第一章 战略管理导论（下）",
+            "start": 5,
+            "end": 10
+          },
+          {
+            "id": "chapter-2",
+            "title": "第二章 竞争战略",
+            "start": 10,
+            "end": 20
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapter-drafts"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapter-drafts"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapters"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workbench/sources/source-1/chapter-drafts/confirm",
+      "body": {
+        "expected_fingerprint": "fp-source-1-saved"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapter-drafts"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapter-drafts"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/runs"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workbench/chapters/chapter-1/run-hybrid"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/runs"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks/knowledge_mermaid",
+      "body": {
+        "body": "flowchart LR\nA[战略]-->B[组织协同]",
+        "expected_body": "flowchart LR\nA[战略]-->B[组织]"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/chapters/chapter-1/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/topics"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/workbench/topics/topic-1",
+      "body": {
+        "title": "战略选择与组织协同",
+        "description": "竞争定位到组织执行"
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/api/workbench/topics/topic-1/chapters",
+      "body": {
+        "chapter_ids": [
+          "chapter-1",
+          "chapter-3",
+          "chapter-2"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/topics/topic-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/topics"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/topics/topic-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/topics/topic-1/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/topics"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapters"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workbench/topics/topic-1/recover"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workbench/topics/topic-1/run-hybrid"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/topics/topic-1/note-blocks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/topics/topic-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/topics/topic-1/runs"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/workbench/topics/topic-1/note-blocks/knowledge_mermaid",
+      "body": {
+        "content": "flowchart LR\nK[知识]-->A[行动]",
+        "expected_content": "flowchart LR\nX12[主题]-->Y12[行动]"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/workbench/cards/card-1",
+      "body": {
+        "title": "竞争优势来自系统能力",
+        "content": "战略与组织需要协同。",
+        "tags": [
+          "战略"
+        ],
+        "status": "ACTIVE",
+        "expected_updated_at": 1720000000
+      }
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/workbench/cards/card-1/favorite",
+      "body": {
+        "favorite": true,
+        "expected_updated_at": 1720000001
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/courses/course-1/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-1/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/sources/source-2/chapters"
+    },
+    {
+      "method": "GET",
+      "path": "/__fixture/requests"
     }
-  }
+  ],
+  "assertions": {
+    "realProductionRoute": true,
+    "refreshPersistence": true,
+    "twoMermaidNoErrors": true,
+    "noHorizontalOverflow": true
+  },
+  "failures": []
 }

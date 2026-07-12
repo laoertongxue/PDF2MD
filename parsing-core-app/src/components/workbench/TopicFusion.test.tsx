@@ -47,6 +47,7 @@ describe("TopicFusion", () => {
     expect(screen.getByRole("button", { name: "重新生成" })).toBeEnabled(); second.unmount();
     reset("FAILED"); render(<MemoryRouter><TopicFusion courseId="c1" topicId="t1" /></MemoryRouter>);
     expect(screen.getByRole("alert")).toHaveTextContent("topic round execution failed");
+    expect(screen.getByRole("button", { name: "检查并恢复" })).toBeEnabled();
     expect(screen.getByText("正文 overview", { exact: false })).toBeInTheDocument();
   });
 

@@ -53,6 +53,8 @@ describe("ChapterWorkbench", () => {
     expect(within(history).getByText("当前轮")).toBeInTheDocument();
     expect(within(history).getByText("结果已过期")).toBeInTheDocument();
     expect(within(history).getByText("失败")).toBeInTheDocument();
+    await userEvent.click(within(history).getByRole("button", { name: "从审核轮重跑" }));
+    expect(actions.runHybridChapter).toHaveBeenCalledWith("ch1");
   });
 
   it("saves a real chapter block, reports failure and retries without losing the draft", async () => {
