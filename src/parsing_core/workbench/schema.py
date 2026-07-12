@@ -202,6 +202,23 @@ def apply_workbench_schema(conn: sqlite3.Connection) -> None:
     topic_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_topics)")}
     if "generation_reason" not in topic_columns:
         conn.execute("ALTER TABLE wb_topics ADD COLUMN generation_reason TEXT NOT NULL DEFAULT ''")
+    card_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_cards)")}
+    for column, definition in (
+        ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("status", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+    ):
+        if column not in card_columns:
+            conn.execute(f"ALTER TABLE wb_cards ADD COLUMN {column} {definition}")
+    topic_card_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_topic_cards)")}
+    for column, definition in (
+        ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("status", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+        ("favorite", "INTEGER NOT NULL DEFAULT 0"),
+        ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if column not in topic_card_columns:
+            conn.execute(f"ALTER TABLE wb_topic_cards ADD COLUMN {column} {definition}")
+    conn.execute("UPDATE wb_topic_cards SET updated_at = created_at WHERE updated_at = 0")
     sync_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_topic_markdown_sync)")}
     sync_sql = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wb_topic_markdown_sync'"

@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -10,6 +9,9 @@ from parsing_core.parser.markitdown_adapter import MarkItDownAdapter
 from parsing_core.serving.api.deps import SchedulerDep
 from parsing_core.serving.models.api import (
     ChapterResponse,
+    CourseCardFavoriteRequest,
+    CourseCardPatchRequest,
+    CourseCardResponse,
     CourseCreateRequest,
     CourseResponse,
     DeepSeekSettingsRequest,
@@ -52,17 +54,6 @@ from parsing_core.workbench.topic_pipeline import (
 router = APIRouter(prefix="/api/workbench", tags=["workbench"])
 KEYCHAIN_SERVICE = "pdf2md.deepseek"
 KEYCHAIN_ACCOUNT = "api-key"
-
-
-class CourseCardResponse(BaseModel):
-    id: str
-    origin_type: Literal["chapter", "topic"]
-    origin_id: str
-    origin_title: str
-    card_type: str
-    title: str
-    content: str
-    source_refs: list[str]
 
 
 class TopicBlockPatchRequest(BaseModel):
@@ -428,19 +419,48 @@ async def list_cards(course_id: str, sch: SchedulerDep):
             **{
                 key: row[key]
                 for key in (
-                    "id",
-                    "origin_type",
-                    "origin_id",
-                    "origin_title",
-                    "card_type",
-                    "title",
-                    "content",
+                    "id", "origin_type", "origin_id", "origin_title", "card_type",
+                    "title", "content", "status", "favorite", "updated_at",
                 )
             },
             source_refs=json.loads(row["source_refs_json"]),
+            tags=json.loads(row["tags_json"]),
         )
         for row in repo.list_course_cards(course_id)
     ]
+
+
+def _card_response(card: dict) -> CourseCardResponse:
+    return CourseCardResponse(**{key: card[key] for key in CourseCardResponse.model_fields})
+
+
+@router.patch("/cards/{card_id}", response_model=CourseCardResponse)
+async def patch_course_card(card_id: str, req: CourseCardPatchRequest, sch: SchedulerDep):
+    try:
+        card = _repo(sch).update_course_card(
+            card_id, title=req.title.strip(), content=req.content,
+            tags=req.tags, status=req.status, expected_updated_at=req.expected_updated_at,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, "card not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, "card changed") from exc
+    return _card_response(card)
+
+
+@router.patch("/cards/{card_id}/favorite", response_model=CourseCardResponse)
+async def patch_course_card_favorite(
+    card_id: str, req: CourseCardFavoriteRequest, sch: SchedulerDep,
+):
+    try:
+        card = _repo(sch).set_course_card_favorite(
+            card_id, req.favorite, req.expected_updated_at,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, "card not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, "card changed") from exc
+    return _card_response(card)
 
 
 @router.patch("/topics/{topic_id}/note-blocks/{kind}", response_model=TopicBlockPatchResponse)

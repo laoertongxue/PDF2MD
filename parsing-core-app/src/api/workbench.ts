@@ -1,5 +1,6 @@
 import type {
   Card,
+  CourseCardPatch,
   Chapter,
   ChapterRun,
   Course,
@@ -156,7 +157,9 @@ function parseCourseCard(value: unknown): Card {
     (value.origin_type !== "chapter" && value.origin_type !== "topic") ||
     typeof value.origin_id !== "string" || typeof value.origin_title !== "string" ||
     typeof value.card_type !== "string" || typeof value.title !== "string" ||
-    typeof value.content !== "string" || !isStringArray(value.source_refs)) throw protocolError();
+    typeof value.content !== "string" || !isStringArray(value.source_refs) || !isStringArray(value.tags) ||
+    (value.status !== "ACTIVE" && value.status !== "ARCHIVED") || typeof value.favorite !== "boolean" ||
+    typeof value.updated_at !== "number") throw protocolError();
   return value as unknown as Card;
 }
 
@@ -291,6 +294,19 @@ export function runHybridChapter(chapterId: string): Promise<Chapter> {
 
 export function listCourseCards(courseId: string): Promise<Card[]> {
   return request<Card[]>(`/api/workbench/courses/${courseId}/cards`, undefined, (value) => parseArray(value, parseCourseCard));
+}
+
+export function updateCourseCard(cardId: string, body: CourseCardPatch): Promise<Card> {
+  return request<Card>(`/api/workbench/cards/${cardId}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  }, parseCourseCard);
+}
+
+export function setCourseCardFavorite(cardId: string, favorite: boolean, expectedUpdatedAt: number): Promise<Card> {
+  return request<Card>(`/api/workbench/cards/${cardId}/favorite`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ favorite, expected_updated_at: expectedUpdatedAt }),
+  }, parseCourseCard);
 }
 
 export function listChapterNoteBlocks(chapterId: string): Promise<NoteBlock[]> {

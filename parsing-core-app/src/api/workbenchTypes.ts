@@ -46,6 +46,18 @@ export interface Card {
   title: string;
   content: string;
   source_refs: string[];
+  tags: string[];
+  status: "ACTIVE" | "ARCHIVED";
+  favorite: boolean;
+  updated_at: number;
+}
+
+export interface CourseCardPatch {
+  title: string;
+  content: string;
+  tags: string[];
+  status: "ACTIVE" | "ARCHIVED";
+  expected_updated_at: number;
 }
 
 export interface NoteBlock {

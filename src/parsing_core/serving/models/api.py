@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 class BatchCreateRequest(BaseModel):
@@ -134,6 +136,44 @@ class CardResponse(BaseModel):
     title: str
     body: str
     favorite: bool
+
+
+class CourseCardResponse(BaseModel):
+    id: str
+    origin_type: Literal["chapter", "topic"]
+    origin_id: str
+    origin_title: str
+    card_type: str
+    title: str
+    content: str
+    source_refs: list[str]
+    tags: list[str]
+    status: Literal["ACTIVE", "ARCHIVED"]
+    favorite: bool
+    updated_at: int
+
+
+class CourseCardPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=20_000)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    status: Literal["ACTIVE", "ARCHIVED"]
+    expected_updated_at: int = Field(ge=0)
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, tags: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(tag.strip() for tag in tags))
+        if any(not tag or len(tag) > 40 for tag in cleaned):
+            raise ValueError("tags must be non-empty and at most 40 characters")
+        return cleaned
+
+
+class CourseCardFavoriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    favorite: bool
+    expected_updated_at: int = Field(ge=0)
 
 
 class NoteBlockResponse(BaseModel):

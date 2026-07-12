@@ -1546,7 +1546,8 @@ class WorkbenchRepository:
 
     def list_topic_cards(self, topic_id: str) -> list[TopicCard]:
         rows = self.conn.execute(
-            "SELECT * FROM wb_topic_cards WHERE topic_id = ? ORDER BY created_at, rowid",
+            "SELECT id, topic_id, card_type, title, content, source_refs_json, created_at "
+            "FROM wb_topic_cards WHERE topic_id = ? ORDER BY created_at, rowid",
             (topic_id,),
         ).fetchall()
         return [TopicCard(*row) for row in rows]
@@ -2075,7 +2076,8 @@ class WorkbenchRepository:
     def list_cards(self, course_id: str) -> list[Card]:
         rows = self.conn.execute(
             """
-            SELECT * FROM wb_cards
+            SELECT id, course_id, chapter_id, kind, title, body, favorite, created_at, updated_at
+            FROM wb_cards
             WHERE course_id = ?
             ORDER BY favorite DESC, updated_at DESC
             """,
@@ -2090,13 +2092,14 @@ class WorkbenchRepository:
             SELECT wc.id, 'chapter' AS origin_type, wc.chapter_id AS origin_id,
                    ch.title AS origin_title, wc.kind AS card_type, wc.title,
                    wc.body AS content, json_array(wc.chapter_id) AS source_refs_json,
-                   ch.seq AS origin_seq
+                   ch.seq AS origin_seq, wc.tags_json, wc.status, wc.favorite, wc.updated_at
             FROM wb_cards wc
             JOIN wb_chapters ch ON ch.id = wc.chapter_id
             WHERE wc.course_id = ?
             UNION ALL
             SELECT tc.id, 'topic', tc.topic_id, t.title, tc.card_type, tc.title,
-                   tc.content, tc.source_refs_json, t.seq
+                   tc.content, tc.source_refs_json, t.seq, tc.tags_json, tc.status,
+                   tc.favorite, tc.updated_at
             FROM wb_topic_cards tc
             JOIN wb_topics t ON t.id = tc.topic_id
             WHERE t.course_id = ?
@@ -2116,13 +2119,115 @@ class WorkbenchRepository:
             "content",
             "source_refs_json",
             "origin_seq",
+            "tags_json",
+            "status",
+            "favorite",
+            "updated_at",
         )
-        return [dict(zip(keys, row, strict=True)) for row in rows]
+        return [
+            {
+                **dict(zip(keys, row, strict=True)),
+                "favorite": bool(row[11]),
+            }
+            for row in rows
+        ]
+
+    def _course_card(self, card_id: str) -> dict | None:
+        row = self.conn.execute(
+            """
+            SELECT wc.id, 'chapter', wc.tags_json, wc.status, wc.favorite, wc.updated_at,
+                   wc.title, wc.body, wc.course_id, wc.chapter_id, ch.title, wc.kind,
+                   json_array(wc.chapter_id)
+            FROM wb_cards wc JOIN wb_chapters ch ON ch.id = wc.chapter_id WHERE wc.id = ?
+            UNION ALL
+            SELECT tc.id, 'topic', tc.tags_json, tc.status, tc.favorite, tc.updated_at,
+                   tc.title, tc.content, t.course_id, tc.topic_id, t.title, tc.card_type,
+                   tc.source_refs_json
+            FROM wb_topic_cards tc JOIN wb_topics t ON t.id = tc.topic_id WHERE tc.id = ?
+            """,
+            (card_id, card_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0],
+            "origin_type": row[1],
+            "tags": json.loads(row[2]),
+            "status": row[3],
+            "favorite": bool(row[4]),
+            "updated_at": row[5],
+            "title": row[6],
+            "content": row[7],
+            "course_id": row[8],
+            "origin_id": row[9],
+            "origin_title": row[10],
+            "card_type": row[11],
+            "source_refs": json.loads(row[12]),
+        }
+
+    def update_course_card(
+        self,
+        card_id: str,
+        *,
+        title: str,
+        content: str,
+        tags: list[str],
+        status: str,
+        expected_updated_at: int,
+    ) -> dict:
+        current = self._course_card(card_id)
+        if current is None:
+            raise LookupError("card not found")
+        if current["updated_at"] != expected_updated_at:
+            raise ValueError("card changed")
+        updated_at = max(_now(), expected_updated_at + 1)
+        table = "wb_cards" if current["origin_type"] == "chapter" else "wb_topic_cards"
+        content_column = "body" if table == "wb_cards" else "content"
+        with self._atomic(immediate=True):
+            cursor = self.conn.execute(
+                f"UPDATE {table} SET title = ?, {content_column} = ?, tags_json = ?, "
+                "status = ?, updated_at = ? WHERE id = ? AND updated_at = ?",
+                (
+                    title,
+                    content,
+                    json.dumps(tags, ensure_ascii=False),
+                    status,
+                    updated_at,
+                    card_id,
+                    expected_updated_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("card changed")
+        return self._course_card(card_id)
+
+    def set_course_card_favorite(
+        self,
+        card_id: str,
+        favorite: bool,
+        expected_updated_at: int,
+    ) -> dict:
+        current = self._course_card(card_id)
+        if current is None:
+            raise LookupError("card not found")
+        if current["updated_at"] != expected_updated_at:
+            raise ValueError("card changed")
+        updated_at = max(_now(), expected_updated_at + 1)
+        table = "wb_cards" if current["origin_type"] == "chapter" else "wb_topic_cards"
+        with self._atomic(immediate=True):
+            cursor = self.conn.execute(
+                f"UPDATE {table} SET favorite = ?, updated_at = ? WHERE id = ? AND updated_at = ?",
+                (int(favorite), updated_at, card_id, expected_updated_at),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("card changed")
+        return self._course_card(card_id)
 
     def list_cards_by_chapter(self, chapter_id: str) -> list[Card]:
         rows = self.conn.execute(
             """
-            SELECT * FROM wb_cards
+            SELECT id, course_id, chapter_id, kind, title, body, favorite, created_at, updated_at
+            FROM wb_cards
             WHERE chapter_id = ?
             ORDER BY updated_at DESC
             """,

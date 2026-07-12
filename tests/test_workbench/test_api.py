@@ -80,6 +80,46 @@ def test_create_course_and_list(tmp_path):
     assert res.json()[0]["id"] == course_id
 
 
+def test_course_card_api_edits_filters_and_favorites_with_cas(tmp_path):
+    c = client(tmp_path)
+    course, _source, chapter = confirmed_chapter(c, course_root(tmp_path))
+    repo = routes_workbench._repo(get_scheduler())
+    created = repo.create_card(course["id"], chapter["id"], "viewpoint", "定位", "定位是选择。")
+
+    listed = c.get(f"/api/workbench/courses/{course['id']}/cards")
+    assert listed.status_code == 200
+    card = listed.json()[0]
+    assert card["favorite"] is False
+    assert card["tags"] == []
+    assert card["status"] == "ACTIVE"
+
+    edited = c.patch(
+        f"/api/workbench/cards/{created.id}",
+        json={
+            "title": "定位与取舍",
+            "content": "战略意味着明确放弃。",
+            "tags": ["战略", "定位"],
+            "status": "ARCHIVED",
+            "expected_updated_at": card["updated_at"],
+        },
+    )
+    assert edited.status_code == 200
+    assert edited.json()["tags"] == ["战略", "定位"]
+
+    conflict = c.patch(
+        f"/api/workbench/cards/{created.id}/favorite",
+        json={"favorite": True, "expected_updated_at": card["updated_at"]},
+    )
+    assert conflict.status_code == 409
+
+    favorite = c.patch(
+        f"/api/workbench/cards/{created.id}/favorite",
+        json={"favorite": True, "expected_updated_at": edited.json()["updated_at"]},
+    )
+    assert favorite.status_code == 200
+    assert favorite.json()["favorite"] is True
+
+
 def test_create_course_accepts_absolute_root_outside_workbench_base(tmp_path):
     c = client(tmp_path)
     root = tmp_path / "outside"

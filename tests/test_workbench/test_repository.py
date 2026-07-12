@@ -45,6 +45,61 @@ def test_cards_can_be_edited_and_favorited(tmp_path):
     assert cards[0].favorite is True
 
 
+def test_course_cards_support_metadata_and_compare_and_swap(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("营销管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "营销教材")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", "/tmp/ch1.md")
+    card = r.create_card(course.id, chapter.id, "viewpoint", "定位", "定位是选择。")
+
+    updated = r.update_course_card(
+        card.id,
+        title="定位与取舍",
+        content="战略意味着明确放弃。",
+        tags=["战略", "定位"],
+        status="ARCHIVED",
+        expected_updated_at=card.updated_at,
+    )
+
+    assert updated["tags"] == ["战略", "定位"]
+    assert updated["status"] == "ARCHIVED"
+    assert updated["updated_at"] > card.updated_at
+    with pytest.raises(ValueError, match="card changed"):
+        r.set_course_card_favorite(card.id, True, card.updated_at)
+
+
+def test_topic_course_cards_persist_edits_and_favorites(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    topic = r.create_topic(course.id, 0, "竞争优势", "")
+    card = r.replace_topic_cards(
+        topic.id,
+        [
+            {
+                "card_type": "viewpoint",
+                "title": "壁垒",
+                "content": "优势需要持续。",
+                "source_refs_json": "[]",
+            }
+        ],
+    )[0]
+    listed = next(item for item in r.list_course_cards(course.id) if item["id"] == card.id)
+
+    edited = r.update_course_card(
+        card.id,
+        title="持续壁垒",
+        content="优势需要难以复制。",
+        tags=["战略"],
+        status="ACTIVE",
+        expected_updated_at=listed["updated_at"],
+    )
+    favorited = r.set_course_card_favorite(card.id, True, edited["updated_at"])
+
+    assert favorited["origin_type"] == "topic"
+    assert favorited["favorite"] is True
+    assert r.list_topic_cards(topic.id)[0].title == "持续壁垒"
+
+
 def test_chapter_source_must_belong_to_course(tmp_path):
     r = repo(tmp_path)
     course_a = r.create_course("战略管理", "", str(tmp_path / "a"))
