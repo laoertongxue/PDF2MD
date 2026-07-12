@@ -34,7 +34,21 @@ PDF2MD 不是普通的“PDF 转 Markdown”工具。它的目标是帮助你重
 
 下载地址：[GitHub Releases](https://github.com/laoertongxue/PDF2MD/releases)
 
-下载 `.dmg` 后安装 `PDF2MD.app`。当前 Apple Silicon 版本已内置完整 Python runtime；公开分发的 Developer ID 签名与公证仍待配置。
+推荐下载 `PDF2MD_<版本>_aarch64.dmg`，打开后把 `PDF2MD.app` 拖入“应用程序”。
+若 DMG 无法使用，可下载 `PDF2MD_<版本>_aarch64.app.zip`，解压后把应用移入“应用程序”。
+两种资产内容相同，均为 Apple Silicon 版本并内置完整 Python runtime。
+
+当前公开包使用 ad-hoc 签名，尚未配置 Developer ID 签名与 Apple 公证。首次启动若被
+Gatekeeper 拦截，请在 Finder 中按住 Control 点按 `PDF2MD.app`，选择“打开”并再次确认；
+若系统仍阻止启动，请前往“系统设置 > 隐私与安全性”，在对应提示旁选择“仍要打开”。
+只对从本仓库 Releases 下载且校验值匹配的应用执行此操作。
+
+每个 CI Release 同时提供 DMG、ZIP 及各自的 `.sha256`。Actions artifact 名称包含 workflow
+run ID，发布资产由同一次 run 的 artifact 下载后创建，并带有 GitHub artifact attestation。
+CI 在标准 `macos-14` Intel runner 上交叉构建并验证 arm64 Mach-O、包结构、版本、校验值和
+ad-hoc 签名；它不会把 Intel runner 上无法执行的 Apple Silicon 冷启动描述为已通过。
+手工 Release 记录只有在 Apple Silicon 真机完成安装、启动与本地服务检查后，才会单独标注
+“Apple Silicon 实机验证通过”。
 
 ### 典型流程
 
@@ -88,8 +102,9 @@ parsing-core-app/src-tauri/target/release/bundle/dmg/
 同名章节区分、主题映射、融合来源跳转、卡片筛选、后端错误恢复和同页双 Mermaid 预览。
 截图与机器可读结果见 [Task 12 验收证据](docs/acceptance/task-12/README.md)。
 
-Release 摘要：版本一致性与真实网络 E2E 已加入发布门禁；Mermaid 11 预览已通过真实解析、
-安全渲染、错误节点清理和响应式无溢出验证。
+CI 门禁摘要：版本一致性与真实网络 E2E 已加入发布门禁；Mermaid 11 预览已通过真实解析、
+安全渲染、错误节点清理和响应式无溢出验证。此处是 CI 结果，不等同于手工 Apple Silicon
+实机安装验收。
 
 ### 路线图
 
@@ -98,7 +113,6 @@ Release 摘要：版本一致性与真实网络 E2E 已加入发布门禁；Merm
 - 更稳健的 PDF 章节识别
 - Word / PPT / Excel / 图片等多格式资料工作流
 - 更完整的精读模板和写作卡片模板
-- macOS 签名与公证
 - Windows / Linux 客户端
 
 ### License
@@ -129,7 +143,25 @@ The first downloadable client is a macOS Apple Silicon preview.
 
 Download from [GitHub Releases](https://github.com/laoertongxue/PDF2MD/releases).
 
-The Apple Silicon build includes a fully embedded Python runtime. Developer ID signing and notarization still require release credentials.
+Prefer `PDF2MD_<version>_aarch64.dmg`, then drag `PDF2MD.app` into Applications.
+If the DMG is unavailable, use `PDF2MD_<version>_aarch64.app.zip`, unzip it, and move
+the app into Applications. Both assets contain the same Apple Silicon app with a fully
+embedded Python runtime.
+
+The public build is currently ad-hoc signed; Developer ID signing and Apple notarization
+are not configured. If Gatekeeper blocks the first launch, Control-click `PDF2MD.app` in
+Finder, choose **Open**, and confirm. If macOS still blocks it, go to **System Settings >
+Privacy & Security** and choose **Open Anyway** for the matching prompt. Do this only for
+an app downloaded from this repository's Releases whose checksum matches.
+
+Each CI release includes the DMG, ZIP, and a `.sha256` file for each. The Actions artifact
+name contains the workflow run ID; release assets are downloaded from that same run before
+the GitHub Release is created, and GitHub artifact attestations record their provenance.
+CI cross-compiles on a standard Intel `macos-14` runner and verifies the arm64 Mach-O files,
+bundle structure, version, checksums, and ad-hoc signature. It does not claim an Apple Silicon
+cold launch on hardware that cannot execute the app. A manual release record says **Apple
+Silicon hardware verified** only after install, launch, and local-service checks on an Apple
+Silicon Mac.
 
 ### Development
 

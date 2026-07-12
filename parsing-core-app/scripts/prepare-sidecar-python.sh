@@ -8,8 +8,8 @@ readonly PYTHON_URL="https://github.com/astral-sh/python-build-standalone/releas
 readonly PYTHON_SHA256="${PDF2MD_TEST_PYTHON_SHA256:-1ad1ed518447005d4b6dfa16d4f847d45790e17e94e30164a0a6e6c79a99730f}"
 
 machine="${PDF2MD_MACHINE:-$(uname -m)}"
-if [[ "$machine" != "arm64" ]]; then
-  echo "embedded Python runtime requires arm64, got: $machine" >&2
+if [[ "$machine" != "arm64" && "$machine" != "x86_64" ]]; then
+  echo "embedded Python runtime packaging requires macOS arm64 or x86_64, got: $machine" >&2
   exit 64
 fi
 
@@ -86,7 +86,9 @@ runtime_is_valid() {
   [[ "$(readlink "$candidate/python/bin/python")" == "python3.13" ]] || return 1
   [[ "$(readlink "$candidate/python/bin/python3")" == "python3.13" ]] || return 1
   file "$candidate/python/bin/python3.13" | grep -q 'arm64' || return 1
-  [[ "$(PYTHONDONTWRITEBYTECODE=1 "$candidate/python/bin/python3" -c 'import platform; print(platform.python_version())')" == "$PYTHON_VERSION" ]] || return 1
+  if [[ "$machine" == "arm64" ]]; then
+    [[ "$(PYTHONDONTWRITEBYTECODE=1 "$candidate/python/bin/python3" -c 'import platform; print(platform.python_version())')" == "$PYTHON_VERSION" ]] || return 1
+  fi
   (cd "$candidate/python" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256) \
     > "$actual_manifest"
   cmp -s "$candidate_manifest" "$actual_manifest" || { rm -f "$actual_manifest"; return 1; }
@@ -111,12 +113,38 @@ if ! runtime_is_valid "$target"; then
   runtime="$temporary/python"
   test -x "$runtime/bin/python3"
   file "$runtime/bin/python3.13" | grep -q 'arm64'
-  [[ "$(PYTHONDONTWRITEBYTECODE=1 "$runtime/bin/python3" -c 'import platform; print(platform.python_version())')" == "$PYTHON_VERSION" ]]
-  "$runtime/bin/python3" -m pip install \
-    --disable-pip-version-check \
-    --no-compile \
-    --target "$runtime/lib/python3.13/site-packages" \
-    "$repo_dir[serve]"
+  if [[ "$machine" == "arm64" ]]; then
+    [[ "$(PYTHONDONTWRITEBYTECODE=1 "$runtime/bin/python3" -c 'import platform; print(platform.python_version())')" == "$PYTHON_VERSION" ]]
+    "$runtime/bin/python3" -m pip install \
+      --disable-pip-version-check \
+      --no-compile \
+      --target "$runtime/lib/python3.13/site-packages" \
+      "$repo_dir[serve]"
+  else
+    requirements=()
+    while IFS= read -r requirement; do
+      requirements+=("$requirement")
+    done < <(python3 - "$repo_dir/pyproject.toml" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as handle:
+    project = tomllib.load(handle)["project"]
+for requirement in [*project.get("dependencies", []), *project.get("optional-dependencies", {}).get("serve", [])]:
+    print(requirement)
+PY
+    )
+    python3 -m pip install \
+      --disable-pip-version-check \
+      --no-compile \
+      --platform macosx_11_0_arm64 \
+      --python-version 3.13 \
+      --implementation cp \
+      --abi cp313 \
+      --only-binary=:all: \
+      --target "$runtime/lib/python3.13/site-packages" \
+      "${requirements[@]}"
+  fi
   sanitize_runtime "$runtime"
   (cd "$runtime" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256) \
     > "$temporary/.runtime-manifest.sha256"

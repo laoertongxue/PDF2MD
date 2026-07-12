@@ -5,13 +5,17 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 jobs:
   macos-apple-silicon:
-    name: Build macOS Apple Silicon DMG
-    runs-on: macos-14-xlarge
+    name: Build macOS Apple Silicon release assets
+    runs-on: macos-14
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      artifact-name: ${{ steps.metadata.outputs.artifact-name }}
 
     steps:
       - name: Checkout
@@ -31,17 +35,16 @@ jobs:
           cache: pip
 
       - name: Validate release tag and resolve version
+        id: version
         shell: bash
         run: |
           version="$(python scripts/release_version.py --github-ref-name "$GITHUB_REF_NAME")"
           printf 'VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
-      - name: Require Apple Silicon runner
-        run: |
-          test "$(uname -m)" = "arm64" || {
-            echo "release requires an arm64 runner" >&2
-            exit 1
-          }
+      - name: Resolve auditable artifact name
+        id: metadata
+        run: printf 'artifact-name=pdf2md-v%s-run-%s\n' "$VERSION" "${{ github.run_id }}" >> "$GITHUB_OUTPUT"
 
       - name: Install frontend dependencies
         working-directory: parsing-core-app
@@ -61,51 +64,86 @@ jobs:
           npm test
           npm run build
 
-      - name: Prepare embedded Python runtime
+      - name: Install Apple Silicon Rust target
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Prepare embedded Apple Silicon Python runtime
         run: ./parsing-core-app/scripts/prepare-sidecar-python.sh
 
       - name: Run Rust quality gate
         working-directory: parsing-core-app/src-tauri
-        run: cargo check
+        run: cargo check --target aarch64-apple-darwin
 
-      - name: Build desktop app
+      - name: Build Apple Silicon desktop app
         working-directory: parsing-core-app
-        run: npm run tauri build
+        run: npm run tauri build -- --target aarch64-apple-darwin
 
-      - name: Verify and checksum release artifacts
+      - name: Verify and stage release assets
         shell: bash
         run: |
-          apps=()
-          while IFS= read -r artifact; do
-            app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$artifact/Contents/Info.plist")"
-            if [ "$app_version" = "$VERSION" ]; then
-              apps+=("$artifact")
-            fi
-          done < <(find parsing-core-app/src-tauri/target/release/bundle/macos -maxdepth 1 -type d -name 'PDF2MD.app')
-          dmgs=()
-          while IFS= read -r artifact; do dmgs+=("$artifact"); done < <(find parsing-core-app/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name "PDF2MD_${VERSION}_aarch64.dmg")
-          test "${#apps[@]}" -eq 1 || { echo "expected exactly one app for version $VERSION" >&2; exit 1; }
-          test "${#dmgs[@]}" -eq 1 || { echo "expected exactly one dmg for version $VERSION" >&2; exit 1; }
-          ./scripts/check-release-sidecar.sh "${apps[0]}"
-          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
-          ./scripts/test-release-sidecar.sh "${apps[0]}"
-          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
-          PDF2MD_APP_PATH="${apps[0]}" pytest -q tests/test_version_consistency.py
-          app_zip="parsing-core-app/src-tauri/target/release/bundle/macos/PDF2MD_${VERSION}_aarch64.app.zip"
-          ditto -c -k --sequesterRsrc --keepParent "${apps[0]}" "$app_zip"
-          app_sha_path="${app_zip}.sha256"
-          dmg_sha_path="${dmgs[0]}.sha256"
-          (cd "$(dirname "$app_zip")" && shasum -a 256 "$(basename "$app_zip")") > "$app_sha_path"
-          (cd "$(dirname "${dmgs[0]}")" && shasum -a 256 "$(basename "${dmgs[0]}")") > "$dmg_sha_path"
-          printf 'APP_PATH=%s\nAPP_SHA_PATH=%s\nDMG_PATH=%s\nDMG_SHA_PATH=%s\n' "$app_zip" "$app_sha_path" "${dmgs[0]}" "$dmg_sha_path" >> "$GITHUB_ENV"
+          bundle="parsing-core-app/src-tauri/target/aarch64-apple-darwin/release/bundle"
+          app="$bundle/macos/PDF2MD.app"
+          dmg="$bundle/dmg/PDF2MD_${VERSION}_aarch64.dmg"
+          test -d "$app"
+          test -f "$dmg"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION"
+          app_executables=("$app/Contents/MacOS/parsing-core-app")
+          test "${#app_executables[@]}" -eq 1
+          file "${app_executables[0]}" | grep -q 'arm64'
+          file "$app/Contents/Resources/python-runtime/bin/python3.13" | grep -q 'arm64'
+          ./scripts/check-release-sidecar.sh "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          PDF2MD_APP_PATH="$app" pytest -q tests/test_version_consistency.py
 
-      - name: Create GitHub Release
+          mkdir release-assets
+          app_zip="release-assets/PDF2MD_${VERSION}_aarch64.app.zip"
+          dmg_copy="release-assets/$(basename "$dmg")"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$app_zip"
+          cp "$dmg" "$dmg_copy"
+          (cd release-assets && shasum -a 256 "$(basename "$app_zip")" > "$(basename "$app_zip").sha256")
+          (cd release-assets && shasum -a 256 "$(basename "$dmg_copy")" > "$(basename "$dmg_copy").sha256")
+
+      - name: Upload release assets to this workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.metadata.outputs.artifact-name }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attest release asset provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: release-assets/*
+
+  release:
+    name: Publish GitHub Release from workflow artifact
+    needs: macos-apple-silicon
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download assets from this workflow run
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.macos-apple-silicon.outputs.artifact-name }}
+          path: release-assets
+
+      - name: Verify downloaded asset set
+        env:
+          VERSION: ${{ needs.macos-apple-silicon.outputs.version }}
+        run: |
+          test -f "release-assets/PDF2MD_${VERSION}_aarch64.dmg"
+          test -f "release-assets/PDF2MD_${VERSION}_aarch64.dmg.sha256"
+          test -f "release-assets/PDF2MD_${VERSION}_aarch64.app.zip"
+          test -f "release-assets/PDF2MD_${VERSION}_aarch64.app.zip.sha256"
+          (cd release-assets && sha256sum --check *.sha256)
+
+      - name: Create GitHub Release from verified CI assets
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ${{ env.APP_PATH }}
-            ${{ env.APP_SHA_PATH }}
-            ${{ env.DMG_PATH }}
-            ${{ env.DMG_SHA_PATH }}
+          files: release-assets/*
           fail_on_unmatched_files: true
           generate_release_notes: true

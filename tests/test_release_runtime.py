@@ -3,6 +3,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import textwrap
 import uuid
@@ -65,7 +66,10 @@ def _isolated_prepare(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     scripts = repo / "parsing-core-app/scripts"
     scripts.mkdir(parents=True)
     (repo / "src").mkdir()
-    (repo / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text(
+        "[project]\nname='fixture'\ndependencies=['fixture-dependency>=1']\n",
+        encoding="utf-8",
+    )
     (scripts / PREPARE.name).write_bytes(PREPARE.read_bytes())
     (scripts / RUNTIME_HELPER.name).write_bytes(RUNTIME_HELPER.read_bytes())
 
@@ -123,10 +127,33 @@ def _isolated_prepare(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     return scripts / PREPARE.name, env, install_log
 
 
-def test_prepare_rejects_non_arm64():
-    result = _prepare(PDF2MD_MACHINE="x86_64")
-    assert result.returncode == 64
-    assert "requires arm64" in result.stderr
+def test_prepare_supports_x86_64_cross_packaging(tmp_path):
+    prepare, env, install_log = _isolated_prepare(tmp_path)
+    fake_host_python = tmp_path / "bin/python3"
+    fake_host_python.write_text(
+        "#!/bin/bash\n"
+        'printf \'CALL %s\\n\' "$*" >> "$PDF2MD_TEST_INSTALL_LOG"\n'
+        "if [[ ${1:-} == -m && ${2:-} == pip ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        f'exec {sys.executable} "$@"\n',
+        encoding="utf-8",
+    )
+    fake_host_python.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(prepare)],
+        cwd=prepare.parents[2],
+        env={**os.environ, **env, "PDF2MD_MACHINE": "x86_64"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    install = install_log.read_text(encoding="utf-8")
+    assert "--platform macosx_11_0_arm64" in install
+    assert "--python-version 3.13" in install
+    assert "--only-binary=:all:" in install
 
 
 def test_prepare_repairs_missing_python_and_tampered_stdlib():
@@ -164,7 +191,7 @@ def test_prepare_replaces_corrupt_cached_archive(tmp_path):
         "while [[ $# -gt 0 ]]; do\n"
         "  if [[ $1 == --output ]]; then output=$2; shift 2; else shift; fi\n"
         "done\n"
-        "cp \"$PDF2MD_TEST_ARCHIVE_SOURCE\" \"$output\"\n",
+        'cp "$PDF2MD_TEST_ARCHIVE_SOURCE" "$output"\n',
         encoding="utf-8",
     )
     fake_curl.chmod(0o755)
