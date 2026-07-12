@@ -30,6 +30,12 @@ jobs:
           python-version: "3.13"
           cache: pip
 
+      - name: Validate release tag and resolve version
+        shell: bash
+        run: |
+          version="$(python scripts/release_version.py --github-ref-name "$GITHUB_REF_NAME")"
+          printf 'VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+
       - name: Require Apple Silicon runner
         run: |
           test "$(uname -m)" = "arm64" || {
@@ -70,28 +76,36 @@ jobs:
         shell: bash
         run: |
           apps=()
-          while IFS= read -r artifact; do apps+=("$artifact"); done < <(find parsing-core-app/src-tauri/target/release/bundle/macos -maxdepth 1 -type d -name 'PDF2MD.app')
+          while IFS= read -r artifact; do
+            app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$artifact/Contents/Info.plist")"
+            if [ "$app_version" = "$VERSION" ]; then
+              apps+=("$artifact")
+            fi
+          done < <(find parsing-core-app/src-tauri/target/release/bundle/macos -maxdepth 1 -type d -name 'PDF2MD.app')
           dmgs=()
-          while IFS= read -r artifact; do dmgs+=("$artifact"); done < <(find parsing-core-app/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name 'PDF2MD_0.1.2_aarch64.dmg')
-          test "${#apps[@]}" -eq 1 || { echo "expected exactly one 0.1.2 app" >&2; exit 1; }
-          test "${#dmgs[@]}" -eq 1 || { echo "expected exactly one 0.1.2 dmg" >&2; exit 1; }
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${apps[0]}/Contents/Info.plist")" = "0.1.2"
+          while IFS= read -r artifact; do dmgs+=("$artifact"); done < <(find parsing-core-app/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name "PDF2MD_${VERSION}_aarch64.dmg")
+          test "${#apps[@]}" -eq 1 || { echo "expected exactly one app for version $VERSION" >&2; exit 1; }
+          test "${#dmgs[@]}" -eq 1 || { echo "expected exactly one dmg for version $VERSION" >&2; exit 1; }
           ./scripts/check-release-sidecar.sh "${apps[0]}"
           codesign --verify --deep --strict --verbose=2 "${apps[0]}"
           ./scripts/test-release-sidecar.sh "${apps[0]}"
           codesign --verify --deep --strict --verbose=2 "${apps[0]}"
           PDF2MD_APP_PATH="${apps[0]}" pytest -q tests/test_version_consistency.py
-          app_zip="parsing-core-app/src-tauri/target/release/bundle/macos/PDF2MD_0.1.2_aarch64.app.zip"
+          app_zip="parsing-core-app/src-tauri/target/release/bundle/macos/PDF2MD_${VERSION}_aarch64.app.zip"
           ditto -c -k --sequesterRsrc --keepParent "${apps[0]}" "$app_zip"
-          (cd "$(dirname "${dmgs[0]}")" && shasum -a 256 "$(basename "${dmgs[0]}")") > "${dmgs[0]}.sha256"
-          printf 'APP_PATH=%s\nDMG_PATH=%s\nSHA_PATH=%s\n' "$app_zip" "${dmgs[0]}" "${dmgs[0]}.sha256" >> "$GITHUB_ENV"
+          app_sha_path="${app_zip}.sha256"
+          dmg_sha_path="${dmgs[0]}.sha256"
+          (cd "$(dirname "$app_zip")" && shasum -a 256 "$(basename "$app_zip")") > "$app_sha_path"
+          (cd "$(dirname "${dmgs[0]}")" && shasum -a 256 "$(basename "${dmgs[0]}")") > "$dmg_sha_path"
+          printf 'APP_PATH=%s\nAPP_SHA_PATH=%s\nDMG_PATH=%s\nDMG_SHA_PATH=%s\n' "$app_zip" "$app_sha_path" "${dmgs[0]}" "$dmg_sha_path" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             ${{ env.APP_PATH }}
+            ${{ env.APP_SHA_PATH }}
             ${{ env.DMG_PATH }}
-            ${{ env.SHA_PATH }}
+            ${{ env.DMG_SHA_PATH }}
           fail_on_unmatched_files: true
           generate_release_notes: true
