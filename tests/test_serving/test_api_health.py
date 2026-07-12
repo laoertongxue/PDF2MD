@@ -5,7 +5,12 @@ from fastapi.testclient import TestClient
 
 from parsing_core.llm.stub_client import StubLLMClient
 from parsing_core.orchestrator import Orchestrator
-from parsing_core.serving.serve import allowed_cors_origins, build_app, require_loopback_host, run_uvicorn
+from parsing_core.serving.serve import (
+    allowed_cors_origins,
+    build_app,
+    require_loopback_host,
+    run_uvicorn,
+)
 from parsing_core.storage.fs_layout import FsLayout
 from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
@@ -46,9 +51,7 @@ def test_health_requires_matching_instance_token(tmp_path, monkeypatch):
     client = make_test_app(tmp_path, monkeypatch, health_token="instance-two")
 
     assert client.get("/health").status_code == 403
-    stale_response = client.get(
-        "/health", headers={"X-PDF2MD-Health-Token": "instance-one"}
-    )
+    stale_response = client.get("/health", headers={"X-PDF2MD-Health-Token": "instance-one"})
     assert stale_response.status_code == 403
     response = client.get("/health", headers={"X-PDF2MD-Health-Token": "instance-two"})
 
