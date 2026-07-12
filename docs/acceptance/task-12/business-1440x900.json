@@ -1,0 +1,79 @@
+{
+  "fixtureBaseUrl": "http://127.0.0.1:4178/acceptance/task-12.html",
+  "screenshotMode": "fullPage=false",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "scenarios": {
+    "import-queue": {
+      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=import-queue",
+      "assertions": {
+        "twoQueuedFiles": true,
+        "independentStatuses": true,
+        "existingTextbooksVisible": true,
+        "exactViewport": true,
+        "noHorizontalOverflow": true
+      },
+      "passed": true
+    },
+    "topic-map": {
+      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=topic-map",
+      "assertions": {
+        "duplicateChaptersSeparated": true,
+        "twoSourceGroups": true,
+        "mappingsVisible": true,
+        "saveActionAvailable": true,
+        "exactViewport": true,
+        "noHorizontalOverflow": true
+      },
+      "passed": true
+    },
+    "fusion-sources": {
+      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=fusion-sources",
+      "assertions": {
+        "twoSourceLinks": true,
+        "strategicRoute": true,
+        "organizationRoute": true,
+        "exactViewport": true,
+        "noHorizontalOverflow": true
+      },
+      "passed": true
+    },
+    "card-filter": {
+      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=card-filter",
+      "assertions": {
+        "fusionFilterSelected": true,
+        "onlyTopicCardsVisible": true,
+        "chapterCardsHidden": true,
+        "exactViewport": true,
+        "noHorizontalOverflow": true
+      },
+      "passed": true
+    },
+    "error-stop": {
+      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=error-stop",
+      "assertions": {
+        "errorVisible": true,
+        "loadingStopped": true,
+        "recoveryAvailable": true,
+        "failedRoundRecorded": true,
+        "exactViewport": true,
+        "noHorizontalOverflow": true
+      },
+      "passed": true
+    },
+    "recovery-complete": {
+      "url": "http://127.0.0.1:4178/acceptance/task-12.html?scenario=recovery-complete",
+      "assertions": {
+        "failedStateRestored": true,
+        "recoveryMessageVisible": true,
+        "regenerateEnabled": true,
+        "recoveryActionRemoved": true,
+        "exactViewport": true,
+        "noHorizontalOverflow": true
+      },
+      "passed": true
+    }
+  }
+}

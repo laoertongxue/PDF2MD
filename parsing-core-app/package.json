@@ -10,7 +10,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",
-    "accept:task-12": "node scripts/accept-task-12-mermaid.mjs",
+    "accept:task-12": "node scripts/accept-task-12.mjs",
     "tauri": "bash scripts/tauri.sh"
   },
   "dependencies": {
