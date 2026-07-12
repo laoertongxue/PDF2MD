@@ -1,31 +1,41 @@
 {
-  "viewport": "1024x768",
-  "svg": 2,
-  "role_alert": 0,
-  "syntax_error": 0,
-  "document": {
-    "scrollWidth": 1024,
-    "clientWidth": 1024,
-    "fits": true
+  "fixtureUrl": "http://127.0.0.1:4178/acceptance/task-12-mermaid.html",
+  "screenshotModes": {
+    "viewport": "fullPage=false",
+    "full": "fullPage=true"
   },
-  "diagrams": [
-    {
-      "index": 1,
-      "scrollWidth": 144,
-      "clientWidth": 144,
-      "fits": true,
-      "svgWidth": 140,
-      "svgHeight": 278,
-      "labels": ["核心概念", "融合框架", "组织设计"]
-    },
-    {
-      "index": 2,
-      "scrollWidth": 144,
-      "clientWidth": 144,
-      "fits": true,
-      "svgWidth": 144,
-      "svgHeight": 20.640625,
-      "labels": ["识别问题", "应用框架", "复盘改进"]
-    }
-  ]
+  "title": "Task 12 Mermaid 浏览器验收",
+  "viewport": {
+    "width": 1024,
+    "height": 768
+  },
+  "page": {
+    "scrollWidth": 1024,
+    "scrollHeight": 1272
+  },
+  "svgCount": 2,
+  "labels": [
+    "核心概念融合框架组织设计",
+    "识别问题应用框架复盘改进"
+  ],
+  "alerts": 0,
+  "forbidden": 0,
+  "dangerousAttributes": [],
+  "safeChineseLabel": true,
+  "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'",
+  "dialogs": [],
+  "externalRequests": [],
+  "cspViolations": [],
+  "assertions": {
+    "exactViewport": true,
+    "diagramsRendered": true,
+    "noRenderAlerts": true,
+    "sanitizerBlockedActiveContent": true,
+    "safeChineseLabelPreserved": true,
+    "noDialogs": true,
+    "noExternalRequests": true,
+    "noCspViolations": true,
+    "strictCspPresent": true
+  },
+  "passed": true
 }

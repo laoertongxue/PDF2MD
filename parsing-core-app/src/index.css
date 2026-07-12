@@ -42,3 +42,28 @@ body {
   height: auto;
   max-height: min(70vh, 720px);
 }
+
+.mermaid-preview .node rect,
+.mermaid-preview .node circle,
+.mermaid-preview .node ellipse,
+.mermaid-preview .node polygon,
+.mermaid-preview .node path {
+  fill: #ffffff;
+  stroke: #52525b;
+  stroke-width: 1px;
+}
+
+.mermaid-preview text,
+.mermaid-preview .nodeLabel {
+  fill: #18181b;
+  color: #18181b;
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.mermaid-preview .edgePath path,
+.mermaid-preview .flowchart-link {
+  fill: none;
+  stroke: #71717a;
+  stroke-width: 1.5px;
+}

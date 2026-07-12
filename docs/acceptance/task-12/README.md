@@ -1,8 +1,8 @@
 # Task 12 Acceptance Evidence
 
-Task 12 visual acceptance passed at both required desktop viewports. All captures were reviewed at
-their original resolution. They contain no loading skeleton, Mermaid syntax error, overlapping UI,
-or unrelated debug controls.
+Task 12 visual acceptance passed at both required desktop viewports. Workflow screenshots below
+remain historical full-page evidence. Mermaid security evidence is reproducible and explicitly
+separates viewport captures (`fullPage=false`) from full-page captures (`fullPage=true`).
 
 ## Evidence Matrix
 
@@ -14,19 +14,33 @@ or unrelated debug controls.
 | Course-card source filter | [PNG](card-filter-1440x900.png) | [PNG](card-filter-1024x768.png) | `融合精读` is selected and only topic-origin cards remain |
 | Backend error stops the run | [PNG](error-stop-1440x900.png) | [PNG](error-stop-1024x768.png) | Error text replaces the loading state and exposes `检查并恢复` |
 | Recovery completes | [PNG](recovery-complete-1440x900.png) | [PNG](recovery-complete-1024x768.png) | Status becomes `失败` and the enabled `重新生成` action is restored |
-| Two direct Mermaid previews on one page | [PNG](mermaid-full-1440x900.png) | [PNG](mermaid-full-1024x768.png) | Both labeled SVG diagrams are complete and non-empty |
-| Mermaid machine assertions | [JSON](mermaid-1440x900.json) | [JSON](mermaid-1024x768.json) | `svg=2`, alerts/errors are zero, document and diagram widths fit |
+| Mermaid viewport capture (`fullPage=false`) | [PNG](mermaid-viewport-1440x900.png) | [PNG](mermaid-viewport-1024x768.png) | Browser viewport is exactly the filename dimensions; Chinese SVG text is visible |
+| Mermaid full-page capture (`fullPage=true`) | [PNG](mermaid-full-1440x900.png) | [PNG](mermaid-full-1024x768.png) | Full fixture page, intentionally taller than the viewport |
+| Mermaid machine assertions | [JSON](mermaid-1440x900.json) | [JSON](mermaid-1024x768.json) | Two diagrams, exact viewport, XSS/CSP, external-request, dialog, and sanitizer assertions pass |
 
 ## Mermaid Result
 
-Both viewport result files record exactly two `.mermaid-preview svg` elements. Each SVG has a
-non-zero rendered size and three visible Chinese labels. `role_alert` and `syntax_error` are zero,
-and every recorded `scrollWidth` is less than or equal to its corresponding `clientWidth`.
+Run from `parsing-core-app`:
+
+```bash
+npm run accept:task-12
+```
+
+The script starts Vite on `http://127.0.0.1:4178` and opens the committed fixture at
+`/acceptance/task-12-mermaid.html`. Set `TASK12_PORT` to override the port. It renders two real
+Mermaid 11 diagrams with Chinese labels and an adversarial SVG containing event handlers,
+`foreignObject`, `style`, `use`, external resources, and an entity-encoded dangerous URL.
+
+Both JSON reports record `passed: true` and the exact browser viewport. Assertions require two
+Chinese-labeled SVG diagrams, zero render alerts, zero forbidden nodes/attributes, no dialogs,
+no external requests, no CSP violations, and a CSP containing `object-src 'none'` and
+`base-uri 'none'`. The safe Chinese label in the adversarial SVG must remain visible.
 
 ## Release Summary
 
 - Release version consistency and network E2E gates are enforced by commit `fa14d47`.
-- Mermaid 11 runtime parsing, safe rendering, temporary-error cleanup, and responsive containment
-  are covered by commit `b919a5b`.
+- Mermaid uses root-level `htmlLabels:false`, DOMPurify's SVG profile, and an explicit tag/attribute
+  allowlist. `foreignObject`, `style`, `use`, external resources, navigation attributes, event
+  handlers, and non-local `url(...)` values are rejected; local marker references remain allowed.
 - Task 12 desktop workflow evidence now covers import, mapping, fusion sources, card filtering,
   failure recovery, and two direct Mermaid previews at 1440x900 and 1024x768.

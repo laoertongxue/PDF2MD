@@ -10,12 +10,14 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",
+    "accept:task-12": "node scripts/accept-task-12-mermaid.mjs",
     "tauri": "bash scripts/tauri.sh"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.0.0",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",
+    "dompurify": "^3.4.12",
     "lucide-react": "^0.400.0",
     "mermaid": "^11.0.0",
     "react": "^19.0.0",
@@ -26,6 +28,7 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4.3.2",
     "@tauri-apps/cli": "^2.0.0",
     "@testing-library/jest-dom": "^6.9.1",
