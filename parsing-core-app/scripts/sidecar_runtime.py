@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import ctypes
-import errno
+import fcntl
 import json
 import os
 import shutil
@@ -46,21 +46,6 @@ def atomic_install(staged: Path, target: Path) -> None:
         raise OSError(error, os.strerror(error))
 
 
-def _rename_exclusive(source: Path, target: Path) -> bool:
-    libc = ctypes.CDLL(None, use_errno=True)
-    renamex_np = getattr(libc, "renamex_np", None)
-    if renamex_np is None:
-        raise OSError("exclusive rename is unavailable")
-    renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-    renamex_np.restype = ctypes.c_int
-    if renamex_np(os.fsencode(source), os.fsencode(target), 0x00000004) == 0:
-        return True
-    error = ctypes.get_errno()
-    if error in (errno.EEXIST, errno.ENOENT, errno.ENOTEMPTY):
-        return False
-    raise OSError(error, os.strerror(error))
-
-
 def _process_start(pid: int) -> str | None:
     result = subprocess.run(
         ["ps", "-o", "lstart=", "-p", str(pid)],
@@ -72,62 +57,54 @@ def _process_start(pid: int) -> str | None:
     return value or None
 
 
-def _owner_is_active(lock: Path) -> bool:
-    try:
-        owner = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
-        pid = owner["pid"]
-        token = owner["token"]
-        process_start = owner["process_start"]
-        if not isinstance(pid, int) or not isinstance(token, str) or not token:
-            return False
-        if not isinstance(process_start, str) or not process_start:
-            return False
-    except (KeyError, OSError, TypeError, ValueError):
-        return False
-    return _process_start(pid) == process_start
+def _write_owner(directory: Path, token: str, pid: int, process_start: str) -> None:
+    directory.mkdir()
+    (directory / "owner.json").write_text(
+        json.dumps(
+            {"token": token, "pid": pid, "process_start": process_start},
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
 
-def _claim_and_remove(lock: Path, token: str) -> bool:
-    claim = lock.with_name(f"{lock.name}.claim.{token}")
-    if not _rename_exclusive(lock, claim):
-        return False
-    shutil.rmtree(claim)
-    return True
-
-
-def acquire_lock(lock: Path, token: str) -> bool:
-    owner_pid = os.getppid()
+def _publish_owner(lock: Path, token: str) -> None:
+    owner_pid = os.getpid()
     process_start = _process_start(owner_pid)
     if process_start is None:
         raise OSError(f"cannot identify lock owner process: {owner_pid}")
     pending = lock.with_name(f".{lock.name}.owner.{token}")
     shutil.rmtree(pending, ignore_errors=True)
-    pending.mkdir()
-    (pending / "owner.json").write_text(
-        json.dumps(
-            {"token": token, "pid": owner_pid, "process_start": process_start},
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-    try:
-        while not _rename_exclusive(pending, lock):
-            if _owner_is_active(lock):
-                return False
-            if not _claim_and_remove(lock, token):
-                continue
-        return True
-    finally:
-        shutil.rmtree(pending, ignore_errors=True)
+    _write_owner(pending, token, owner_pid, process_start)
+    stale = lock.with_name(f"{lock.name}.stale.{token}")
+    shutil.rmtree(stale, ignore_errors=True)
+    if lock.exists():
+        os.rename(lock, stale)
+    os.rename(pending, lock)
+    shutil.rmtree(stale, ignore_errors=True)
 
 
-def release_lock(lock: Path, token: str) -> None:
+def _remove_owner(lock: Path, token: str) -> None:
     try:
         owner = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
-    if owner.get("token") == token:
-        _claim_and_remove(lock, token)
+    if owner.get("token") != token:
+        return
+    shutil.rmtree(lock)
+
+
+def run_with_lock(lock: Path, token: str, command: list[str]) -> int:
+    guard = lock.with_name(f"{lock.name}.guard")
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    with guard.open("a+") as guard_file:
+        fcntl.flock(guard_file.fileno(), fcntl.LOCK_EX)
+        _publish_owner(lock, token)
+        try:
+            return subprocess.run(command, check=False).returncode
+        finally:
+            _remove_owner(lock, token)
+            fcntl.flock(guard_file.fileno(), fcntl.LOCK_UN)
 
 
 def main() -> int:
@@ -138,12 +115,10 @@ def main() -> int:
     install = subparsers.add_parser("atomic-install")
     install.add_argument("staged", type=Path)
     install.add_argument("target", type=Path)
-    acquire = subparsers.add_parser("acquire-lock")
-    acquire.add_argument("lock", type=Path)
-    acquire.add_argument("token")
-    release = subparsers.add_parser("release-lock")
-    release.add_argument("lock", type=Path)
-    release.add_argument("token")
+    locked = subparsers.add_parser("run-with-lock")
+    locked.add_argument("lock", type=Path)
+    locked.add_argument("token")
+    locked.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
     try:
@@ -151,11 +126,11 @@ def main() -> int:
             validate_archive(args.archive)
         elif args.command == "atomic-install":
             atomic_install(args.staged, args.target)
-        elif args.command == "acquire-lock":
-            if not acquire_lock(args.lock, args.token):
-                return 75
         else:
-            release_lock(args.lock, args.token)
+            command = args.command[1:] if args.command[:1] == ["--"] else args.command
+            if not command:
+                raise ValueError("run-with-lock requires a command")
+            return run_with_lock(args.lock, args.token, command)
     except (OSError, tarfile.TarError, ValueError) as error:
         print(error, file=sys.stderr)
         return 1

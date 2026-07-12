@@ -51,9 +51,11 @@ def _validate_archive(path: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _acquire_lock(lock: Path, token: str) -> subprocess.CompletedProcess[str]:
+def _run_with_lock(
+    lock: Path, token: str, command: list[str]
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["python3", str(RUNTIME_HELPER), "acquire-lock", str(lock), token],
+        ["python3", str(RUNTIME_HELPER), "run-with-lock", str(lock), token, "--", *command],
         cwd=REPO,
         capture_output=True,
         text=True,
@@ -320,11 +322,17 @@ def test_lock_recovers_empty_directory_left_before_owner_metadata(tmp_path):
     lock = tmp_path / "runtime.lock"
     lock.mkdir()
     token = uuid.uuid4().hex
+    observed = tmp_path / "observed.json"
 
-    result = _acquire_lock(lock, token)
+    result = _run_with_lock(
+        lock,
+        token,
+        ["cp", str(lock / "owner.json"), str(observed)],
+    )
 
     assert result.returncode == 0, result.stderr
-    assert json.loads((lock / "owner.json").read_text(encoding="utf-8"))["token"] == token
+    assert json.loads(observed.read_text(encoding="utf-8"))["token"] == token
+    assert not lock.exists()
 
 
 def test_only_one_waiter_claims_and_replaces_stale_lock(tmp_path):
@@ -332,10 +340,35 @@ def test_only_one_waiter_claims_and_replaces_stale_lock(tmp_path):
         lock = tmp_path / f"runtime-{attempt}.lock"
         lock.mkdir()
         tokens = [uuid.uuid4().hex for _ in range(8)]
+        critical = tmp_path / f"critical-{attempt}"
+        completed = tmp_path / f"completed-{attempt}"
+        command = tmp_path / f"critical-{attempt}.py"
+        command.write_text(
+            "import os, pathlib, sys, time\n"
+            "critical, completed, token = map(pathlib.Path, sys.argv[1:])\n"
+            "fd = os.open(critical, os.O_CREAT | os.O_EXCL | os.O_WRONLY)\n"
+            "os.close(fd)\n"
+            "time.sleep(0.02)\n"
+            "with completed.open('a') as output: output.write(token.name + '\\n')\n"
+            "critical.unlink()\n",
+            encoding="utf-8",
+        )
 
         processes = [
             subprocess.Popen(
-                ["python3", str(RUNTIME_HELPER), "acquire-lock", str(lock), token],
+                [
+                    "python3",
+                    str(RUNTIME_HELPER),
+                    "run-with-lock",
+                    str(lock),
+                    token,
+                    "--",
+                    "python3",
+                    str(command),
+                    str(critical),
+                    str(completed),
+                    token,
+                ],
                 cwd=REPO,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -345,10 +378,9 @@ def test_only_one_waiter_claims_and_replaces_stale_lock(tmp_path):
         ]
         results = [process.communicate(timeout=10) for process in processes]
 
-        assert [process.returncode for process in processes].count(0) == 1, results
-        owner = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
-        assert owner["token"] in tokens
-        assert not list(tmp_path.glob(f"{lock.name}.claim.*"))
+        assert [process.returncode for process in processes] == [0] * len(tokens), results
+        assert sorted(completed.read_text(encoding="utf-8").splitlines()) == sorted(tokens)
+        assert not lock.exists()
 
 
 def test_lock_treats_reused_pid_with_different_process_identity_as_stale(tmp_path):
@@ -366,32 +398,28 @@ def test_lock_treats_reused_pid_with_different_process_identity_as_stale(tmp_pat
     )
     token = uuid.uuid4().hex
 
-    result = _acquire_lock(lock, token)
+    observed = tmp_path / "observed.json"
+    result = _run_with_lock(lock, token, ["cp", str(lock / "owner.json"), str(observed)])
 
     assert result.returncode == 0, result.stderr
-    owner = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
+    owner = json.loads(observed.read_text(encoding="utf-8"))
     assert owner["token"] == token
 
 
 def test_previous_owner_token_cannot_release_replacement_lock(tmp_path):
     lock = tmp_path / "runtime.lock"
     current_token = uuid.uuid4().hex
-    acquired = _acquire_lock(lock, current_token)
-    assert acquired.returncode == 0, acquired.stderr
+    lock.mkdir()
+    (lock / "owner.json").write_text(
+        json.dumps({"token": "previous-owner-token", "pid": 1, "process_start": "old"}),
+        encoding="utf-8",
+    )
+    observed = tmp_path / "observed.json"
 
-    released = subprocess.run(
-        [
-            "python3",
-            str(RUNTIME_HELPER),
-            "release-lock",
-            str(lock),
-            "previous-owner-token",
-        ],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
+    result = _run_with_lock(
+        lock, current_token, ["cp", str(lock / "owner.json"), str(observed)]
     )
 
-    assert released.returncode == 0, released.stderr
-    owner = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
+    assert result.returncode == 0, result.stderr
+    owner = json.loads(observed.read_text(encoding="utf-8"))
     assert owner["token"] == current_token

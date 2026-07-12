@@ -22,27 +22,21 @@ launcher="$app_dir/src-tauri/binaries/python3"
 expected="$PYTHON_SHA256:$(shasum -a 256 "$repo_dir/pyproject.toml" "$app_dir/scripts/prepare-sidecar-python.sh" | shasum -a 256 | awk '{print $1}')"
 helper="$app_dir/scripts/sidecar_runtime.py"
 lock="$app_dir/src-tauri/.sidecar-runtime.lock"
-lock_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+lock_token="${PDF2MD_RUNTIME_LOCKED:-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')}"
 temporary=""
 temporary_archive=""
 
 mkdir -p "$cache_dir" "$(dirname "$launcher")"
 
+if [[ -z "${PDF2MD_RUNTIME_LOCKED:-}" ]]; then
+  exec python3 "$helper" run-with-lock "$lock" "$lock_token" -- \
+    env "PDF2MD_RUNTIME_LOCKED=$lock_token" bash "$0" "$@"
+fi
+
 cleanup() {
   [[ -z "$temporary" ]] || rm -rf "$temporary"
   [[ -z "$temporary_archive" ]] || rm -f "$temporary_archive"
-  python3 "$helper" release-lock "$lock" "$lock_token"
 }
-
-while true; do
-  if python3 "$helper" acquire-lock "$lock" "$lock_token"; then
-    break
-  else
-    status=$?
-  fi
-  [[ "$status" == 75 ]] || exit "$status"
-  sleep 0.1
-done
 trap cleanup EXIT
 
 sanitize_runtime() {
