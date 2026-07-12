@@ -25,6 +25,7 @@ export default function TopicFusion({ courseId, topicId }: { courseId: string; t
   const runs = store.topicRunsById[topicId] ?? [];
   const [error, setError] = useState<string | null>(null);
   const [recovering, setRecovering] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const requestVersion = useRef(0);
   const pageKey = `${courseId}:${topicId}`;
   const pageKeyRef = useRef(pageKey);
@@ -42,7 +43,7 @@ export default function TopicFusion({ courseId, topicId }: { courseId: string; t
     ]).catch((reason: unknown) => {
       if (requestVersion.current === version) setError(reason instanceof Error ? reason.message : "融合精读加载失败");
     });
-  }, [courseId, topicId, store.loadChapters, store.loadSources, store.loadTopicBlocks, store.loadTopicCards, store.loadTopicRuns, store.loadTopics]);
+  }, [courseId, topicId, loadAttempt, store.loadChapters, store.loadSources, store.loadTopicBlocks, store.loadTopicCards, store.loadTopicRuns, store.loadTopics]);
 
   const sourceTargets = useMemo(() => {
     const result = new Map<string, string>();
@@ -101,6 +102,7 @@ export default function TopicFusion({ courseId, topicId }: { courseId: string; t
     }
   };
 
+  if (!topic && error) return <div role="alert" className="border-l-2 border-red-500 bg-red-50 px-4 py-4 text-sm text-red-800"><p>{error}</p><button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)} className="mt-3 border border-red-200 bg-white px-3 py-2 text-sm font-medium">重试加载</button></div>;
   if (!topic) return <div className="py-16 text-center text-sm text-zinc-500">正在加载主题…</div>;
   return (
     <div className="grid min-w-0 border-y border-zinc-200 md:grid-cols-[220px_minmax(0,1fr)]">
@@ -110,7 +112,7 @@ export default function TopicFusion({ courseId, topicId }: { courseId: string; t
       </aside>
       <main className="min-w-0 px-4 py-5 sm:px-6 lg:px-10">
         <header className="border-b border-zinc-200 pb-5">
-          <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0"><h1 className="break-words text-2xl font-semibold">{topic.title}</h1><div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500"><span>{STATUS[topic.status] ?? topic.status}</span><span>最后成功：{latestSuccess?.finished_at ? new Date(latestSuccess.finished_at * 1000).toLocaleString() : "暂无"}</span></div></div><div className="flex flex-wrap gap-2"><button type="button" onClick={run} disabled={!canRun || busy} aria-label={isFirstRun ? "运行融合精读" : "重新生成"} className="inline-flex items-center gap-2 bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-40">{busy ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}{isFirstRun ? "运行融合精读" : "重新生成"}</button>{topic.status === "RUNNING" && <button type="button" onClick={recover} disabled={recovering} aria-label="检查并恢复" title="检查运行状态并恢复过期任务" className="inline-flex items-center gap-2 border border-zinc-200 px-3 py-2 text-sm disabled:opacity-40">{recovering ? <Loader2 size={16} className="animate-spin" /> : <RotateCcw size={16} />}检查并恢复</button>}</div></div>
+          <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0"><h1 className="break-words text-2xl font-semibold">{topic.title}</h1><div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500"><span>{STATUS[topic.status] ?? topic.status}</span><span>最后成功：{latestSuccess?.finished_at ? new Date(latestSuccess.finished_at * 1000).toLocaleString() : "暂无"}</span></div></div><div className="flex shrink-0 flex-wrap gap-2 whitespace-nowrap"><button type="button" onClick={run} disabled={!canRun || busy} aria-label={isFirstRun ? "运行融合精读" : "重新生成"} className="inline-flex items-center gap-2 bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-40">{busy ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}{isFirstRun ? "运行融合精读" : "重新生成"}</button>{topic.status === "RUNNING" && <button type="button" onClick={recover} disabled={recovering} aria-label="检查并恢复" title="检查运行状态并恢复过期任务" className="inline-flex items-center gap-2 border border-zinc-200 px-3 py-2 text-sm disabled:opacity-40">{recovering ? <Loader2 size={16} className="animate-spin" /> : <RotateCcw size={16} />}检查并恢复</button>}</div></div>
           {topic.stale_reason && <p className="mt-3 text-sm text-amber-700">过期原因：{topic.stale_reason}</p>}
           {topic.blocking_chapter_ids.length > 0 && <div className="mt-3 border-l-2 border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-900">阻塞章节：{topic.blocking_chapter_ids.map((id) => chapterById.get(id)?.title ?? id).join("、")}</div>}
           {topic.sync_status === "FAILED" && <div className="mt-3 flex items-center gap-3 text-sm text-red-700"><span>Markdown 同步失败，已保留数据库版本</span><button type="button" onClick={() => store.retryTopicSync(topicId)} className="inline-flex items-center gap-1 underline"><RefreshCw size={14} />重试同步</button></div>}

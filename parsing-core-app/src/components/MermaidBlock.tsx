@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Loader2, AlertCircle } from "lucide-react";
 
 let mermaidModule: Promise<typeof import("mermaid")> | null = null;
+let renderQueue: Promise<void> = Promise.resolve();
 
 function loadMermaid() {
   if (!mermaidModule) {
@@ -27,6 +28,12 @@ function sanitizeSvg(svg: string) {
   return documentNode.documentElement.outerHTML;
 }
 
+function renderMermaid(module: typeof import("mermaid"), id: string, code: string) {
+  const render = renderQueue.then(() => module.default.render(id, code));
+  renderQueue = render.then(() => undefined, () => undefined);
+  return render;
+}
+
 export default function MermaidBlock({ code }: { code: string }) {
   const [svg, setSvg] = useState("");
   const [error, setError] = useState(false);
@@ -36,7 +43,8 @@ export default function MermaidBlock({ code }: { code: string }) {
     setError(false);
     setSvg("");
     loadMermaid().then((m) => {
-      m.default.render(`mm-${Math.random().toString(36).slice(2, 8)}`, code)
+      const renderId = `mm-${Math.random().toString(36).slice(2, 8)}`;
+      renderMermaid(m, renderId, code)
         .then(({ svg }) => {
           if (!c) {
             setError(false);
@@ -48,7 +56,8 @@ export default function MermaidBlock({ code }: { code: string }) {
             setSvg("");
             setError(true);
           }
-        });
+        })
+        .finally(() => document.getElementById(`d${renderId}`)?.remove());
     });
     return () => { c = true; };
   }, [code]);

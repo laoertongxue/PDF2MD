@@ -34,7 +34,7 @@ PDF2MD 不是普通的“PDF 转 Markdown”工具。它的目标是帮助你重
 
 下载地址：[GitHub Releases](https://github.com/laoertongxue/PDF2MD/releases)
 
-下载 `.dmg` 后安装 `PDF2MD.app`。如果 macOS 提示未签名应用，请在系统设置中允许打开。当前版本是 Apple Silicon 预览版；代码签名、公证和完整内置 Python runtime 不在当前版本范围内。
+下载 `.dmg` 后安装 `PDF2MD.app`。当前 Apple Silicon 版本已内置完整 Python runtime；公开分发的 Developer ID 签名与公证仍待配置。
 
 ### 典型流程
 
@@ -85,7 +85,7 @@ parsing-core-app/src-tauri/target/release/bundle/dmg/
 ### 路线图
 
 - macOS Apple Silicon Release 下载
-- 完整内置 Python runtime
+- Developer ID 签名与 Apple 公证
 - 更稳健的 PDF 章节识别
 - Word / PPT / Excel / 图片等多格式资料工作流
 - 更完整的精读模板和写作卡片模板
@@ -120,7 +120,7 @@ The first downloadable client is a macOS Apple Silicon preview.
 
 Download from [GitHub Releases](https://github.com/laoertongxue/PDF2MD/releases).
 
-Code signing, notarization, and a fully embedded Python runtime are outside the current release scope.
+The Apple Silicon build includes a fully embedded Python runtime. Developer ID signing and notarization still require release credentials.
 
 ### Development
 

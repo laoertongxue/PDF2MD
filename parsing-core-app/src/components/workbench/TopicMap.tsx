@@ -108,7 +108,7 @@ function TopicMapEditor({ initialTopicId }: { initialTopicId?: string }) {
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 pb-4">
         <div><h2 className="text-xl font-semibold">课程主题目录</h2><p className="mt-1 text-sm text-zinc-500">{courseTitle} · 按主题组织多本教材章节</p></div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex shrink-0 flex-wrap gap-2 whitespace-nowrap">
           <button type="button" onClick={() => setModal("create")} disabled={anyBusy} className="inline-flex items-center gap-2 border border-zinc-200 px-3 py-2 text-sm"><Plus size={16} />新建主题</button>
           <button type="button" onClick={() => setModal("merge")} disabled={topics.length < 2 || anyBusy} className="inline-flex items-center gap-2 border border-zinc-200 px-3 py-2 text-sm"><Merge size={16} />合并主题</button>
           <button type="button" aria-label="AI 生成课程主题" onClick={() => execute(() => store.generateTopics(courseId, "hybrid"))} disabled={blockers.length > 0 || allChapters.length === 0 || anyBusy} className="inline-flex items-center gap-2 bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-40">{generationBusy ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}AI 生成课程主题</button>

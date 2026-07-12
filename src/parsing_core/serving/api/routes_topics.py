@@ -132,7 +132,7 @@ class _StubTopicOutlineExecutor:
         chapters = payload["chapters"]
         topics = [
             {
-                "title": chapter["title"],
+                "title": f"{chapter['source_title']} · {chapter['title']}",
                 "description": f"Generated from {chapter['title']}",
                 "chapter_ids": [chapter["id"]],
                 "reason": "Deterministic stub outline",

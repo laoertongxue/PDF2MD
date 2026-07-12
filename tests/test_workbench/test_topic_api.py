@@ -931,6 +931,34 @@ def test_generate_stub_is_deterministic_and_protects_confirmed_topics(tmp_path):
     )
 
 
+def test_generate_stub_disambiguates_same_chapter_titles_from_multiple_textbooks(tmp_path):
+    c = client(tmp_path)
+    course, chapters = setup_course(c, tmp_path)
+    second_source_path = tmp_path / "course" / "second.md"
+    second_source_path.write_text("## One\nSecond source", encoding="utf-8")
+    second_source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"kind": "main", "file_path": str(second_source_path), "title": "Book B"},
+    ).json()
+    second_chapter = c.post(
+        f"/api/workbench/sources/{second_source['id']}/detect-chapters"
+    ).json()[0]
+    c.post(f"/api/workbench/chapters/{second_chapter['id']}/confirm")
+    for chapter in [*chapters, second_chapter]:
+        c.post(f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"})
+
+    generated = c.post(
+        f"/api/workbench/courses/{course['id']}/topics/generate",
+        json={"executor": "stub"},
+    )
+
+    assert generated.status_code == 200, generated.json()
+    titles = [topic["title"] for topic in generated.json()]
+    assert len(titles) == len(set(titles))
+    assert "Book · One" in titles
+    assert "Book B · One" in titles
+
+
 def test_stub_run_publishes_results_and_syncs_markdown(tmp_path):
     c = client(tmp_path)
     course, chapters = setup_course(c, tmp_path)

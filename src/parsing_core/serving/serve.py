@@ -1,7 +1,9 @@
 import argparse
+import ipaddress
 import os
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,9 +30,29 @@ DEFAULT_CORS_ORIGINS = [
 ]
 
 
+def require_loopback_host(host: str) -> str:
+    if host == "localhost":
+        return host
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return host
+    except ValueError:
+        pass
+    raise ValueError("local API host must be loopback")
+
+
+def _require_loopback_origin(origin: str) -> str:
+    parsed = urlparse(origin)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        raise ValueError("CORS origin must use HTTP on a loopback host")
+    require_loopback_host(parsed.hostname)
+    return origin
+
+
 def allowed_cors_origins() -> list[str]:
     extra = os.environ.get("PARSING_CORE_CORS_ORIGINS", "")
-    return DEFAULT_CORS_ORIGINS + [origin.strip() for origin in extra.split(",") if origin.strip()]
+    configured = [origin.strip() for origin in extra.split(",") if origin.strip()]
+    return DEFAULT_CORS_ORIGINS + [_require_loopback_origin(origin) for origin in configured]
 
 
 def build_app(
@@ -67,6 +89,7 @@ def main() -> int:
     parser.add_argument("--global-concurrency", type=int, default=MAX_GLOBAL_CONCURRENCY)
     parser.add_argument("--parent-pid", type=int, default=None)
     args = parser.parse_args()
+    require_loopback_host(args.host)
 
     if args.parent_pid is not None:
         import threading

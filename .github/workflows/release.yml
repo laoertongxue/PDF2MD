@@ -11,7 +11,7 @@ permissions:
 jobs:
   macos-apple-silicon:
     name: Build macOS Apple Silicon DMG
-    runs-on: macos-latest
+    runs-on: macos-14-xlarge
 
     steps:
       - name: Checkout
@@ -24,20 +24,44 @@ jobs:
           cache: npm
           cache-dependency-path: parsing-core-app/package-lock.json
 
-      - name: Check release sidecar
-        run: ./scripts/check-release-sidecar.sh
+      - name: Require Apple Silicon runner
+        run: |
+          test "$(uname -m)" = "arm64" || {
+            echo "release requires an arm64 runner" >&2
+            exit 1
+          }
 
       - name: Install frontend dependencies
         working-directory: parsing-core-app
         run: npm ci
 
+      - name: Prepare embedded Python runtime
+        run: ./parsing-core-app/scripts/prepare-sidecar-python.sh
+
       - name: Build desktop app
         working-directory: parsing-core-app
         run: npm run tauri build
 
+      - name: Verify and checksum release artifacts
+        shell: bash
+        run: |
+          apps=()
+          while IFS= read -r artifact; do apps+=("$artifact"); done < <(find parsing-core-app/src-tauri/target/release/bundle/macos -maxdepth 1 -type d -name 'PDF2MD.app')
+          dmgs=()
+          while IFS= read -r artifact; do dmgs+=("$artifact"); done < <(find parsing-core-app/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name 'PDF2MD_0.1.2_aarch64.dmg')
+          test "${#apps[@]}" -eq 1 || { echo "expected exactly one 0.1.2 app" >&2; exit 1; }
+          test "${#dmgs[@]}" -eq 1 || { echo "expected exactly one 0.1.2 dmg" >&2; exit 1; }
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${apps[0]}/Contents/Info.plist")" = "0.1.2"
+          ./scripts/check-release-sidecar.sh "${apps[0]}"
+          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
+          shasum -a 256 "${dmgs[0]}" > "${dmgs[0]}.sha256"
+          printf 'DMG_PATH=%s\nSHA_PATH=%s\n' "${dmgs[0]}" "${dmgs[0]}.sha256" >> "$GITHUB_ENV"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: parsing-core-app/src-tauri/target/release/bundle/dmg/*.dmg
+          files: |
+            ${{ env.DMG_PATH }}
+            ${{ env.SHA_PATH }}
           fail_on_unmatched_files: true
           generate_release_notes: true

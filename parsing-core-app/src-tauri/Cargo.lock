@@ -2270,7 +2270,7 @@ dependencies = [
 
 [[package]]
 name = "parsing-core-app"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "dirs",
  "reqwest 0.12.28",

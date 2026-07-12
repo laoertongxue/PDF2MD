@@ -22,4 +22,35 @@ describe("MermaidBlock", () => {
     const html = view.container.innerHTML;
     expect(html).not.toMatch(/script|foreignObject|onclick|javascript:/i);
   });
+
+  it("serializes concurrent Mermaid renders", async () => {
+    let active = 0;
+    let maxActive = 0;
+    renderMermaid.mockImplementation(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      return { svg: "<svg><text>rendered</text></svg>" };
+    });
+
+    render(<><MermaidBlock code="graph TD\nA-->B" /><MermaidBlock code="graph TD\nC-->D" /></>);
+
+    await screen.findAllByText("rendered");
+    expect(maxActive).toBe(1);
+  });
+
+  it("removes Mermaid temporary error nodes after a failed render", async () => {
+    renderMermaid.mockImplementationOnce(async (id: string) => {
+      const temporary = document.createElement("div");
+      temporary.id = `d${id}`;
+      document.body.appendChild(temporary);
+      throw new Error("invalid diagram");
+    });
+
+    render(<MermaidBlock code="invalid" />);
+
+    await screen.findByText("invalid");
+    expect(document.querySelector('[id^="dmm-"]')).toBeNull();
+  });
 });

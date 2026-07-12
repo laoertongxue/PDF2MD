@@ -1,5 +1,6 @@
 {
   "name": "parsing-core-app",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,7 +10,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "bash scripts/tauri.sh"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.0.0",

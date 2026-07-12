@@ -80,6 +80,18 @@ describe("TopicFusion", () => {
     await waitFor(() => expect(screen.queryByText("旧任务仍在运行")).not.toBeInTheDocument());
   });
 
+  it("stops the loading skeleton and retries after an initial load failure", async () => {
+    reset();
+    state = { ...state, topicsByCourse: { c1: [] } };
+    actions.loadTopics.mockRejectedValueOnce(new Error("主题加载失败"));
+    render(<MemoryRouter><TopicFusion courseId="c1" topicId="t1" /></MemoryRouter>);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("主题加载失败");
+    expect(screen.queryByText("正在加载主题…")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "重试加载" }));
+    expect(actions.loadTopics).toHaveBeenCalledTimes(2);
+  });
+
   it("refreshes persisted content after a 507 without an unhandled save rejection", async () => {
     actions.saveTopicBlock.mockRejectedValueOnce(new Error("编辑已保存到数据库，Markdown同步失败，可重试"));
     render(<MemoryRouter><TopicFusion courseId="c1" topicId="t1" /></MemoryRouter>);

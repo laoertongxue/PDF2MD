@@ -1,6 +1,6 @@
 {
   "productName": "PDF2MD",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "com.pdf2md.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -12,8 +12,10 @@
     "windows": [
       {
         "title": "PDF2MD",
-        "width": 520,
-        "height": 480,
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 650,
         "resizable": true
       }
     ],
@@ -24,6 +26,9 @@
   },
   "bundle": {
     "active": true,
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "icon": [
       "icons/icon.png"
     ],
@@ -31,7 +36,8 @@
       "binaries/python3"
     ],
     "resources": {
-      "../../src": "src"
+      "../../src": "src",
+      "sidecar-runtime/python": "python-runtime"
     }
   },
   "plugins": {

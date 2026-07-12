@@ -224,12 +224,12 @@ export default function Layout() {
       )}
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
-        <header className="flex h-16 shrink-0 items-center justify-between border-b border-zinc-200 px-7">
+        <header className="flex h-16 shrink-0 items-center justify-between gap-4 border-b border-zinc-200 px-4 sm:px-6 lg:px-7">
           <div className="min-w-0">
             <p className="text-xs text-zinc-400">{isWorkbench ? "精读文档" : "文档解析"}</p>
             <h1 className="truncate text-sm font-semibold">{isWorkbench ? selectedCourse?.title ?? "课程精读" : "PDF2MD"}</h1>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
             <Link to="/workbench/chapter" className="rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50">
               打开精读
             </Link>

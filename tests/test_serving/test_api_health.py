@@ -1,10 +1,11 @@
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from parsing_core.llm.stub_client import StubLLMClient
 from parsing_core.orchestrator import Orchestrator
-from parsing_core.serving.serve import build_app
+from parsing_core.serving.serve import allowed_cors_origins, build_app, require_loopback_host
 from parsing_core.storage.fs_layout import FsLayout
 from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
@@ -35,3 +36,24 @@ def test_health_returns_ok(tmp_path, monkeypatch):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "example.com"])
+def test_serve_rejects_non_loopback_hosts(host):
+    with pytest.raises(ValueError, match="loopback"):
+        require_loopback_host(host)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_serve_accepts_loopback_hosts(host):
+    assert require_loopback_host(host) == host
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["*", "https://example.com", "http://192.168.1.10:1420", "null"],
+)
+def test_cors_rejects_wildcard_and_non_loopback_origins(monkeypatch, origin):
+    monkeypatch.setenv("PARSING_CORE_CORS_ORIGINS", origin)
+    with pytest.raises(ValueError, match="loopback"):
+        allowed_cors_origins()
