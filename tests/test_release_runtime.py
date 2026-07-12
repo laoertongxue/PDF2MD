@@ -1,9 +1,11 @@
 import hashlib
 import io
+import json
 import os
 import subprocess
 import tarfile
 import textwrap
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -43,6 +45,15 @@ def _archive(path: Path, members: list[tarfile.TarInfo]) -> None:
 def _validate_archive(path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["python3", str(RUNTIME_HELPER), "validate-archive", str(path)],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _acquire_lock(lock: Path, token: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["python3", str(RUNTIME_HELPER), "acquire-lock", str(lock), token],
         cwd=REPO,
         capture_output=True,
         text=True,
@@ -303,3 +314,84 @@ def test_concurrent_prepare_builds_runtime_once(tmp_path):
 
     assert [process.returncode for process in processes] == [0, 0], results
     assert install_log.read_text(encoding="utf-8").splitlines() == ["install"]
+
+
+def test_lock_recovers_empty_directory_left_before_owner_metadata(tmp_path):
+    lock = tmp_path / "runtime.lock"
+    lock.mkdir()
+    token = uuid.uuid4().hex
+
+    result = _acquire_lock(lock, token)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads((lock / "owner.json").read_text(encoding="utf-8"))["token"] == token
+
+
+def test_only_one_waiter_claims_and_replaces_stale_lock(tmp_path):
+    for attempt in range(5):
+        lock = tmp_path / f"runtime-{attempt}.lock"
+        lock.mkdir()
+        tokens = [uuid.uuid4().hex for _ in range(8)]
+
+        processes = [
+            subprocess.Popen(
+                ["python3", str(RUNTIME_HELPER), "acquire-lock", str(lock), token],
+                cwd=REPO,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for token in tokens
+        ]
+        results = [process.communicate(timeout=10) for process in processes]
+
+        assert [process.returncode for process in processes].count(0) == 1, results
+        owner = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
+        assert owner["token"] in tokens
+        assert not list(tmp_path.glob(f"{lock.name}.claim.*"))
+
+
+def test_lock_treats_reused_pid_with_different_process_identity_as_stale(tmp_path):
+    lock = tmp_path / "runtime.lock"
+    lock.mkdir()
+    (lock / "owner.json").write_text(
+        json.dumps(
+            {
+                "token": "previous-owner",
+                "pid": os.getpid(),
+                "process_start": "different-process-instance",
+            }
+        ),
+        encoding="utf-8",
+    )
+    token = uuid.uuid4().hex
+
+    result = _acquire_lock(lock, token)
+
+    assert result.returncode == 0, result.stderr
+    owner = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
+    assert owner["token"] == token
+
+
+def test_previous_owner_token_cannot_release_replacement_lock(tmp_path):
+    lock = tmp_path / "runtime.lock"
+    current_token = uuid.uuid4().hex
+    acquired = _acquire_lock(lock, current_token)
+    assert acquired.returncode == 0, acquired.stderr
+
+    released = subprocess.run(
+        [
+            "python3",
+            str(RUNTIME_HELPER),
+            "release-lock",
+            str(lock),
+            "previous-owner-token",
+        ],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+
+    assert released.returncode == 0, released.stderr
+    owner = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
+    assert owner["token"] == current_token

@@ -22,6 +22,7 @@ launcher="$app_dir/src-tauri/binaries/python3"
 expected="$PYTHON_SHA256:$(shasum -a 256 "$repo_dir/pyproject.toml" "$app_dir/scripts/prepare-sidecar-python.sh" | shasum -a 256 | awk '{print $1}')"
 helper="$app_dir/scripts/sidecar_runtime.py"
 lock="$app_dir/src-tauri/.sidecar-runtime.lock"
+lock_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 temporary=""
 temporary_archive=""
 
@@ -30,22 +31,18 @@ mkdir -p "$cache_dir" "$(dirname "$launcher")"
 cleanup() {
   [[ -z "$temporary" ]] || rm -rf "$temporary"
   [[ -z "$temporary_archive" ]] || rm -f "$temporary_archive"
-  if [[ -f "$lock/pid" && "$(cat "$lock/pid")" == "$$" ]]; then
-    rm -rf "$lock"
-  fi
+  python3 "$helper" release-lock "$lock" "$lock_token"
 }
 
-while ! mkdir "$lock" 2>/dev/null; do
-  lock_pid="$(cat "$lock/pid" 2>/dev/null || true)"
-  if [[ "$lock_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
-    stale_lock="$lock.stale.$$"
-    if mv "$lock" "$stale_lock" 2>/dev/null; then
-      rm -rf "$stale_lock"
-    fi
+while true; do
+  if python3 "$helper" acquire-lock "$lock" "$lock_token"; then
+    break
+  else
+    status=$?
   fi
+  [[ "$status" == 75 ]] || exit "$status"
   sleep 0.1
 done
-printf '%s\n' "$$" > "$lock/pid"
 trap cleanup EXIT
 
 sanitize_runtime() {
