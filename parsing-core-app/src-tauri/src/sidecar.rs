@@ -11,6 +11,13 @@ const HEALTH_STARTUP_GRACE_SECS: u64 = 60;
 const MAX_HEALTH_FAILURES: u8 = 3;
 const TERMINATION_TIMEOUT_MS: u64 = 2_000;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StopReason {
+    Manual,
+    Restart,
+    Exit,
+}
+
 pub fn record_failure(state: &Arc<Mutex<AppState>>, category: &str, message: String) {
     if let Ok(mut s) = state.lock() {
         s.starting = false;
@@ -146,9 +153,19 @@ async fn instance_is_healthy(client: &reqwest::Client, port: u16, token: &str) -
     }
 }
 
-pub async fn start_sidecar(_app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) -> Result<(), String> {
+async fn start_sidecar_with_intent(
+    _app: &tauri::AppHandle,
+    state: Arc<Mutex<AppState>>,
+    restore_desired_running: bool,
+) -> Result<(), String> {
     let (listener, port, health_token) = {
         let mut s = state.lock().map_err(|e| e.to_string())?;
+        if restore_desired_running {
+            s.desired_running = true;
+            s.manual_stopped = false;
+        } else if !s.desired_running || s.manual_stopped {
+            return Ok(());
+        }
         if s.running || s.starting {
             return Err("already running".into());
         }
@@ -233,11 +250,38 @@ pub async fn start_sidecar(_app: &tauri::AppHandle, state: Arc<Mutex<AppState>>)
     Ok(())
 }
 
+pub async fn start_sidecar(app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) -> Result<(), String> {
+    start_sidecar_with_intent(app, state, true).await
+}
+
+pub fn prepare_retry(state: &mut AppState) {
+    state.desired_running = true;
+    state.manual_stopped = false;
+    state.service_state = "restarting".into();
+    state.error = None;
+    state.health_failures = 0;
+}
+
+pub fn health_failure_requires_restart(state: &mut AppState) -> bool {
+    if !state.desired_running || state.manual_stopped {
+        state.health_failures = 0;
+        return false;
+    }
+    state.health_failures = state.health_failures.saturating_add(1);
+    if state.health_failures < MAX_HEALTH_FAILURES {
+        return false;
+    }
+    state.service_state = "restarting".into();
+    state.logs.push("[health] 3 failures, restarting sidecar...".into());
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        child_exited, make_socket_inheritable, reserve_loopback_port, sidecar_command,
-        terminate_child, StartupGuard,
+        child_exited, health_failure_requires_restart, make_socket_inheritable,
+        prepare_retry, reserve_loopback_port, sidecar_command, stop_sidecar, terminate_child,
+        StartupGuard, StopReason,
     };
     use crate::state::AppState;
     use std::ffi::OsStr;
@@ -351,33 +395,120 @@ mod tests {
         assert!(marker.exists(), "child must receive SIGTERM before any SIGKILL fallback");
         let _ = std::fs::remove_file(marker);
     }
+
+    #[test]
+    fn manual_stop_survives_multiple_unhealthy_cycles() {
+        let state = Arc::new(Mutex::new(AppState {
+            desired_running: true,
+            running: true,
+            ..Default::default()
+        }));
+
+        stop_sidecar(state.clone(), StopReason::Manual).unwrap();
+
+        let mut state = state.lock().unwrap();
+        for _ in 0..(super::MAX_HEALTH_FAILURES * 2) {
+            assert!(!health_failure_requires_restart(&mut state));
+        }
+
+        assert_eq!(state.health_failures, 0);
+        assert!(state.manual_stopped);
+    }
+
+    #[test]
+    fn application_exit_is_not_reported_as_manual_or_health_failure() {
+        let state = Arc::new(Mutex::new(AppState {
+            desired_running: true,
+            running: true,
+            ..Default::default()
+        }));
+
+        stop_sidecar(state.clone(), StopReason::Exit).unwrap();
+
+        let state = state.lock().unwrap();
+        assert!(!state.desired_running);
+        assert!(!state.manual_stopped);
+        assert!(state.error.is_none());
+        assert_eq!(state.health_failures, 0);
+    }
+
+    #[test]
+    fn retry_restores_desired_running_state() {
+        let mut state = AppState {
+            desired_running: false,
+            manual_stopped: true,
+            ..Default::default()
+        };
+
+        prepare_retry(&mut state);
+
+        assert!(state.desired_running);
+        assert!(!state.manual_stopped);
+        assert_eq!(state.service_state, "restarting");
+    }
+
+    #[test]
+    fn real_health_failure_still_requests_automatic_restart() {
+        let mut state = AppState {
+            desired_running: true,
+            running: true,
+            ..Default::default()
+        };
+
+        for _ in 1..super::MAX_HEALTH_FAILURES {
+            assert!(!health_failure_requires_restart(&mut state));
+        }
+        assert!(health_failure_requires_restart(&mut state));
+        assert_eq!(state.service_state, "restarting");
+    }
 }
 
-pub fn stop_sidecar(state: Arc<Mutex<AppState>>) -> Result<(), String> {
+pub fn stop_sidecar(state: Arc<Mutex<AppState>>, reason: StopReason) -> Result<(), String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     if let Some(mut child) = s.sidecar_child.take() {
         terminate_child(&mut child).map_err(|e| e.to_string())?;
         s.logs.push("[sidecar] stopped".into());
     }
     s.running = false;
-    if s.service_state != "restarting" {
-        s.service_state = "failed".into();
+    s.starting = false;
+    s.health_failures = 0;
+    match reason {
+        StopReason::Manual => {
+            s.desired_running = false;
+            s.manual_stopped = true;
+            s.service_state = "failed".into();
+            s.error = Some(crate::state::ServiceError {
+                category: "manual_stop".into(),
+                message: "service stopped by user".into(),
+            });
+        }
+        StopReason::Exit => {
+            s.desired_running = false;
+            s.manual_stopped = false;
+            s.logs.push("[sidecar] application exit".into());
+        }
+        StopReason::Restart => {
+            s.service_state = "restarting".into();
+        }
     }
     Ok(())
 }
 
 pub async fn restart_sidecar(app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) -> Result<(), String> {
-    {
-        let mut s = state.lock().map_err(|e| e.to_string())?;
-        s.service_state = "restarting".into();
-        s.error = None;
-    }
-    stop_sidecar(state.clone())?;
-    if let Err(error) = start_sidecar(app, state.clone()).await {
+    stop_sidecar(state.clone(), StopReason::Restart)?;
+    if let Err(error) = start_sidecar_with_intent(app, state.clone(), false).await {
         record_failure(&state, classify_startup_error(&error), error.clone());
         return Err(error);
     }
     Ok(())
+}
+
+pub async fn retry_sidecar(app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) -> Result<(), String> {
+    {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        prepare_retry(&mut s);
+    }
+    restart_sidecar(app, state).await
 }
 
 pub async fn health_loop(app: tauri::AppHandle, state: Arc<Mutex<AppState>>) {
@@ -386,6 +517,9 @@ pub async fn health_loop(app: tauri::AppHandle, state: Arc<Mutex<AppState>>) {
         tokio::time::sleep(std::time::Duration::from_secs(HEALTH_INTERVAL_SECS)).await;
         let (port, token) = {
             let s = state.lock().unwrap();
+            if !s.desired_running || s.manual_stopped {
+                continue;
+            }
             (s.port, s.health_token.clone())
         };
         match instance_is_healthy(&reqwest::Client::new(), port, &token).await {
@@ -395,14 +529,7 @@ pub async fn health_loop(app: tauri::AppHandle, state: Arc<Mutex<AppState>>) {
             false => {
                 let should_restart = {
                     let mut s = state.lock().unwrap();
-                    s.health_failures += 1;
-                    if s.health_failures >= MAX_HEALTH_FAILURES {
-                        s.service_state = "restarting".into();
-                        s.logs.push("[health] 3 failures, restarting sidecar...".into());
-                        true
-                    } else {
-                        false
-                    }
+                    health_failure_requires_restart(&mut s)
                 };
                 if should_restart {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;

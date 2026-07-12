@@ -22,6 +22,8 @@ fn get_status(state: tauri::State<SharedState>) -> StatusPayload {
         error: s.error.clone(),
         log_path: s.log_path.clone(),
         logs: s.logs.clone(),
+        desired_running: s.desired_running,
+        manual_stopped: s.manual_stopped,
     }
 }
 
@@ -42,13 +44,13 @@ async fn start_service(
 
 #[tauri::command]
 async fn stop_service(state: tauri::State<'_, SharedState>) -> Result<String, String> {
-    sidecar::stop_sidecar(state.inner().clone())?;
+    sidecar::stop_sidecar(state.inner().clone(), sidecar::StopReason::Manual)?;
     Ok("stopped".into())
 }
 
 #[tauri::command]
 async fn retry_service(app: tauri::AppHandle, state: tauri::State<'_, SharedState>) -> Result<String, String> {
-    sidecar::restart_sidecar(&app, state.inner().clone()).await?;
+    sidecar::retry_sidecar(&app, state.inner().clone()).await?;
     Ok("restarting".into())
 }
 
@@ -120,6 +122,8 @@ fn main() {
                 health_token: uuid::Uuid::new_v4().to_string(),
                 starting: false,
                 running: false,
+                desired_running: true,
+                manual_stopped: false,
                 service_state: "starting".into(),
                 error: None,
                 log_path: None,
@@ -156,7 +160,7 @@ fn main() {
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
                 let state = app.state::<SharedState>().inner().clone();
-                let _ = sidecar::stop_sidecar(state);
+                let _ = sidecar::stop_sidecar(state, sidecar::StopReason::Exit);
             }
         });
 }

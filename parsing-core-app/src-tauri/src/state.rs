@@ -13,6 +13,8 @@ pub struct AppState {
     pub health_token: String,
     pub starting: bool,
     pub running: bool,
+    pub desired_running: bool,
+    pub manual_stopped: bool,
     pub service_state: String,
     pub error: Option<ServiceError>,
     pub log_path: Option<String>,
@@ -30,6 +32,8 @@ pub struct StatusPayload {
     pub error: Option<ServiceError>,
     pub log_path: Option<String>,
     pub logs: Vec<String>,
+    pub desired_running: bool,
+    pub manual_stopped: bool,
 }
 
 #[derive(Serialize)]
