@@ -1,3 +1,6 @@
+import json
+import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -54,6 +57,113 @@ def test_pipeline_creates_blocks_cards_and_runs(tmp_path):
     }
     assert len(cards) >= 1
     assert len(runs) == 7
+
+
+def test_two_connections_compete_for_chapter_generation(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+    second_conn = sqlite3.connect(tmp_path / "workbench.db", check_same_thread=False)
+    second_conn.execute("PRAGMA foreign_keys = ON")
+    second = WorkbenchRepository(second_conn)
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def claim(candidate):
+        barrier.wait()
+        try:
+            outcomes.append(candidate.start_chapter_generation(chapter.id).owner_id)
+        except ValueError as exc:
+            outcomes.append(str(exc))
+
+    threads = [threading.Thread(target=claim, args=(candidate,)) for candidate in (repo, second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sum(len(item) == 32 for item in outcomes) == 1
+    assert any("already running" in item for item in outcomes)
+    assert repo.get_chapter(chapter.id).status == "RUNNING"
+
+
+def test_recover_expired_chapter_generation_marks_run_interrupted(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+    start = repo.start_chapter_generation(chapter.id, now=100, lease_ttl=10)
+    run = repo.create_chapter_generation_run(chapter.id, start.owner_id, "structure", now=100)
+
+    with pytest.raises(ValueError, match="lease not expired"):
+        repo.recover_interrupted_chapter_run(chapter.id, now=109)
+    recovered = repo.recover_interrupted_chapter_run(chapter.id, now=111)
+
+    assert recovered.status == "FAILED"
+    stored = repo.get_chapter_generation_run(run.id)
+    assert stored.status == "FAILED" and stored.error == "interrupted"
+    assert repo.get_chapter_generation_lease(chapter.id) is None
+
+
+def test_failed_generation_preserves_previous_published_chapter(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+    repo.upsert_note_block(chapter.id, "summary", "本章概要", "旧成功内容", 0)
+    repo.create_card(chapter.course_id, chapter.id, "topic", "旧卡片", "旧卡片内容")
+    repo.update_chapter_status(chapter.id, "FAILED")
+
+    class FailingExecutor(StubIntensiveReadingExecutor):
+        def run(self, round_key, task_package):
+            if round_key == "concepts":
+                raise RuntimeError("boom")
+            return super().run(round_key, task_package)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        IntensiveReadingPipeline(repo, FailingExecutor(), tmp_path / "runs").run_all(chapter.id)
+
+    assert repo.list_note_blocks(chapter.id)[0].body == "旧成功内容"
+    assert repo.list_cards_by_chapter(chapter.id)[0].title == "旧卡片"
+    assert repo.get_chapter(chapter.id).status == "FAILED"
+
+
+def test_review_receives_all_six_candidates_and_rejection_does_not_publish(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+    seen = {}
+
+    class RejectingReview(StubIntensiveReadingExecutor):
+        def run(self, round_key, task_package):
+            if round_key == "review":
+                package = json.loads(task_package)
+                seen.update(package["candidates"])
+                return json.dumps(
+                    {"passed": False, "issues": ["来源不足"], "revised_blocks": {}},
+                    ensure_ascii=False,
+                )
+            return super().run(round_key, task_package)
+
+    with pytest.raises(ValueError, match="chapter review rejected"):
+        IntensiveReadingPipeline(repo, RejectingReview(), tmp_path / "runs").run_all(chapter.id)
+
+    assert set(seen) == {
+        "structure",
+        "concepts",
+        "plain_explain",
+        "application",
+        "mermaid",
+        "cards",
+    }
+    assert repo.list_note_blocks(chapter.id) == []
+    assert repo.list_cards_by_chapter(chapter.id) == []
+    assert repo.get_chapter(chapter.id).status == "FAILED"
+
+
+def test_review_must_return_exact_fixed_blocks(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+
+    class InvalidReview(StubIntensiveReadingExecutor):
+        def run(self, round_key, task_package):
+            if round_key == "review":
+                return json.dumps({"passed": True, "issues": [], "revised_blocks": {}})
+            return super().run(round_key, task_package)
+
+    with pytest.raises(ValueError, match="fixed chapter blocks"):
+        IntensiveReadingPipeline(repo, InvalidReview(), tmp_path / "runs").run_all(chapter.id)
+
+    assert repo.get_chapter(chapter.id).status == "FAILED"
 
 
 def test_pipeline_materializes_generated_mermaid_output(tmp_path):
@@ -254,6 +364,8 @@ def test_pipeline_invalidates_topics_before_execution(tmp_path, operation):
             return super().run(round_key, task_package)
 
     pipeline = IntensiveReadingPipeline(repo, AssertingExecutor(), tmp_path / "changed")
+    if operation == "run_all":
+        repo.update_chapter_status(chapter.id, "FAILED")
     args = (chapter.id,) if operation == "run_all" else (chapter.id, "concepts")
     getattr(pipeline, operation)(*args)
 

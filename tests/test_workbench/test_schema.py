@@ -27,6 +27,9 @@ def test_apply_workbench_schema_creates_tables(tmp_path):
     assert "wb_topic_cards" in tables
     assert "wb_topic_runs" in tables
     assert "wb_topic_generation_leases" in tables
+    assert "wb_chapter_generation_leases" in tables
+    assert "wb_chapter_generation_runs" in tables
+    assert "wb_chapter_generation_candidates" in tables
     assert "wb_topic_markdown_sync" in tables
 
 

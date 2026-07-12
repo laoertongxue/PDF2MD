@@ -14,6 +14,9 @@ from parsing_core.storage.connection_lock import (
 from parsing_core.workbench.models import (
     Card,
     Chapter,
+    ChapterGenerationLease,
+    ChapterGenerationRun,
+    ChapterGenerationStart,
     Course,
     CourseChapter,
     CourseTopic,
@@ -108,6 +111,212 @@ class WorkbenchRepository:
             ),
         ):
             yield
+
+    def start_chapter_generation(
+        self, chapter_id: str, *, now: int | None = None, lease_ttl: int = 7_200
+    ) -> ChapterGenerationStart:
+        now = _now() if now is None else now
+        if lease_ttl <= 0:
+            raise ValueError("lease_ttl must be positive")
+        with self._atomic(immediate=True):
+            chapter = self.get_chapter(chapter_id)
+            if chapter is None:
+                raise ValueError("chapter not found")
+            if chapter.status == "RUNNING":
+                raise ValueError("chapter is already running")
+            if chapter.status not in {"CONFIRMED", "FAILED"}:
+                raise ValueError("chapter must be CONFIRMED or FAILED before intensive reading")
+            cursor = self.conn.execute(
+                "UPDATE wb_chapters SET status = 'RUNNING', updated_at = ? "
+                "WHERE id = ? AND status = ?",
+                (now, chapter_id, chapter.status),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("chapter is already running")
+            owner_id = uuid4().hex
+            self.conn.execute(
+                "INSERT INTO wb_chapter_generation_leases "
+                "(chapter_id, owner_id, heartbeat_at, expires_at) VALUES (?, ?, ?, ?)",
+                (chapter_id, owner_id, now, now + lease_ttl),
+            )
+            return ChapterGenerationStart(self.get_chapter(chapter_id), owner_id)
+
+    def get_chapter_generation_lease(self, chapter_id: str) -> ChapterGenerationLease | None:
+        row = self.conn.execute(
+            "SELECT * FROM wb_chapter_generation_leases WHERE chapter_id = ?", (chapter_id,)
+        ).fetchone()
+        return ChapterGenerationLease(*row) if row else None
+
+    def heartbeat_chapter_generation(
+        self, chapter_id: str, owner_id: str, *, now: int | None = None, lease_ttl: int = 7_200
+    ) -> ChapterGenerationLease:
+        now = _now() if now is None else now
+        with self._atomic(immediate=True):
+            cursor = self.conn.execute(
+                "UPDATE wb_chapter_generation_leases SET heartbeat_at = ?, expires_at = ? "
+                "WHERE chapter_id = ? AND owner_id = ? AND expires_at > ?",
+                (now, now + lease_ttl, chapter_id, owner_id, now),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("chapter generation lease lost")
+            return self.get_chapter_generation_lease(chapter_id)
+
+    def create_chapter_generation_run(
+        self, chapter_id: str, owner_id: str, round_key: str, *, now: int | None = None
+    ) -> ChapterGenerationRun:
+        now = _now() if now is None else now
+        run_id = uuid4().hex
+        with self._atomic(immediate=True):
+            lease = self.get_chapter_generation_lease(chapter_id)
+            if lease is None or lease.owner_id != owner_id:
+                raise ValueError("chapter generation lease lost")
+            self.conn.execute(
+                "INSERT INTO wb_chapter_generation_runs "
+                "(id, chapter_id, owner_id, round_key, status, started_at) "
+                "VALUES (?, ?, ?, ?, 'RUNNING', ?)",
+                (run_id, chapter_id, owner_id, round_key, now),
+            )
+        return self.get_chapter_generation_run(run_id)
+
+    def get_chapter_generation_run(self, run_id: str) -> ChapterGenerationRun | None:
+        row = self.conn.execute(
+            "SELECT * FROM wb_chapter_generation_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        return ChapterGenerationRun(*row) if row else None
+
+    def finish_chapter_generation_run(
+        self,
+        run_id: str,
+        owner_id: str,
+        status: str,
+        *,
+        output: str = "",
+        error: str = "",
+        now: int | None = None,
+    ) -> ChapterGenerationRun:
+        now = _now() if now is None else now
+        with self._atomic(immediate=True):
+            cursor = self.conn.execute(
+                "UPDATE wb_chapter_generation_runs SET status = ?, output = ?, error = ?, "
+                "finished_at = ? WHERE id = ? AND owner_id = ? AND status = 'RUNNING'",
+                (status, output, error, now, run_id, owner_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("chapter generation run is not RUNNING")
+            if status == "COMPLETED":
+                run = self.get_chapter_generation_run(run_id)
+                self.conn.execute(
+                    "INSERT INTO wb_chapter_generation_candidates "
+                    "(run_id, chapter_id, owner_id, round_key, output, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (run_id, run.chapter_id, owner_id, run.round_key, output, now),
+                )
+        return self.get_chapter_generation_run(run_id)
+
+    def chapter_generation_candidates(self, chapter_id: str, owner_id: str) -> dict[str, str]:
+        rows = self.conn.execute(
+            "SELECT round_key, output FROM wb_chapter_generation_candidates "
+            "WHERE chapter_id = ? AND owner_id = ? ORDER BY created_at, run_id",
+            (chapter_id, owner_id),
+        ).fetchall()
+        return dict(rows)
+
+    def fail_chapter_generation(self, chapter_id: str, owner_id: str) -> Chapter:
+        with self._atomic(immediate=True):
+            lease = self.get_chapter_generation_lease(chapter_id)
+            if lease is None or lease.owner_id != owner_id:
+                raise ValueError("chapter generation lease lost")
+            self.conn.execute(
+                "UPDATE wb_chapter_generation_runs SET status = 'FAILED', error = 'interrupted', "
+                "finished_at = ? WHERE chapter_id = ? AND owner_id = ? AND status = 'RUNNING'",
+                (_now(), chapter_id, owner_id),
+            )
+            self.conn.execute(
+                "UPDATE wb_chapters SET status = 'FAILED', updated_at = ? "
+                "WHERE id = ? AND status = 'RUNNING'",
+                (_now(), chapter_id),
+            )
+            self.conn.execute(
+                "DELETE FROM wb_chapter_generation_leases WHERE chapter_id = ? AND owner_id = ?",
+                (chapter_id, owner_id),
+            )
+            return self.get_chapter(chapter_id)
+
+    def recover_interrupted_chapter_run(
+        self, chapter_id: str, *, now: int | None = None
+    ) -> Chapter:
+        now = _now() if now is None else now
+        with self._atomic(immediate=True):
+            lease = self.get_chapter_generation_lease(chapter_id)
+            if lease is None:
+                raise ValueError("chapter generation lease not found")
+            if lease.expires_at > now:
+                raise ValueError("chapter generation lease not expired")
+            self.conn.execute(
+                "UPDATE wb_chapter_generation_runs SET status = 'FAILED', error = 'interrupted', "
+                "finished_at = ? WHERE chapter_id = ? AND owner_id = ? AND status = 'RUNNING'",
+                (now, chapter_id, lease.owner_id),
+            )
+            self.conn.execute(
+                "UPDATE wb_chapters SET status = 'FAILED', updated_at = ? WHERE id = ?",
+                (now, chapter_id),
+            )
+            self.conn.execute(
+                "DELETE FROM wb_chapter_generation_leases WHERE chapter_id = ?", (chapter_id,)
+            )
+            return self.get_chapter(chapter_id)
+
+    def publish_chapter_generation(
+        self,
+        chapter_id: str,
+        owner_id: str,
+        blocks: dict[str, tuple[str, str, int]],
+        card: tuple[str, str],
+        review_run_id: str,
+        review_output: str,
+        run_paths: dict[str, tuple[str, str]] | None = None,
+    ) -> Chapter:
+        with self._atomic(immediate=True):
+            lease = self.get_chapter_generation_lease(chapter_id)
+            if lease is None or lease.owner_id != owner_id or lease.expires_at <= _now():
+                raise ValueError("chapter generation lease lost")
+            chapter = self.get_chapter(chapter_id)
+            self.conn.execute("DELETE FROM wb_note_blocks WHERE chapter_id = ?", (chapter_id,))
+            for kind, (title, body, seq) in blocks.items():
+                self.upsert_note_block(chapter_id, kind, title, body, seq)
+            self.conn.execute(
+                "DELETE FROM wb_cards WHERE chapter_id = ? AND kind = 'topic'", (chapter_id,)
+            )
+            self.create_card(chapter.course_id, chapter_id, "topic", card[0], card[1])
+            candidates = self.chapter_generation_candidates(chapter_id, owner_id)
+            for round_key, output in candidates.items():
+                input_path, output_path = (run_paths or {}).get(round_key, ("", ""))
+                self.upsert_run(
+                    chapter_id,
+                    round_key,
+                    "generation",
+                    "DONE",
+                    input_path,
+                    output_path,
+                    output,
+                    False,
+                )
+            self.upsert_run(
+                chapter_id, "review", "generation", "DONE", "", "", review_output, False
+            )
+            self.conn.execute(
+                "UPDATE wb_chapter_generation_runs SET status = 'COMPLETED', output = ?, "
+                "error = '', finished_at = ? WHERE id = ? AND owner_id = ? AND status = 'RUNNING'",
+                (review_output, _now(), review_run_id, owner_id),
+            )
+            self.conn.execute(
+                "UPDATE wb_chapters SET status = 'COMPLETED', updated_at = ? WHERE id = ?",
+                (_now(), chapter_id),
+            )
+            self.conn.execute(
+                "DELETE FROM wb_chapter_generation_leases WHERE chapter_id = ?", (chapter_id,)
+            )
+            return self.get_chapter(chapter_id)
 
     def create_course(self, title: str, description: str, root_dir: str) -> Course:
         row = {
@@ -1276,8 +1485,7 @@ class WorkbenchRepository:
             if row[0] != expected_content:
                 raise ValueError("topic note block changed")
             sync = self.conn.execute(
-                "SELECT status, lease_expires_at FROM wb_topic_markdown_sync "
-                "WHERE topic_id = ?",
+                "SELECT status, lease_expires_at FROM wb_topic_markdown_sync WHERE topic_id = ?",
                 (topic_id,),
             ).fetchone()
             if sync is not None and sync[0] == "SYNCING":
@@ -1831,8 +2039,15 @@ class WorkbenchRepository:
             (course_id, course_id),
         ).fetchall()
         keys = (
-            "id", "origin_type", "origin_id", "origin_title", "card_type",
-            "title", "content", "source_refs_json", "origin_seq",
+            "id",
+            "origin_type",
+            "origin_id",
+            "origin_title",
+            "card_type",
+            "title",
+            "content",
+            "source_refs_json",
+            "origin_seq",
         )
         return [dict(zip(keys, row, strict=True)) for row in rows]
 

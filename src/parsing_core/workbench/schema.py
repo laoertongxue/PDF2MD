@@ -83,6 +83,34 @@ CREATE TABLE IF NOT EXISTS wb_runs (
   UNIQUE(chapter_id, round_key)
 );
 
+CREATE TABLE IF NOT EXISTS wb_chapter_generation_leases (
+  chapter_id TEXT PRIMARY KEY REFERENCES wb_chapters(id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL,
+  heartbeat_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS wb_chapter_generation_runs (
+  id TEXT PRIMARY KEY,
+  chapter_id TEXT NOT NULL REFERENCES wb_chapters(id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL,
+  round_key TEXT NOT NULL,
+  status TEXT NOT NULL,
+  output TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS wb_chapter_generation_candidates (
+  run_id TEXT PRIMARY KEY REFERENCES wb_chapter_generation_runs(id) ON DELETE CASCADE,
+  chapter_id TEXT NOT NULL REFERENCES wb_chapters(id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL,
+  round_key TEXT NOT NULL,
+  output TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS wb_topics (
   id TEXT PRIMARY KEY,
   course_id TEXT NOT NULL REFERENCES wb_courses(id) ON DELETE CASCADE,
@@ -156,6 +184,10 @@ CREATE INDEX IF NOT EXISTS idx_wb_sources_course ON wb_sources(course_id);
 CREATE INDEX IF NOT EXISTS idx_wb_chapters_course ON wb_chapters(course_id);
 CREATE INDEX IF NOT EXISTS idx_wb_cards_course ON wb_cards(course_id);
 CREATE INDEX IF NOT EXISTS idx_wb_runs_chapter ON wb_runs(chapter_id);
+CREATE INDEX IF NOT EXISTS idx_wb_chapter_generation_runs
+  ON wb_chapter_generation_runs(chapter_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_wb_chapter_generation_candidates
+  ON wb_chapter_generation_candidates(chapter_id, owner_id);
 CREATE INDEX IF NOT EXISTS idx_wb_topics_course ON wb_topics(course_id, seq);
 CREATE INDEX IF NOT EXISTS idx_wb_topic_chapters_chapter ON wb_topic_chapters(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_wb_topic_note_blocks_topic ON wb_topic_note_blocks(topic_id);

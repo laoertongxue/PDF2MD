@@ -417,8 +417,13 @@ async def list_cards(course_id: str, sch: SchedulerDep):
             **{
                 key: row[key]
                 for key in (
-                    "id", "origin_type", "origin_id", "origin_title",
-                    "card_type", "title", "content",
+                    "id",
+                    "origin_type",
+                    "origin_id",
+                    "origin_title",
+                    "card_type",
+                    "title",
+                    "content",
                 )
             },
             source_refs=json.loads(row["source_refs_json"]),
@@ -513,8 +518,19 @@ async def run_chapter_hybrid(chapter_id: str, sch: SchedulerDep):
     except ChapterMarkdownSyncError as exc:
         repo.update_chapter_status(chapter_id, "FAILED")
         raise HTTPException(400, "course directory cannot be written") from exc
-    except Exception as exc:
-        repo.update_chapter_status(chapter_id, "FAILED")
+    except ValueError as exc:
+        if "already running" in str(exc):
+            raise HTTPException(409, "chapter hybrid reading is already running") from exc
+        current = repo.get_chapter(chapter_id)
+        if current is not None and current.status in {"CONFIRMED", "FAILED"}:
+            repo.update_chapter_status(chapter_id, "FAILED")
         raise HTTPException(500, str(exc)) from exc
-    repo.update_chapter_status(chapter_id, "COMPLETED")
+    except Exception as exc:
+        current = repo.get_chapter(chapter_id)
+        if current is not None and current.status in {"CONFIRMED", "FAILED"}:
+            repo.update_chapter_status(chapter_id, "FAILED")
+        raise HTTPException(500, str(exc)) from exc
+    current = repo.get_chapter(chapter_id)
+    if current is not None and current.status in {"CONFIRMED", "FAILED"}:
+        repo.update_chapter_status(chapter_id, "COMPLETED")
     return _chapter_response(repo.get_chapter(chapter_id))

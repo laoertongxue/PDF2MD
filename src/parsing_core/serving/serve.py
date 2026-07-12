@@ -102,6 +102,28 @@ def recover_interrupted_work(db_path: Path, temp_dir: Path) -> None:
                 "UPDATE tasks SET status = 'INTERRUPTED', error_msg = ? WHERE status = 'RUNNING'",
                 ("recoverable: interrupted by service shutdown",),
             )
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if {
+                "wb_chapters",
+                "wb_chapter_generation_runs",
+                "wb_chapter_generation_leases",
+            } <= tables:
+                conn.execute(
+                    "UPDATE wb_chapter_generation_runs SET status = 'FAILED', "
+                    "error = 'interrupted', finished_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                    "WHERE status = 'RUNNING'"
+                )
+                conn.execute(
+                    "UPDATE wb_chapters SET status = 'FAILED', "
+                    "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                    "WHERE status = 'RUNNING'"
+                )
+                conn.execute("DELETE FROM wb_chapter_generation_leases")
             conn.commit()
         finally:
             conn.close()
@@ -169,6 +191,12 @@ def main() -> int:
         apply_workbench_schema(conn)
         repo = Repository(conn)
         return Orchestrator(repo=repo, fs=fs, llm=StubLLMClient(), db_path=db_path)
+
+    bootstrap_conn = init_db(db_path)
+    apply_serve_schema(bootstrap_conn)
+    apply_workbench_schema(bootstrap_conn)
+    bootstrap_conn.close()
+    recover_interrupted_work(Path(db_path), temp_dir)
 
     app = build_app(
         orch_factory=orch_factory,

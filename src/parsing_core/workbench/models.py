@@ -172,3 +172,30 @@ class TopicMarkdownSyncState:
     updated_at: int
     owner_id: str
     lease_expires_at: int
+
+
+@dataclass(frozen=True)
+class ChapterGenerationStart:
+    chapter: Chapter
+    owner_id: str
+
+
+@dataclass(frozen=True)
+class ChapterGenerationLease:
+    chapter_id: str
+    owner_id: str
+    heartbeat_at: int
+    expires_at: int
+
+
+@dataclass(frozen=True)
+class ChapterGenerationRun:
+    id: str
+    chapter_id: str
+    owner_id: str
+    round_key: str
+    status: str
+    output: str
+    error: str
+    started_at: int
+    finished_at: int | None

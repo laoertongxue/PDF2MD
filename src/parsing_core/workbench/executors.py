@@ -13,8 +13,13 @@ class StubIntensiveReadingExecutor:
     def run(self, round_key: str, task_package: str) -> str:
         topic_package = None
         if round_key in {
-            "alignment", "comparison", "plain_cases", "framework_application",
-            "mermaid", "cards", "review",
+            "alignment",
+            "comparison",
+            "plain_cases",
+            "framework_application",
+            "mermaid",
+            "cards",
+            "review",
         }:
             import json
 
@@ -34,30 +39,77 @@ class StubIntensiveReadingExecutor:
             labels = [chapter["source_label"] for chapter in package["source_chapters"]]
             refs = " ".join(labels)
             if round_key == "alignment":
-                value = {"overview": f"主题总览 {refs}", "linked_sources": refs,
-                         "core_concepts": f"核心概念与取舍 {refs}"}
+                value = {
+                    "overview": f"主题总览 {refs}",
+                    "linked_sources": refs,
+                    "core_concepts": f"核心概念与取舍 {refs}",
+                }
             elif round_key == "comparison":
-                value = {"viewpoint_comparison": f"观点对照 {refs}",
-                         "consensus_disagreements": f"共识与分歧 {refs}",
-                         "complementary_views": f"互补视角 {refs}"}
+                value = {
+                    "viewpoint_comparison": f"观点对照 {refs}",
+                    "consensus_disagreements": f"共识与分歧 {refs}",
+                    "complementary_views": f"互补视角 {refs}",
+                }
             elif round_key == "plain_cases":
-                value = {"plain_explanation": f"通俗解释 {refs}",
-                         "textbook_cases": f"教材案例 {refs}",
-                         "real_world_problem_solving": f"现实问题求解 {refs}"}
+                value = {
+                    "plain_explanation": f"通俗解释 {refs}",
+                    "textbook_cases": f"教材案例 {refs}",
+                    "real_world_problem_solving": f"现实问题求解 {refs}",
+                }
             elif round_key == "framework_application":
-                value = {"integrated_framework": f"融合框架 {refs}",
-                         "application_methods": f"应用方法 {refs}",
-                         "further_thinking": f"延伸思考 {refs}"}
+                value = {
+                    "integrated_framework": f"融合框架 {refs}",
+                    "application_methods": f"应用方法 {refs}",
+                    "further_thinking": f"延伸思考 {refs}",
+                }
             elif round_key == "mermaid":
-                value = {"knowledge_diagram": "graph TD\n  A[核心概念] --> B[融合框架]",
-                         "application_diagram": "flowchart LR\n  A[识别问题] --> B[应用框架]"}
+                value = {
+                    "knowledge_diagram": "graph TD\n  A[核心概念] --> B[融合框架]",
+                    "application_diagram": "flowchart LR\n  A[识别问题] --> B[应用框架]",
+                }
             elif round_key == "cards":
-                value = {"cards": [{"card_type": "insight", "title": f"选题卡 {i + 1}",
-                                     "content": f"围绕主题展开的写作角度 {i + 1}。",
-                                     "source_refs": labels} for i in range(8)]}
+                value = {
+                    "cards": [
+                        {
+                            "card_type": "insight",
+                            "title": f"选题卡 {i + 1}",
+                            "content": f"围绕主题展开的写作角度 {i + 1}。",
+                            "source_refs": labels,
+                        }
+                        for i in range(8)
+                    ]
+                }
             else:
                 value = {"passed": True, "issues": []}
             return json.dumps(value, ensure_ascii=False)
+        if round_key == "review":
+            import json
+
+            try:
+                package = json.loads(task_package)
+            except json.JSONDecodeError:
+                package = {}
+            candidates = package.get("candidates", {})
+            if candidates:
+                diagrams = []
+                import re
+
+                diagrams = re.findall(
+                    r"```mermaid\s*\n(.*?)```", candidates["mermaid"], re.DOTALL | re.IGNORECASE
+                )
+                revised = {
+                    "summary": candidates["structure"],
+                    "concepts": candidates["concepts"],
+                    "plain_explain": candidates["plain_explain"],
+                    "application": candidates["application"],
+                    "knowledge_mermaid": diagrams[0].strip(),
+                    "application_mermaid": diagrams[1].strip(),
+                    "reflection": "本章精读已通过结构、概念、应用、图示、卡片与来源复核。",
+                }
+                return json.dumps(
+                    {"passed": True, "issues": [], "revised_blocks": revised},
+                    ensure_ascii=False,
+                )
         if round_key == "mermaid":
             return """\
 ## 知识结构图
@@ -76,7 +128,7 @@ flowchart LR
 """
         if round_key == "cards":
             return "# 选题卡\n\n- 战略选择：从生活场景解释核心概念。"
-        return f"# {round_key} 精读输出\n\n这是确定性占位输出。"
+        return f"# {round_key} 精读输出\n\n这是确定性占位输出。\n\n来源：本章原文。"
 
 
 class ManualTaskPackageExecutor:

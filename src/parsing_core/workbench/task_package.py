@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,3 +42,25 @@ def write_task_package(package: TaskPackage, base_dir: str | Path) -> str:
     path = Path(base_dir) / f"{package.chapter_id}-{package.round_key}-task.md"
     path.write_text(package.content, encoding="utf-8")
     return str(path)
+
+
+def build_review_package(repo, chapter_id: str, candidates: dict[str, str]) -> str:
+    chapter = repo.get_chapter(chapter_id)
+    if chapter is None:
+        raise ValueError("chapter not found")
+    expected = {"structure", "concepts", "plain_explain", "application", "mermaid", "cards"}
+    if set(candidates) != expected:
+        raise ValueError("review requires all six chapter candidates")
+    return json.dumps(
+        {
+            "chapter_id": chapter_id,
+            "chapter_title": chapter.title,
+            "contract": {
+                "passed": "boolean",
+                "issues": "string[]",
+                "revised_blocks": "object with all fixed chapter blocks",
+            },
+            "candidates": candidates,
+        },
+        ensure_ascii=False,
+    )
