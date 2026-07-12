@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import CardPool from "./CardPool";
 
 const actions = { loadCourses: vi.fn(), loadCourseCards: vi.fn() };
@@ -39,5 +39,45 @@ describe("CardPool", () => {
     state = { ...state, cardsByCourse: { course: [] } };
     rerender(<MemoryRouter><CardPool /></MemoryRouter>);
     expect(screen.getByText("本课程还没有卡片")).toBeInTheDocument();
+  });
+
+  it("focuses, scrolls and highlights a card from the real cardId route", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    render(<MemoryRouter initialEntries={["/workbench/cards?cardId=c2"]}><Routes><Route path="/workbench/cards" element={<CardPool />} /></Routes></MemoryRouter>);
+
+    const target = await screen.findByRole("article", { name: "卡片：增长飞轮" });
+    expect(target).toHaveFocus();
+    expect(target).toHaveAttribute("data-highlighted", "true");
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
+    expect(screen.getByRole("link", { name: "增长主题" })).toHaveAttribute("href", "/workbench/courses/course/fusion/t1");
+  });
+
+  it("clears filters that hide a route target and announces the adjustment", async () => {
+    function RouteTarget() {
+      const navigate = useNavigate();
+      return <><button onClick={() => navigate("/workbench/cards?cardId=c2")}>定位增长卡片</button><CardPool /></>;
+    }
+    render(<MemoryRouter initialEntries={["/workbench/cards"]}><Routes><Route path="/workbench/cards" element={<RouteTarget />} /></Routes></MemoryRouter>);
+    await userEvent.click(screen.getByRole("button", { name: "仅看收藏" }));
+    expect(screen.queryByText("增长飞轮")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "定位增长卡片" }));
+
+    expect(await screen.findByRole("article", { name: "卡片：增长飞轮" })).toHaveFocus();
+    expect(screen.getByRole("status")).toHaveTextContent("已调整筛选并定位到“增长飞轮”");
+    expect(screen.getByRole("link", { name: "竞争战略" })).toHaveAttribute("href", "/workbench/chapter?chapterId=ch1");
+  });
+
+  it("announces a missing route target without moving focus", async () => {
+    render(<MemoryRouter initialEntries={["/workbench/cards?cardId=missing"]}><Routes><Route path="/workbench/cards" element={<CardPool />} /></Routes></MemoryRouter>);
+    expect(await screen.findByRole("status")).toHaveTextContent("未找到指定卡片");
+    expect(screen.queryByRole("article", { name: /missing/ })).not.toBeInTheDocument();
+  });
+
+  it("asks for a course before resolving a card route", async () => {
+    state = { ...state, selectedCourseId: null, cardsByCourse: {} };
+    render(<MemoryRouter initialEntries={["/workbench/cards?cardId=c2"]}><Routes><Route path="/workbench/cards" element={<CardPool />} /></Routes></MemoryRouter>);
+    expect(await screen.findByRole("status")).toHaveTextContent("请先选择课程");
   });
 });

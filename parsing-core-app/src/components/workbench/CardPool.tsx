@@ -1,15 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Pencil, Search, Star, X } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import * as api from "../../api/workbench";
 import type { Card } from "../../api/workbenchTypes";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 
 type OriginFilter = "all" | "chapter" | "topic";
+const EMPTY_CARDS: Card[] = [];
 
 export default function CardPool() {
+  const [searchParams] = useSearchParams();
+  const targetCardId = searchParams.get("cardId");
   const { cardsByCourse, loadCourseCards, loadCourses, selectedCourseId } = useWorkbenchStore();
   const [cards, setCards] = useState<Card[]>([]);
+  const [cardsLoaded, setCardsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [origin, setOrigin] = useState<OriginFilter>("all");
@@ -17,13 +21,21 @@ export default function CardPool() {
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [editing, setEditing] = useState<Card | null>(null);
   const [saving, setSaving] = useState(false);
+  const [highlightedCardId, setHighlightedCardId] = useState<string | null>(null);
+  const [routeMessage, setRouteMessage] = useState<string | null>(null);
+  const cardRefs = useRef(new Map<string, HTMLElement>());
+  const locatedTarget = useRef<string | null>(null);
 
-  const storedCards = selectedCourseId ? (cardsByCourse[selectedCourseId] ?? []) : [];
+  const storedCards = selectedCourseId ? (cardsByCourse[selectedCourseId] ?? EMPTY_CARDS) : EMPTY_CARDS;
   useEffect(() => { setCards(storedCards); }, [storedCards]);
   useEffect(() => { loadCourses().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "课程加载失败")); }, [loadCourses]);
   useEffect(() => {
     if (!selectedCourseId) return;
-    loadCourseCards(selectedCourseId).then(setCards).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "卡片加载失败"));
+    setCardsLoaded(false);
+    loadCourseCards(selectedCourseId)
+      .then(setCards)
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "卡片加载失败"))
+      .finally(() => setCardsLoaded(true));
   }, [loadCourseCards, selectedCourseId]);
 
   const tags = useMemo(() => [...new Set(cards.flatMap((card) => card.tags))].sort(), [cards]);
@@ -36,6 +48,42 @@ export default function CardPool() {
       (!keyword || [card.title, card.content, card.origin_title, ...card.tags].some((value) => value.toLocaleLowerCase().includes(keyword)))
     );
   }, [cards, favoritesOnly, origin, query, tag]);
+
+  useEffect(() => {
+    if (!targetCardId) {
+      locatedTarget.current = null;
+      setHighlightedCardId(null);
+      setRouteMessage(null);
+      return;
+    }
+    const target = cards.find((card) => card.id === targetCardId);
+    if (!target) {
+      if (!selectedCourseId) setRouteMessage("请先选择课程，再定位指定卡片");
+      else if (cardsLoaded) setRouteMessage("未找到指定卡片，卡片可能已被删除或不属于当前课程");
+      return;
+    }
+    if (locatedTarget.current === targetCardId) return;
+    locatedTarget.current = targetCardId;
+    const hidden = !visibleCards.some((card) => card.id === targetCardId);
+    if (hidden) {
+      setQuery("");
+      setOrigin("all");
+      setTag("all");
+      setFavoritesOnly(false);
+      setRouteMessage(`已调整筛选并定位到“${target.title}”`);
+    } else {
+      setRouteMessage(`已定位到“${target.title}”`);
+    }
+    setHighlightedCardId(targetCardId);
+  }, [cards, cardsLoaded, selectedCourseId, targetCardId, visibleCards]);
+
+  useEffect(() => {
+    if (!highlightedCardId || !visibleCards.some((card) => card.id === highlightedCardId)) return;
+    const target = cardRefs.current.get(highlightedCardId);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.focus({ preventScroll: true });
+  }, [highlightedCardId, visibleCards]);
 
   const replaceCard = (updated: Card) => setCards((current) => current.map((card) => card.id === updated.id ? updated : card));
   const toggleFavorite = async (card: Card) => {
@@ -69,8 +117,9 @@ export default function CardPool() {
       <button type="button" aria-pressed={favoritesOnly} onClick={() => setFavoritesOnly((value) => !value)} className={`inline-flex h-9 items-center gap-1.5 border px-3 text-sm ${favoritesOnly ? "border-amber-300 bg-amber-50 text-amber-800" : "border-zinc-300 bg-white text-zinc-600"}`}><Star className="h-4 w-4"/>仅看收藏</button>
     </div>
     {error && <p role="alert" className="border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-600">{error}</p>}
+    {routeMessage && <p role="status" aria-live="polite" className="border-l-2 border-emerald-500 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{routeMessage}</p>}
     {cards.length === 0 ? <EmptyCourse/> : visibleCards.length === 0 ? <div className="border border-dashed border-zinc-300 bg-white px-8 py-12 text-center"><p className="text-sm font-medium text-zinc-700">没有符合条件的卡片</p><button type="button" onClick={() => { setQuery(""); setOrigin("all"); setTag("all"); setFavoritesOnly(false); }} className="mt-3 text-sm text-emerald-700 underline">清除筛选</button></div> :
-      <div className="grid gap-3 md:grid-cols-2">{visibleCards.map((card) => <article key={card.id} className="border border-zinc-200 bg-white p-4">
+      <div className="grid gap-3 md:grid-cols-2">{visibleCards.map((card) => <article key={card.id} id={`card-${card.id}`} ref={(node) => { if (node) cardRefs.current.set(card.id, node); else cardRefs.current.delete(card.id); }} tabIndex={-1} aria-label={`卡片：${card.title}`} data-highlighted={highlightedCardId === card.id ? "true" : undefined} className={`border bg-white p-4 outline-none transition-shadow ${highlightedCardId === card.id ? "border-emerald-500 ring-2 ring-emerald-200" : "border-zinc-200"}`}>
         <div className="flex items-start justify-between gap-3"><div className="min-w-0"><h2 className="truncate text-sm font-medium text-zinc-900">{card.title}</h2><div className="mt-1 flex flex-wrap gap-1">{card.tags.map((item) => <span key={item} className="bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-500">{item}</span>)}{card.status === "ARCHIVED" && <span className="bg-zinc-200 px-1.5 py-0.5 text-xs text-zinc-600">已归档</span>}</div></div><div className="flex shrink-0"><button type="button" title={card.favorite ? "取消收藏" : "收藏"} aria-label={card.favorite ? "取消收藏" : "收藏"} onClick={() => void toggleFavorite(card)} className="p-1.5 text-zinc-500 hover:text-amber-600"><Star className={`h-4 w-4 ${card.favorite ? "fill-amber-400 text-amber-500" : ""}`}/></button><button type="button" title="编辑卡片" aria-label={`编辑 ${card.title}`} onClick={() => setEditing(card)} className="p-1.5 text-zinc-500 hover:text-zinc-900"><Pencil className="h-4 w-4"/></button></div></div>
         <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-zinc-600">{card.content}</p><div className="mt-3 flex items-center justify-between gap-3"><span className="text-xs text-zinc-400">{card.card_type}</span><Link to={card.origin_type === "chapter" ? `/workbench/chapter?chapterId=${card.origin_id}` : `/workbench/courses/${selectedCourseId}/fusion/${card.origin_id}`} className="text-xs text-emerald-700 underline">{card.origin_title}</Link></div>
       </article>)}</div>}
