@@ -417,11 +417,15 @@ class TextbookImportBatch:
                         original_error.add_note(f"journal close failed: {cleanup_error!r}")
         self._records.clear()
 
-    def commit(self) -> None:
+    def commit(self, *, retain_records: bool = False) -> None:
         cleanup_error = CourseStorageError("course storage could not complete import")
         for record in self._records:
             self._remove_journal(record, cleanup_error)
         self._committed = True
+        if not retain_records:
+            self._records.clear()
+
+    def finalize(self) -> None:
         self._records.clear()
 
     def _valid_name(self, name: object) -> bool:

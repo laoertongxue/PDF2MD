@@ -1,6 +1,7 @@
 import asyncio
 import errno
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -272,6 +273,133 @@ def test_chapter_draft_batch_edit_and_atomic_confirm_api(tmp_path):
         json={"expected_fingerprint": confirmed.json()["fingerprint"], "chapters": []},
     )
     assert rejected.status_code == 409
+
+
+def test_confirmed_chapter_draft_rejection_never_touches_file(tmp_path):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    course = c.post("/api/workbench/courses", json={"title": "战略", "root_dir": str(root)}).json()
+    main = root / "book.md"
+    main.write_text("## 第一章\n原文", encoding="utf-8")
+    source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"file_path": str(main), "title": "教材"},
+    ).json()
+    chapter = c.post(f"/api/workbench/sources/{source['id']}/detect-chapters").json()[0]
+    state = c.get(f"/api/workbench/sources/{source['id']}/chapter-drafts").json()
+    confirmed = c.post(
+        f"/api/workbench/sources/{source['id']}/chapter-drafts/confirm",
+        json={"expected_fingerprint": state["fingerprint"]},
+    ).json()
+    chapter_path = Path(root / "教材" / "0-第一章.md")
+    before = chapter_path.read_bytes()
+    main.write_text("## 第一章\n已被外部修改", encoding="utf-8")
+
+    res = c.put(
+        f"/api/workbench/sources/{source['id']}/chapter-drafts",
+        json={
+            "expected_fingerprint": confirmed["fingerprint"],
+            "chapters": [
+                {"id": chapter["id"], "title": "第一章", "start": 0, "end": len(main.read_text())}
+            ],
+        },
+    )
+
+    assert res.status_code == 409
+    assert chapter_path.read_bytes() == before
+
+
+def test_attachment_db_failure_compensates_batch_files(tmp_path, monkeypatch):
+    c = client(tmp_path, raise_server_exceptions=False)
+    root = course_root(tmp_path)
+    course, source, chapter = confirmed_chapter(c, root)
+    attachment = tmp_path / "case.pdf"
+    attachment.write_bytes(b"case")
+    monkeypatch.setattr(routes_workbench.MarkItDownAdapter, "parse", lambda self, path: "case")
+    monkeypatch.setattr(
+        routes_workbench.WorkbenchRepository,
+        "create_attachments_guarded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.IntegrityError("db failed")),
+    )
+
+    res = c.post(
+        f"/api/workbench/chapters/{chapter['id']}/attachments/import",
+        json={"paths": [str(attachment)]},
+    )
+
+    assert res.status_code == 500
+    assert list((root / "附件原文件").glob("*.pdf")) == []
+
+
+def test_chapter_file_publish_failure_restores_all_targets_and_database(tmp_path, monkeypatch):
+    c = client(tmp_path, raise_server_exceptions=False)
+    root = course_root(tmp_path)
+    course = c.post("/api/workbench/courses", json={"title": "战略", "root_dir": str(root)}).json()
+    main = root / "book.md"
+    main.write_text("## 第一章\nA\n## 第二章\nB", encoding="utf-8")
+    source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"file_path": str(main), "title": "教材"},
+    ).json()
+    c.post(f"/api/workbench/sources/{source['id']}/detect-chapters")
+    state = c.get(f"/api/workbench/sources/{source['id']}/chapter-drafts").json()
+    targets = [root / "教材" / "0-第一章.md", root / "教材" / "1-第二章.md"]
+    before_files = [path.read_bytes() for path in targets]
+    real_replace = routes_workbench.os.replace
+    temp_replaces = 0
+
+    def fail_second_temp(source_path, target_path):
+        nonlocal temp_replaces
+        if str(source_path).endswith(".tmp"):
+            temp_replaces += 1
+            if temp_replaces == 2:
+                raise OSError("publish failed")
+        return real_replace(source_path, target_path)
+
+    monkeypatch.setattr(routes_workbench.os, "replace", fail_second_temp)
+    res = c.put(
+        f"/api/workbench/sources/{source['id']}/chapter-drafts",
+        json={
+            "expected_fingerprint": state["fingerprint"],
+            "chapters": [
+                {
+                    "id": item["id"],
+                    "title": item["title"],
+                    "start": item["start"],
+                    "end": item["end"],
+                }
+                for item in state["chapters"]
+            ],
+        },
+    )
+
+    assert res.status_code == 507
+    assert [path.read_bytes() for path in targets] == before_files
+    assert c.get(f"/api/workbench/sources/{source['id']}/chapter-drafts").json() == state
+
+
+def test_attachment_batch_commit_failure_leaves_no_database_record_or_file(tmp_path, monkeypatch):
+    c = client(tmp_path, raise_server_exceptions=False)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    attachment = tmp_path / "case.pdf"
+    attachment.write_bytes(b"case")
+    monkeypatch.setattr(routes_workbench.MarkItDownAdapter, "parse", lambda self, path: "case")
+    monkeypatch.setattr(
+        routes_workbench.TextbookImportBatch,
+        "commit",
+        lambda self, **kwargs: (_ for _ in ()).throw(CourseStorageError("commit failed")),
+    )
+
+    res = c.post(
+        f"/api/workbench/chapters/{chapter['id']}/attachments/import",
+        json={"paths": [str(attachment)]},
+    )
+
+    assert res.status_code == 500
+    assert list((root / "附件原文件").glob("*.pdf")) == []
+    conn = sqlite3.connect(tmp_path / "serve.db")
+    assert conn.execute("SELECT count(*) FROM wb_attachments").fetchone()[0] == 0
 
 
 def test_import_multiple_textbooks_creates_independent_sources(tmp_path):

@@ -93,6 +93,8 @@ class RunRecord:
     stale: bool
     created_at: int
     updated_at: int
+    input_fingerprint: str
+    citation_ids_json: str
 
 
 @dataclass(frozen=True)

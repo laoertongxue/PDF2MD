@@ -22,7 +22,11 @@ def detect_chapters(markdown: str) -> list[ChapterCandidate]:
     chapter_headings = [match for match in headings if CHAPTER_TITLE_RE.match(match.group(2))]
     # A single H1 is normally the document title. Multiple H1s define chapters;
     # otherwise H2s are the chapter level.
-    matches = chapter_headings if len(chapter_headings) > 1 else (h1 if len(h1) > 1 else h2)
+    document_h1 = any(not CHAPTER_TITLE_RE.match(match.group(2)) for match in h1)
+    if document_h1 and len(h2) > 1:
+        matches = h2
+    else:
+        matches = chapter_headings if len(chapter_headings) > 1 else (h1 if len(h1) > 1 else h2)
     if not matches:
         return [
             ChapterCandidate(

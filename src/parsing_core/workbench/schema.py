@@ -88,6 +88,8 @@ CREATE TABLE IF NOT EXISTS wb_runs (
   stale INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  input_fingerprint TEXT NOT NULL DEFAULT '',
+  citation_ids_json TEXT NOT NULL DEFAULT '[]',
   UNIQUE(chapter_id, round_key)
 );
 
@@ -225,6 +227,13 @@ def apply_workbench_schema(conn: sqlite3.Connection) -> None:
     }.items():
         if name not in attachment_columns:
             conn.execute(f"ALTER TABLE wb_attachments ADD COLUMN {name} {definition}")
+    run_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_runs)")}
+    for name, definition in {
+        "input_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "citation_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+    }.items():
+        if name not in run_columns:
+            conn.execute(f"ALTER TABLE wb_runs ADD COLUMN {name} {definition}")
     topic_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_topics)")}
     if "generation_reason" not in topic_columns:
         conn.execute("ALTER TABLE wb_topics ADD COLUMN generation_reason TEXT NOT NULL DEFAULT ''")

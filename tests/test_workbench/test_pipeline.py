@@ -282,6 +282,43 @@ flowchart LR
     assert "A[概念] --> B[结构]" not in note
 
 
+def test_pipeline_rejects_unknown_citation_id(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+
+    class UnknownCitation(StubIntensiveReadingExecutor):
+        def run(self, round_key, task_package):
+            if round_key == "structure":
+                return "引用 [src:not-allowed:p1:para1]"
+            return super().run(round_key, task_package)
+
+    with pytest.raises(ValueError, match="unknown citation"):
+        IntensiveReadingPipeline(repo, UnknownCitation(), tmp_path / "runs").run_all(chapter.id)
+
+
+def test_pipeline_rejects_changed_input_before_publish(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+
+    class MutatingReview(StubIntensiveReadingExecutor):
+        def run(self, round_key, task_package):
+            result = super().run(round_key, task_package)
+            if round_key == "review":
+                Path(chapter.source_md_path).write_text("changed", encoding="utf-8")
+            return result
+
+    with pytest.raises(ValueError, match="input fingerprint changed"):
+        IntensiveReadingPipeline(repo, MutatingReview(), tmp_path / "runs").run_all(chapter.id)
+
+
+def test_pipeline_persists_task_package_provenance_on_runs(tmp_path):
+    repo, chapter = setup_chapter(tmp_path)
+    IntensiveReadingPipeline(repo, StubIntensiveReadingExecutor(), tmp_path / "runs").run_all(
+        chapter.id
+    )
+    runs = repo.list_runs(chapter.id)
+    assert all(run.input_fingerprint for run in runs)
+    assert all(isinstance(json.loads(run.citation_ids_json), list) for run in runs)
+
+
 def test_pipeline_marks_round_failed_when_mermaid_output_is_incomplete(tmp_path):
     class BrokenMermaidExecutor(StubIntensiveReadingExecutor):
         def run(self, round_key: str, task_package: str) -> str:

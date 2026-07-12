@@ -277,12 +277,18 @@ class WorkbenchRepository:
         review_run_id: str,
         review_output: str,
         run_paths: dict[str, tuple[str, str]] | None = None,
+        run_metadata: dict[str, tuple[str, tuple[str, ...]]] | None = None,
+        expected_input_fingerprint: str = "",
     ) -> Chapter:
         with self._atomic(immediate=True):
             lease = self.get_chapter_generation_lease(chapter_id)
             if lease is None or lease.owner_id != owner_id or lease.expires_at <= _now():
                 raise ValueError("chapter generation lease lost")
             chapter = self.get_chapter(chapter_id)
+            if expected_input_fingerprint:
+                current_fingerprint = self.chapter_input_snapshot(chapter_id)[1]
+                if current_fingerprint != expected_input_fingerprint:
+                    raise ValueError("chapter input fingerprint changed")
             self.conn.execute("DELETE FROM wb_note_blocks WHERE chapter_id = ?", (chapter_id,))
             for kind, (title, body, seq) in blocks.items():
                 self._upsert_note_block_no_commit(chapter_id, kind, title, body, seq)
@@ -293,6 +299,7 @@ class WorkbenchRepository:
             candidates = self.chapter_generation_candidates(chapter_id, owner_id)
             for round_key, output in candidates.items():
                 input_path, output_path = (run_paths or {}).get(round_key, ("", ""))
+                input_fingerprint, citation_ids = (run_metadata or {}).get(round_key, ("", ()))
                 self._upsert_run_no_commit(
                     chapter_id,
                     round_key,
@@ -302,9 +309,21 @@ class WorkbenchRepository:
                     output_path,
                     output,
                     False,
+                    input_fingerprint,
+                    citation_ids,
                 )
+            review_fingerprint, review_citations = (run_metadata or {}).get("review", ("", ()))
             self._upsert_run_no_commit(
-                chapter_id, "review", "generation", "DONE", "", "", review_output, False
+                chapter_id,
+                "review",
+                "generation",
+                "DONE",
+                "",
+                "",
+                review_output,
+                False,
+                review_fingerprint,
+                review_citations,
             )
             self.conn.execute(
                 "UPDATE wb_chapter_generation_runs SET status = 'COMPLETED', output = ?, "
@@ -1885,48 +1904,67 @@ class WorkbenchRepository:
         return value, _stable_fingerprint(value)
 
     def replace_chapter_drafts(
-        self, source_id: str, drafts: list[dict], *, expected_fingerprint: str
+        self,
+        source_id: str,
+        drafts: list[dict],
+        *,
+        expected_fingerprint: str,
+        publish: Callable[[], None] | None = None,
+        compensate: Callable[[], None] | None = None,
     ) -> list[Chapter]:
-        with self._atomic(immediate=True):
-            current, fingerprint = self.chapter_draft_snapshot(source_id)
-            if fingerprint != expected_fingerprint:
-                raise ValueError("chapter drafts changed")
-            if any(item["status"] != "DRAFT" for item in current["chapters"]):
-                raise ValueError("chapter drafts already confirmed")
-            existing = {item.id: item for item in self.list_chapters(source_id)}
-            ids = [item.get("id") or uuid4().hex for item in drafts]
-            if len(ids) != len(set(ids)):
-                raise ValueError("duplicate chapter id")
-            self.conn.execute("DELETE FROM wb_chapters WHERE source_id = ?", (source_id,))
-            now = _now()
-            source = self.get_source(source_id)
-            for seq, (chapter_id, draft) in enumerate(zip(ids, drafts, strict=True)):
-                old = existing.get(chapter_id)
-                start, end = int(draft["start"]), int(draft["end"])
-                if start < 0 or end <= start:
-                    raise ValueError("invalid chapter boundary")
-                self.conn.execute(
-                    """
+        published = False
+        try:
+            with self._atomic(immediate=True):
+                self.validate_chapter_draft_replace(source_id, expected_fingerprint)
+                current = self.list_chapters(source_id)
+                existing = {item.id: item for item in current}
+                ids = [item.get("id") or uuid4().hex for item in drafts]
+                if len(ids) != len(set(ids)):
+                    raise ValueError("duplicate chapter id")
+                self.conn.execute("DELETE FROM wb_chapters WHERE source_id = ?", (source_id,))
+                now = _now()
+                source = self.get_source(source_id)
+                for seq, (chapter_id, draft) in enumerate(zip(ids, drafts, strict=True)):
+                    old = existing.get(chapter_id)
+                    start, end = int(draft["start"]), int(draft["end"])
+                    if start < 0 or end <= start:
+                        raise ValueError("invalid chapter boundary")
+                    self.conn.execute(
+                        """
                     INSERT INTO wb_chapters
                       (id, source_id, course_id, seq, title, source_md_path, status,
                        source_start, source_end, confirmed_snapshot_json, confirmed_at,
                        created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, '', NULL, ?, ?)
                     """,
-                    (
-                        chapter_id,
-                        source_id,
-                        source.course_id,
-                        seq,
-                        str(draft["title"]).strip(),
-                        str(draft.get("source_md_path") or (old.source_md_path if old else "")),
-                        start,
-                        end,
-                        old.created_at if old else now,
-                        now,
-                    ),
-                )
+                        (
+                            chapter_id,
+                            source_id,
+                            source.course_id,
+                            seq,
+                            str(draft["title"]).strip(),
+                            str(draft.get("source_md_path") or (old.source_md_path if old else "")),
+                            start,
+                            end,
+                            old.created_at if old else now,
+                            now,
+                        ),
+                    )
+                if publish is not None:
+                    publish()
+                    published = True
+        except Exception:
+            if published and compensate is not None:
+                compensate()
+            raise
         return self.list_chapters(source_id)
+
+    def validate_chapter_draft_replace(self, source_id: str, expected_fingerprint: str) -> None:
+        current, fingerprint = self.chapter_draft_snapshot(source_id)
+        if fingerprint != expected_fingerprint:
+            raise ValueError("chapter drafts changed")
+        if any(item["status"] != "DRAFT" for item in current["chapters"]):
+            raise ValueError("chapter drafts already confirmed")
 
     def confirm_chapter_drafts(self, source_id: str, expected_fingerprint: str) -> list[Chapter]:
         with self._atomic(immediate=True):
@@ -1988,6 +2026,69 @@ class WorkbenchRepository:
         )
         self.conn.commit()
         return Attachment(*row)
+
+    def create_attachments_guarded(
+        self,
+        specs: list[tuple[str, str, str | None, str, str, str, str, str, list[dict]]],
+        publish: Callable[[], None],
+        compensate: Callable[[], None],
+    ) -> list[Attachment]:
+        published = False
+        rows = []
+        try:
+            with self._atomic(immediate=True):
+                for spec in specs:
+                    (
+                        course_id,
+                        source_id,
+                        chapter_id,
+                        file_path,
+                        title,
+                        kind,
+                        text,
+                        digest,
+                        anchors,
+                    ) = spec
+                    source = self.get_source(source_id)
+                    chapter = self.get_chapter(chapter_id) if chapter_id else None
+                    if source is None or source.course_id != course_id:
+                        raise ValueError("source does not belong to course")
+                    if chapter_id and (
+                        chapter is None
+                        or chapter.course_id != course_id
+                        or chapter.source_id != source_id
+                    ):
+                        raise ValueError("chapter does not belong to source")
+                    row = (
+                        uuid4().hex,
+                        course_id,
+                        chapter_id,
+                        file_path,
+                        title,
+                        kind,
+                        _now(),
+                        source_id,
+                        text,
+                        digest,
+                        json.dumps(anchors, ensure_ascii=False),
+                    )
+                    self.conn.execute(
+                        """
+                        INSERT INTO wb_attachments
+                          (id, course_id, chapter_id, file_path, title, kind, created_at,
+                           source_id, parsed_text, content_hash, anchors_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        row,
+                    )
+                    rows.append(row)
+                publish()
+                published = True
+        except Exception:
+            if published:
+                compensate()
+            raise
+        return [Attachment(*row) for row in rows]
 
     def list_attachments(self, chapter_id: str) -> list[Attachment]:
         rows = self.conn.execute(
@@ -2106,6 +2207,8 @@ class WorkbenchRepository:
         output_path: str,
         output: str,
         stale: bool = False,
+        input_fingerprint: str = "",
+        citation_ids: tuple[str, ...] = (),
     ) -> RunRecord:
         run = self._upsert_run_no_commit(
             chapter_id,
@@ -2116,6 +2219,8 @@ class WorkbenchRepository:
             output_path,
             output,
             stale,
+            input_fingerprint,
+            citation_ids,
         )
         self.conn.commit()
         return run
@@ -2130,6 +2235,8 @@ class WorkbenchRepository:
         output_path: str,
         output: str,
         stale: bool = False,
+        input_fingerprint: str = "",
+        citation_ids: tuple[str, ...] = (),
     ) -> RunRecord:
         now = _now()
         self.conn.execute(
@@ -2137,10 +2244,11 @@ class WorkbenchRepository:
             INSERT INTO wb_runs
               (
                 id, chapter_id, round_key, executor, status, input_path,
-                output_path, output, stale, created_at, updated_at
+                output_path, output, stale, created_at, updated_at,
+                input_fingerprint, citation_ids_json
               )
             VALUES
-              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chapter_id, round_key) DO UPDATE SET
               executor = excluded.executor,
               status = excluded.status,
@@ -2148,6 +2256,8 @@ class WorkbenchRepository:
               output_path = excluded.output_path,
               output = excluded.output,
               stale = excluded.stale,
+              input_fingerprint = excluded.input_fingerprint,
+              citation_ids_json = excluded.citation_ids_json,
               updated_at = excluded.updated_at
             """,
             (
@@ -2162,6 +2272,8 @@ class WorkbenchRepository:
                 int(stale),
                 now,
                 now,
+                input_fingerprint,
+                json.dumps(citation_ids, ensure_ascii=False),
             ),
         )
         row = self.conn.execute(

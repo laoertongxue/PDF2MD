@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -390,23 +392,65 @@ async def replace_chapter_drafts(
     course = repo.get_course(source.course_id)
     out_dir = Path(course.root_dir) / _safe_dir_name(source.title)
     specs = []
-    try:
-        for seq, item in enumerate(req.chapters):
-            if item.end > len(markdown) or item.end <= item.start:
-                raise ValueError("invalid chapter boundary")
-            chapter_path = out_dir / _chapter_filename(seq, item.title)
-            chapter_path.write_text(markdown[item.start : item.end].strip(), encoding="utf-8")
-            specs.append({**item.model_dump(), "source_md_path": str(chapter_path)})
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise HTTPException(400, "chapter draft files could not be written") from exc
+    publications = []
+    for seq, item in enumerate(req.chapters):
+        if item.end > len(markdown) or item.end <= item.start:
+            raise HTTPException(400, "invalid chapter boundary")
+        chapter_path = out_dir / _chapter_filename(seq, item.title)
+        specs.append({**item.model_dump(), "source_md_path": str(chapter_path)})
+        publications.append((chapter_path, markdown[item.start : item.end].strip()))
+    if len({path for path, _ in publications}) != len(publications):
+        raise HTTPException(400, "duplicate chapter file target")
+    published: list[tuple[Path, Path | None]] = []
+
+    def publish_files() -> None:
+        staged = []
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for target, content in publications:
+                temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+                temporary.write_text(content, encoding="utf-8")
+                staged.append((target, temporary))
+            for target, temporary in staged:
+                backup = None
+                if target.exists():
+                    backup = target.with_name(f".{target.name}.{uuid4().hex}.bak")
+                    os.replace(target, backup)
+                try:
+                    os.replace(temporary, target)
+                except Exception:
+                    if backup is not None:
+                        os.replace(backup, target)
+                    raise
+                published.append((target, backup))
+        except Exception:
+            rollback_files()
+            for _, temporary in staged:
+                temporary.unlink(missing_ok=True)
+            raise
+
+    def rollback_files() -> None:
+        for target, backup in reversed(published):
+            target.unlink(missing_ok=True)
+            if backup is not None:
+                os.replace(backup, target)
+        published.clear()
+
     try:
         repo.replace_chapter_drafts(
             source_id,
             specs,
             expected_fingerprint=req.expected_fingerprint,
+            publish=publish_files,
+            compensate=rollback_files,
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(507, "chapter draft files could not be published") from exc
+    for _, backup in published:
+        if backup is not None:
+            backup.unlink(missing_ok=True)
     return _chapter_draft_state(repo, source_id)
 
 
@@ -437,13 +481,13 @@ async def import_chapter_attachments(
             Path(course.root_dir), target_directory=ATTACHMENT_DIRECTORY_NAME
         ) as batch:
             imported = [batch.import_file(Path(path)) for path in req.paths]
-            records = []
+            specs = []
             for item in imported:
                 text, content_hash, anchors = await run_in_threadpool(
                     parse_imported_source, item.stored_path, parser
                 )
-                records.append(
-                    repo.create_attachment(
+                specs.append(
+                    (
                         chapter.course_id,
                         chapter.source_id,
                         chapter.id,
@@ -455,9 +499,16 @@ async def import_chapter_attachments(
                         anchors,
                     )
                 )
-            batch.commit()
+            records = repo.create_attachments_guarded(
+                specs,
+                lambda: batch.commit(retain_records=True),
+                batch.rollback,
+            )
+            batch.finalize()
     except SourceImportInputError as exc:
         raise HTTPException(400, "attachment file could not be imported") from exc
+    except Exception as exc:
+        raise HTTPException(500, "attachment import could not be committed") from exc
     return [
         AttachmentResponse(
             id=item.id,

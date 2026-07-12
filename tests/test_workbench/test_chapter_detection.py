@@ -43,6 +43,11 @@ def test_detect_chapters_uses_h2_when_h1_is_document_title():
     assert [chapter.title for chapter in chapters] == ["第一章", "第二章"]
 
 
+def test_detect_chapters_prefers_h2_chapter_level_below_multiple_document_h1_sections():
+    chapters = detect_chapters("# Strategy Management\n## Introduction\nA\n# Appendix\n## Cases\nB")
+    assert [chapter.title for chapter in chapters] == ["Introduction", "Cases"]
+
+
 def test_detect_chapters_handles_chapter_headings_mixed_across_h1_and_h2():
     chapters = detect_chapters("# 第一章 总论\n## 第一节\nA\n## 第二章 战略\n### 第二节\nB")
     assert [chapter.title for chapter in chapters] == ["第一章 总论", "第二章 战略"]

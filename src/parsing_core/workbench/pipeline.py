@@ -20,6 +20,7 @@ from parsing_core.workbench.topic_state import (
 ROUNDS = ["structure", "concepts", "plain_explain", "application", "mermaid", "cards", "review"]
 CODEX_ROUNDS = {"mermaid", "review"}
 MERMAID_FENCE_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+CITATION_RE = re.compile(r"\[((?:src|att):[^\]\s]+)\]")
 FIXED_CHAPTER_KINDS = {
     "summary",
     "concepts",
@@ -76,6 +77,9 @@ class IntensiveReadingPipeline:
             min(60.0, lease_ttl / 3) if heartbeat_interval is None else heartbeat_interval
         )
         self._candidate_paths: dict[str, tuple[str, str]] = {}
+        self._run_metadata: dict[str, tuple[str, tuple[str, ...]]] = {}
+        self._input_fingerprint = ""
+        self._citation_ids: tuple[str, ...] = ()
 
     def run_all(self, chapter_id: str) -> None:
         chapter = self.repo.get_chapter(chapter_id)
@@ -142,12 +146,14 @@ class IntensiveReadingPipeline:
             chapter_id, owner_id, round_key, now=self.clock()
         )
         package = build_task_package(self.repo, chapter_id, round_key)
+        self._accept_package(package)
         input_path = ""
         if round_key not in CODEX_ROUNDS:
             self.run_dir.mkdir(parents=True, exist_ok=True)
             input_path = write_task_package(package, self.run_dir)
         try:
             output = self._run_with_heartbeat(chapter_id, owner_id, round_key, package.content)
+            _validate_output_citations(output, self._citation_ids)
             output_path = self.run_dir / f"{chapter_id}-{round_key}-output.md"
             self.run_dir.mkdir(parents=True, exist_ok=True)
             output_path.write_text(output, encoding="utf-8")
@@ -177,6 +183,8 @@ class IntensiveReadingPipeline:
                         "",
                         f"{type(exc).__name__}: intensive reading round failed",
                         False,
+                        package.input_fingerprint,
+                        package.citation_ids,
                     )
             raise
 
@@ -188,6 +196,7 @@ class IntensiveReadingPipeline:
         )
         try:
             raw = self._run_with_heartbeat(chapter_id, owner_id, "review", prompt)
+            _validate_output_citations(raw, self._citation_ids)
             review = _parse_review(raw)
             if not review["passed"] or review["issues"]:
                 raise ValueError("chapter review rejected")
@@ -215,6 +224,8 @@ class IntensiveReadingPipeline:
                 run.id,
                 raw,
                 self._candidate_paths,
+                self._run_metadata,
+                self._input_fingerprint,
             )
         except Exception as exc:
             current = self.repo.get_chapter_generation_run(run.id)
@@ -249,9 +260,14 @@ class IntensiveReadingPipeline:
         try:
             self.run_dir.mkdir(parents=True, exist_ok=True)
             package = build_task_package(self.repo, chapter_id, round_key)
+            self._input_fingerprint = package.input_fingerprint
+            self._citation_ids = package.citation_ids
             if round_key not in CODEX_ROUNDS:
                 input_path = write_task_package(package, self.run_dir)
             output = self.executor.run(round_key, package.content)
+            _validate_output_citations(output, package.citation_ids)
+            if self.repo.chapter_input_snapshot(chapter_id)[1] != package.input_fingerprint:
+                raise ValueError("chapter input fingerprint changed")
             output_path.write_text(output, encoding="utf-8")
             self._materialize_round(chapter_id, round_key, output)
             self.repo.upsert_run(
@@ -263,6 +279,8 @@ class IntensiveReadingPipeline:
                 output_path=str(output_path),
                 output=output,
                 stale=False,
+                input_fingerprint=package.input_fingerprint,
+                citation_ids=package.citation_ids,
             )
         except Exception as exc:
             self.repo.upsert_run(
@@ -274,8 +292,28 @@ class IntensiveReadingPipeline:
                 output_path=str(output_path),
                 output=f"{type(exc).__name__}: intensive reading round failed",
                 stale=False,
+                input_fingerprint=package.input_fingerprint if "package" in locals() else "",
+                citation_ids=package.citation_ids if "package" in locals() else (),
             )
             raise
+
+    def _accept_package(self, package) -> None:
+        if not self._input_fingerprint:
+            self._input_fingerprint = package.input_fingerprint
+            self._citation_ids = package.citation_ids
+        elif (
+            package.input_fingerprint != self._input_fingerprint
+            or package.citation_ids != self._citation_ids
+        ):
+            raise ValueError("chapter input fingerprint changed")
+        self._run_metadata[package.round_key] = (
+            package.input_fingerprint,
+            package.citation_ids,
+        )
+        self._run_metadata["review"] = (
+            package.input_fingerprint,
+            package.citation_ids,
+        )
 
     def _materialize_round(self, chapter_id: str, round_key: str, output: str) -> None:
         chapter = self.repo.get_chapter(chapter_id)
@@ -333,6 +371,12 @@ def _safe_chapter_error(exc: Exception) -> str:
         if "/" not in value and "\\" not in value
         else f"{type(exc).__name__}: chapter round failed"
     )
+
+
+def _validate_output_citations(output: str, allowed: tuple[str, ...]) -> None:
+    unknown = sorted(set(CITATION_RE.findall(output)) - set(allowed))
+    if unknown:
+        raise ValueError("unknown citation id")
 
 
 def _parse_review(raw: str) -> dict:
