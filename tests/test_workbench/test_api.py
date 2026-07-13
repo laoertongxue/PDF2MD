@@ -1703,7 +1703,11 @@ def test_draft_chapter_run_returns_conflict(tmp_path):
     assert res.json()["detail"] == "chapter must be CONFIRMED before intensive reading"
 
 
-def test_run_hybrid_requires_deepseek_settings(tmp_path):
+def test_run_hybrid_requires_deepseek_settings(tmp_path, monkeypatch):
+    def missing_secret(_service, _account):
+        raise KeychainError("missing")
+
+    monkeypatch.setattr(routes_workbench, "read_secret", missing_secret)
     c = client(tmp_path)
     root = course_root(tmp_path)
     course = c.post(
