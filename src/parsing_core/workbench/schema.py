@@ -190,6 +190,11 @@ CREATE TABLE IF NOT EXISTS wb_topic_markdown_sync (
   lease_expires_at INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS wb_schema_versions (
+  component TEXT PRIMARY KEY,
+  version INTEGER NOT NULL CHECK (version >= 0)
+);
+
 CREATE INDEX IF NOT EXISTS idx_wb_sources_course ON wb_sources(course_id);
 CREATE INDEX IF NOT EXISTS idx_wb_chapters_course ON wb_chapters(course_id);
 CREATE INDEX IF NOT EXISTS idx_wb_cards_course ON wb_cards(course_id);
@@ -205,10 +210,349 @@ CREATE INDEX IF NOT EXISTS idx_wb_topic_cards_topic ON wb_topic_cards(topic_id);
 CREATE INDEX IF NOT EXISTS idx_wb_topic_runs_topic ON wb_topic_runs(topic_id, started_at);
 """
 
+OCR_SCHEMA_VERSION = 3
+
+
+class UnsupportedOcrSchemaVersionError(RuntimeError):
+    """Raised when a database was created by a newer OCR schema."""
+
+
+OCR_TABLE_ORDER = (
+    "wb_ocr_pages",
+    "wb_ocr_observations",
+    "wb_ocr_diffs",
+    "wb_ocr_decisions",
+    "wb_page_blocks",
+    "wb_ocr_leases",
+)
+OCR_TABLE_SQL = {
+    "wb_ocr_pages": """
+        CREATE TABLE wb_ocr_pages (
+          id TEXT PRIMARY KEY NOT NULL,
+          source_id TEXT NOT NULL REFERENCES wb_sources(id) ON DELETE CASCADE,
+          page_number INTEGER NOT NULL CHECK (page_number >= 1),
+          render_config_hash TEXT NOT NULL,
+          image_path TEXT NOT NULL,
+          input_hash TEXT NOT NULL,
+          created_at INTEGER NOT NULL CHECK (created_at >= 0),
+          UNIQUE(source_id, page_number, render_config_hash, input_hash)
+        )
+    """,
+    "wb_ocr_observations": """
+        CREATE TABLE wb_ocr_observations (
+          id TEXT PRIMARY KEY NOT NULL,
+          page_id TEXT NOT NULL REFERENCES wb_ocr_pages(id) ON DELETE CASCADE,
+          engine TEXT NOT NULL CHECK (
+            engine IN ('apple_vision', 'codex_vision', 'baidu_pp_structure')
+          ),
+          input_hash TEXT NOT NULL,
+          engine_config_hash TEXT NOT NULL,
+          payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+          created_at INTEGER NOT NULL CHECK (created_at >= 0),
+          UNIQUE(page_id, engine, input_hash, engine_config_hash),
+          UNIQUE(id, page_id)
+        )
+    """,
+    "wb_ocr_diffs": """
+        CREATE TABLE wb_ocr_diffs (
+          id TEXT PRIMARY KEY NOT NULL,
+          page_id TEXT NOT NULL REFERENCES wb_ocr_pages(id) ON DELETE CASCADE,
+          left_observation_id TEXT NOT NULL,
+          right_observation_id TEXT NOT NULL,
+          diff_json TEXT NOT NULL CHECK (json_valid(diff_json)),
+          adjudication_reason TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL CHECK (created_at >= 0),
+          FOREIGN KEY(left_observation_id, page_id)
+            REFERENCES wb_ocr_observations(id, page_id) ON DELETE CASCADE,
+          FOREIGN KEY(right_observation_id, page_id)
+            REFERENCES wb_ocr_observations(id, page_id) ON DELETE CASCADE
+        )
+    """,
+    "wb_ocr_decisions": """
+        CREATE TABLE wb_ocr_decisions (
+          page_id TEXT PRIMARY KEY NOT NULL REFERENCES wb_ocr_pages(id) ON DELETE CASCADE,
+          status TEXT NOT NULL CHECK (
+            status IN ('direct', 'automated_adjudicated', 'waiting_resource', 'failed')
+          ),
+          final_blocks_json TEXT NOT NULL CHECK (json_valid(final_blocks_json)),
+          evidence_json TEXT NOT NULL CHECK (json_valid(evidence_json)),
+          confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+          decided_at INTEGER NOT NULL CHECK (decided_at >= 0)
+        )
+    """,
+    "wb_page_blocks": """
+        CREATE TABLE wb_page_blocks (
+          id TEXT PRIMARY KEY NOT NULL,
+          page_id TEXT NOT NULL REFERENCES wb_ocr_pages(id) ON DELETE CASCADE,
+          seq INTEGER NOT NULL CHECK (seq >= 0),
+          block_type TEXT NOT NULL CHECK (
+            block_type IN (
+              'title', 'body', 'page_number', 'footnote', 'table', 'formula', 'image', 'text'
+            )
+          ),
+          text TEXT NOT NULL,
+          bbox_json TEXT NOT NULL CHECK (json_valid(bbox_json)),
+          confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+          created_at INTEGER NOT NULL CHECK (created_at >= 0),
+          UNIQUE(page_id, seq)
+        )
+    """,
+    "wb_ocr_leases": """
+        CREATE TABLE wb_ocr_leases (
+          page_id TEXT PRIMARY KEY NOT NULL REFERENCES wb_ocr_pages(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL,
+          heartbeat_at INTEGER NOT NULL CHECK (heartbeat_at >= 0),
+          expires_at INTEGER NOT NULL CHECK (expires_at > heartbeat_at),
+          input_fingerprint TEXT NOT NULL
+        )
+    """,
+}
+OCR_INDEX_SQL = {
+    "idx_wb_ocr_pages_source": (
+        "CREATE INDEX idx_wb_ocr_pages_source ON wb_ocr_pages(source_id, page_number)"
+    ),
+    "idx_wb_ocr_observations_page": (
+        "CREATE INDEX idx_wb_ocr_observations_page "
+        "ON wb_ocr_observations(page_id, created_at)"
+    ),
+    "idx_wb_ocr_diffs_page": (
+        "CREATE INDEX idx_wb_ocr_diffs_page ON wb_ocr_diffs(page_id, created_at)"
+    ),
+    "idx_wb_page_blocks_page": (
+        "CREATE INDEX idx_wb_page_blocks_page ON wb_page_blocks(page_id, seq)"
+    ),
+}
+OCR_INDEX_SIGNATURES = {
+    "idx_wb_ocr_pages_source": (
+        "wb_ocr_pages",
+        ("source_id", "page_number"),
+        False,
+        "c",
+        False,
+    ),
+    "idx_wb_ocr_observations_page": (
+        "wb_ocr_observations",
+        ("page_id", "created_at"),
+        False,
+        "c",
+        False,
+    ),
+    "idx_wb_ocr_diffs_page": (
+        "wb_ocr_diffs",
+        ("page_id", "created_at"),
+        False,
+        "c",
+        False,
+    ),
+    "idx_wb_page_blocks_page": ("wb_page_blocks", ("page_id", "seq"), False, "c", False),
+}
+OCR_TABLE_COLUMNS = {
+    "wb_ocr_pages": (
+        "id",
+        "source_id",
+        "page_number",
+        "render_config_hash",
+        "image_path",
+        "input_hash",
+        "created_at",
+    ),
+    "wb_ocr_observations": (
+        "id",
+        "page_id",
+        "engine",
+        "input_hash",
+        "engine_config_hash",
+        "payload_json",
+        "created_at",
+    ),
+    "wb_ocr_diffs": (
+        "id",
+        "page_id",
+        "left_observation_id",
+        "right_observation_id",
+        "diff_json",
+        "adjudication_reason",
+        "created_at",
+    ),
+    "wb_ocr_decisions": (
+        "page_id",
+        "status",
+        "final_blocks_json",
+        "evidence_json",
+        "confidence",
+        "decided_at",
+    ),
+    "wb_page_blocks": (
+        "id",
+        "page_id",
+        "seq",
+        "block_type",
+        "text",
+        "bbox_json",
+        "confidence",
+        "created_at",
+    ),
+    "wb_ocr_leases": (
+        "page_id",
+        "owner_id",
+        "heartbeat_at",
+        "expires_at",
+        "input_fingerprint",
+    ),
+}
+OCR_MIGRATION_DEFAULTS = {
+    "wb_ocr_observations": {"engine_config_hash": ""},
+    "wb_ocr_diffs": {"adjudication_reason": ""},
+    "wb_ocr_decisions": {"decided_at": 0},
+}
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+    return tuple(row[1] for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _ocr_schema_version(conn: sqlite3.Connection) -> int | None:
+    if not _table_columns(conn, "wb_schema_versions"):
+        return None
+    version = conn.execute(
+        "SELECT version FROM wb_schema_versions WHERE component = 'ocr'"
+    ).fetchone()
+    return None if version is None else version[0]
+
+
+def _reject_future_ocr_schema(conn: sqlite3.Connection) -> None:
+    version = _ocr_schema_version(conn)
+    if version is not None and version > OCR_SCHEMA_VERSION:
+        raise UnsupportedOcrSchemaVersionError(
+            f"database OCR schema version {version} is newer than supported "
+            f"version {OCR_SCHEMA_VERSION}; refusing to modify it"
+        )
+
+
+def _ocr_tables_are_current(conn: sqlite3.Connection) -> bool:
+    for table in OCR_TABLE_ORDER:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+        if row is None or "".join(row[0].split()).lower() != "".join(
+            OCR_TABLE_SQL[table].split()
+        ).lower():
+            return False
+    return True
+
+
+def _index_signature(
+    conn: sqlite3.Connection, index_name: str
+) -> tuple[str, tuple[str, ...], bool, str, bool] | None:
+    index = conn.execute(
+        "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?",
+        (index_name,),
+    ).fetchone()
+    if index is None:
+        return None
+    table = index[0]
+    details = next(
+        row for row in conn.execute(f"PRAGMA index_list({table})") if row[1] == index_name
+    )
+    columns = tuple(row[2] for row in conn.execute(f"PRAGMA index_info({index_name})"))
+    return table, columns, bool(details[2]), details[3], bool(details[4])
+
+
+def _ocr_indexes_are_current(conn: sqlite3.Connection) -> bool:
+    return all(
+        _index_signature(conn, index_name) == signature
+        for index_name, signature in OCR_INDEX_SIGNATURES.items()
+    )
+
+
+def _repair_ocr_indexes(conn: sqlite3.Connection) -> None:
+    for index_name, expected in OCR_INDEX_SIGNATURES.items():
+        actual = _index_signature(conn, index_name)
+        if actual == expected:
+            continue
+        if actual is not None:
+            conn.execute(f"DROP INDEX {index_name}")
+        conn.execute(OCR_INDEX_SQL[index_name])
+
+
+def _backup_ocr_rows(conn: sqlite3.Connection) -> dict[str, list[dict[str, object]]]:
+    backups: dict[str, list[dict[str, object]]] = {}
+    for table in OCR_TABLE_ORDER:
+        columns = _table_columns(conn, table)
+        if not columns:
+            continue
+        cursor = conn.execute(f"SELECT * FROM {table}")
+        rows = cursor.fetchall()
+        missing = set(OCR_TABLE_COLUMNS[table]) - set(columns)
+        defaults = OCR_MIGRATION_DEFAULTS.get(table, {})
+        if rows and missing - defaults.keys():
+            raise RuntimeError(f"cannot safely migrate populated {table}: missing columns")
+        backups[table] = []
+        for row in rows:
+            restored = dict(zip(columns, row, strict=True))
+            restored.update({column: defaults[column] for column in missing})
+            backups[table].append(restored)
+    return backups
+
+
+def _restore_ocr_rows(
+    conn: sqlite3.Connection, backups: dict[str, list[dict[str, object]]]
+) -> None:
+    for table in OCR_TABLE_ORDER:
+        for row in backups.get(table, []):
+            columns = tuple(row)
+            placeholders = ", ".join("?" for _ in columns)
+            conn.execute(
+                f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
+                tuple(row[column] for column in columns),
+            )
+
+
+def _apply_ocr_schema(conn: sqlite3.Connection) -> None:
+    _reject_future_ocr_schema(conn)
+    if _ocr_schema_version(conn) == OCR_SCHEMA_VERSION and _ocr_tables_are_current(conn):
+        if _ocr_indexes_are_current(conn):
+            return
+        conn.execute("BEGIN")
+        try:
+            _repair_ocr_indexes(conn)
+        except Exception:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+        return
+    backups = _backup_ocr_rows(conn)
+    conn.execute("BEGIN")
+    try:
+        for table in reversed(OCR_TABLE_ORDER):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        for table in OCR_TABLE_ORDER:
+            conn.execute(OCR_TABLE_SQL[table])
+        _restore_ocr_rows(conn, backups)
+        for sql in OCR_INDEX_SQL.values():
+            conn.execute(sql)
+        conn.execute(
+            "INSERT INTO wb_schema_versions (component, version) VALUES ('ocr', ?) "
+            "ON CONFLICT(component) DO UPDATE SET version = excluded.version",
+            (OCR_SCHEMA_VERSION,),
+        )
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+
 
 def apply_workbench_schema(conn: sqlite3.Connection) -> None:
+    if conn.in_transaction:
+        raise RuntimeError("apply_workbench_schema must run outside an active transaction")
     conn.execute("PRAGMA foreign_keys = ON")
+    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        raise RuntimeError("apply_workbench_schema could not enable foreign keys")
+    _reject_future_ocr_schema(conn)
     conn.executescript(WORKBENCH_SCHEMA_SQL)
+    _apply_ocr_schema(conn)
     chapter_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_chapters)")}
     for name, definition in {
         "source_start": "INTEGER NOT NULL DEFAULT 0",
