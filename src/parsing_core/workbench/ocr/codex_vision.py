@@ -298,21 +298,38 @@ class CodexVisionExecutor:
 
     def _read_codex_version(self) -> str:
         self._verify_identity()
+        process = None
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [str(self.codex_path), "--version"],
-                text=True,
-                capture_output=True,
-                timeout=min(max(self.timeout, 0.1), 5),
-                check=False,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 env=_codex_environment(),
+                close_fds=True,
+                start_new_session=True,
+            )
+            stdout = _communicate_bounded(
+                process,
+                b"",
+                timeout=min(max(self.timeout, 0.1), 5),
+                process_group_id=process.pid,
             )
         except Exception:
+            if process is not None and process.poll() is None:
+                _terminate_process(process, process.pid)
             raise CodexVisionError("codex cli is not available") from None
-        if result.returncode != 0:
-            raise CodexVisionError("codex cli is not available")
-        version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else "unknown"
-        return _sanitize_version(version)
+        finally:
+            if process is not None:
+                _close_process_pipes(process)
+        try:
+            version_output = stdout.decode("utf-8")
+            version = (
+                version_output.strip().splitlines()[0] if version_output.strip() else "unknown"
+            )
+            return _sanitize_version(version)
+        except Exception:
+            raise CodexVisionError("codex cli is not available") from None
 
     def _verify_identity(self) -> None:
         try:

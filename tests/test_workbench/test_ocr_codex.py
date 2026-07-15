@@ -38,6 +38,31 @@ def log(event, **extra):
         handle.write(json.dumps({"event": event, **extra}, sort_keys=True) + "\n")
 
 if sys.argv[1:] == ["--version"]:
+    if mode == "version_huge_stdout":
+        sys.stdout.write("x" * (2 * 1024 * 1024))
+        sys.stdout.flush()
+        raise SystemExit(0)
+    if mode == "version_spawn_child_timeout":
+        child_code = r'''
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+log_path = Path(sys.argv[1])
+with log_path.open("a", encoding="utf-8") as handle:
+    event = {"event": "version_child_start", "pid": os.getpid(), "pgid": os.getpgrp()}
+    handle.write(json.dumps(event) + "\n")
+signal.signal(signal.SIGTERM, lambda signum, frame: None)
+while True:
+    time.sleep(1)
+'''
+        child = subprocess.Popen([sys.executable, "-c", child_code, str(log_path)])
+        log("version_child_spawned", child_pid=child.pid)
+        signal.signal(signal.SIGTERM, lambda signum, frame: None)
+        while True:
+            time.sleep(1)
     print(version)
     raise SystemExit(0)
 
@@ -589,6 +614,32 @@ def test_timeout_kills_parent_and_child_and_cleans_tempdir(tmp_path, page_image)
         if _pid_alive(child_pid):
             os.kill(child_pid, signal.SIGKILL)
     assert list((tmp_path / "jobs").glob("*")) == []
+
+
+def test_version_probe_rejects_unbounded_output(tmp_path):
+    fake_codex = _write_fake_codex(tmp_path / "fake_codex.py", mode="version_huge_stdout")
+    (tmp_path / "cache").mkdir()
+
+    with pytest.raises(CodexVisionError, match="codex cli is not available"):
+        _executor(fake_codex, tmp_path)
+
+
+def test_version_probe_timeout_kills_parent_and_child(tmp_path):
+    fake_codex = _write_fake_codex(tmp_path / "fake_codex.py", mode="version_spawn_child_timeout")
+    (tmp_path / "cache").mkdir()
+
+    with pytest.raises(CodexVisionError, match="codex cli is not available"):
+        _executor(fake_codex, tmp_path, timeout=0.5)
+
+    events = _events(fake_codex)
+    child_pid = next(
+        event["child_pid"] for event in events if event["event"] == "version_child_spawned"
+    )
+    try:
+        assert _wait_until_gone(child_pid)
+    finally:
+        if _pid_alive(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
 
 
 @pytest.mark.parametrize(
