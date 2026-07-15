@@ -19,7 +19,10 @@ require "$runtime/bin/python3"
 test -x "$launcher" || { echo "launcher is not executable: $launcher" >&2; exit 1; }
 test -x "$runtime/bin/python3" || { echo "runtime is not executable" >&2; exit 1; }
 
-forbidden='(/Users/|/opt/homebrew|/usr/bin/python|PDF2MD/\.venv|Documents/PDF2MD)'
+# Match concrete development-machine paths, not source-code regexes such as
+# /Users/[^\\s]+.  The user-name/path components are deliberately restricted
+# to filesystem-safe characters so this remains a release-artifact check.
+forbidden='(^|[^A-Za-z0-9_])/(Users/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*|opt/homebrew(/[A-Za-z0-9._-]+)*|usr/bin/python[0-9.]*|Library/Frameworks(/[A-Za-z0-9._-]+)*)'
 while IFS= read -r -d '' file; do
   if ! file "$file" | grep -q 'Mach-O'; then
     if rg -a -n "$forbidden" "$file"; then

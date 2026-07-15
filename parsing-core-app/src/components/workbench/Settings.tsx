@@ -2,9 +2,11 @@ import { FormEvent, useEffect, useState } from "react";
 import { Loader2, Save, Wifi } from "lucide-react";
 import { getWorkbenchSettings, saveDeepSeekSettings, testDeepSeekSettings } from "../../api/workbench";
 
+const MODEL = "deepseek-v4-pro";
+
 export default function Settings() {
   const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState("");
+  const [model, setModel] = useState(MODEL);
   const [maskedKey, setMaskedKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -15,7 +17,7 @@ export default function Settings() {
   useEffect(() => {
     getWorkbenchSettings()
       .then((settings) => {
-        setModel(settings.deepseek_model);
+        setModel(MODEL);
         setMaskedKey(settings.deepseek_key_masked);
       })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : "设置加载失败"))
@@ -81,9 +83,9 @@ export default function Settings() {
             <span className="text-xs text-zinc-500">Model</span>
             <input
               value={model}
-              onChange={(event) => setModel(event.target.value)}
-              placeholder="deepseek-chat"
-              className="mt-1 w-full rounded-md border border-zinc-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-200"
+              readOnly
+              aria-readonly="true"
+              className="mt-1 w-full cursor-not-allowed border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-700"
             />
           </label>
         </div>

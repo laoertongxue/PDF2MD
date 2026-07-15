@@ -1,10 +1,12 @@
 import json
+import threading
 from urllib.error import HTTPError
 
 import pytest
 
 from parsing_core.workbench.deepseek import (
     MAX_HTTP_RESPONSE_BYTES,
+    MODEL_NAME,
     TOPIC_OUTLINE_MAX_TOKENS,
     DeepSeekClient,
     DeepSeekError,
@@ -36,7 +38,7 @@ def test_deepseek_client_returns_message(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    client = DeepSeekClient(api_key="sk-test", model="deepseek-chat")
+    client = DeepSeekClient(api_key="sk-test", model=MODEL_NAME)
     assert client.complete("hello", max_tokens=321) == "精读结果"
     assert request_payload["max_tokens"] == 321
 
@@ -47,7 +49,7 @@ def test_deepseek_client_raises_on_http_error(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    client = DeepSeekClient(api_key="sk-test", model="deepseek-chat")
+    client = DeepSeekClient(api_key="sk-test", model=MODEL_NAME)
     with pytest.raises(DeepSeekError):
         client.complete("hello")
 
@@ -58,7 +60,7 @@ def test_deepseek_client_raises_on_empty_choices(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    client = DeepSeekClient(api_key="sk-test", model="deepseek-chat")
+    client = DeepSeekClient(api_key="sk-test", model=MODEL_NAME)
     with pytest.raises(DeepSeekError, match="deepseek returned empty content"):
         client.complete("hello")
 
@@ -122,7 +124,7 @@ def test_http_response_read_is_bounded_and_oversize_is_stable(monkeypatch):
         "parsing_core.workbench.deepseek.json.loads",
         lambda value: (_ for _ in ()).throw(AssertionError("JSON must not be parsed")),
     )
-    client = DeepSeekClient(api_key="sk-test", model="deepseek-chat")
+    client = DeepSeekClient(api_key="sk-test", model=MODEL_NAME)
 
     with pytest.raises(DeepSeekError, match="deepseek response exceeds limit"):
         client.complete("hello")
@@ -139,7 +141,7 @@ def test_malformed_http_response_has_stable_error(monkeypatch, body):
         "urllib.request.urlopen",
         lambda req, timeout: MalformedResponse({}),
     )
-    client = DeepSeekClient(api_key="sk-secret", model="deepseek-chat")
+    client = DeepSeekClient(api_key="sk-secret", model=MODEL_NAME)
 
     with pytest.raises(DeepSeekError, match="deepseek returned malformed response") as error:
         client.complete("hello")
@@ -147,3 +149,33 @@ def test_malformed_http_response_has_stable_error(monkeypatch, body):
     decoded = body.decode("utf-8", errors="ignore")
     if decoded:
         assert decoded not in str(error.value)
+
+
+def test_malformed_choice_item_has_stable_error(monkeypatch):
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda req, timeout: FakeResponse({"choices": ["not-an-object"]}),
+    )
+    client = DeepSeekClient(api_key="sk-secret", model=MODEL_NAME)
+    with pytest.raises(DeepSeekError, match="malformed response"):
+        client.complete("hello")
+
+
+def test_retry_limit_is_bounded_and_cancellable(monkeypatch):
+    calls = []
+
+    def failing_urlopen(req, timeout):
+        calls.append(1)
+        raise HTTPError(req.full_url, 503, "server details", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", failing_urlopen)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    event = threading.Event()
+    client = DeepSeekClient(api_key="sk-secret", model=MODEL_NAME)
+    with pytest.raises(DeepSeekError, match="request failed"):
+        client.complete("hello", retries=2)
+    assert len(calls) == 3
+
+    event.set()
+    with pytest.raises(DeepSeekError, match="cancelled"):
+        client.complete("hello", cancel_event=event)

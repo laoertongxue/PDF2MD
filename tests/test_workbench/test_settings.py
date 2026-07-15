@@ -8,13 +8,13 @@ from parsing_core.workbench.settings import WorkbenchSettings, load_settings, sa
 
 def test_settings_roundtrip(tmp_path):
     path = tmp_path / "workbench-settings.json"
-    save_settings(path, WorkbenchSettings(deepseek_model="deepseek-chat"))
+    save_settings(path, WorkbenchSettings(deepseek_model="deepseek-v4-pro"))
 
-    assert load_settings(path).deepseek_model == "deepseek-chat"
+    assert load_settings(path).deepseek_model == "deepseek-v4-pro"
 
 
 def test_settings_default_when_missing(tmp_path):
-    assert load_settings(tmp_path / "missing.json").deepseek_model == "deepseek-chat"
+    assert load_settings(tmp_path / "missing.json").deepseek_model == "deepseek-v4-pro"
 
 
 def test_mask_secret():

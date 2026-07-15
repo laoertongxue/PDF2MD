@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "revision", "action", "chapter_id", "input_fingerprint", "proposal_fingerprint", "evidence_fingerprint", "chapter", "chapter_fingerprint"],
+  "properties": {
+    "schema_version": {"const": 1}, "revision": {"type": "integer", "minimum": 1},
+    "action": {"enum": ["confirm", "reject", "edit"]},
+    "chapter_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "input_fingerprint": {"type": "string", "minLength": 1, "maxLength": 128},
+    "proposal_fingerprint": {"type": "string", "minLength": 1, "maxLength": 128},
+    "evidence_fingerprint": {"type": "string", "minLength": 1, "maxLength": 128},
+    "chapter": {"anyOf": [{"$ref": "chapter-tree.json#/$defs/chapter"}, {"type": "null"}]},
+    "chapter_fingerprint": {"type": ["string", "null"], "minLength": 1, "maxLength": 128}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"action": {"enum": ["confirm", "edit"]}}},
+      "then": {
+        "properties": {
+          "chapter": {"$ref": "#/$defs/chapter"},
+          "chapter_fingerprint": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"action": {"const": "reject"}}},
+      "then": {
+        "properties": {
+          "chapter": {"type": "null"},
+          "chapter_fingerprint": {"type": "null"}
+        }
+      }
+    }
+  ]
+}

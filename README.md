@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/laoertongxue/PDF2MD?include_prereleases)](https://github.com/laoertongxue/PDF2MD/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-blue)](https://github.com/laoertongxue/PDF2MD/releases)
 
-PDF2MD 是一个面向 MBA / 课程教材精读的桌面应用：把 PDF 等课程资料整理成 Markdown，并辅助生成结构化精读笔记、Mermaid 图和写作卡片。
+PDF2MD 是一个面向 MBA / 课程教材精读的桌面应用：把 PDF 教材按课程和章节整理成 Markdown，并辅助生成结构化精读笔记、Mermaid 图和写作卡片。
 
 中文 | [English](#english)
 
@@ -23,10 +23,38 @@ PDF2MD 不是普通的“PDF 转 Markdown”工具。它的目标是帮助你重
 ### 核心特性
 
 - 课程工作台：按课程组织教材、章节、精读结果和卡片
-- Markdown 产出：把资料整理为便于继续写作的 Markdown
+- 多教材课程：一个课程可以管理多本教材，并分别识别章节、保留来源和页码
+- Markdown 产出：把 PDF 教材章节整理为便于继续写作的 Markdown
 - Mermaid 预览：精读笔记中的知识图和应用流程图可以直接预览
-- 大模型辅助：支持围绕章节生成概念解释、案例解读、实际应用和写作卡片
+- 无人值守 OCR：Apple Vision 主识别，Codex CLI 做独立视觉复核，冲突/复杂/抽样页面才升级百度 OCR，最后由 Codex CLI 终审
+- 精读生成：固定使用 DeepSeek `deepseek-v4-pro`，生成概念通俗解释、案例解读、实际问题解决、应用边界和行动建议
 - 桌面应用：Tauri 客户端自动拉起本地解析服务
+
+### 质量门禁与外部依赖
+
+处理链路不是“识别失败也继续生成”。页面证据、章节边界、模型输出、Mermaid 结构和
+最终 Markdown 都必须通过指纹与结构校验；OCR、章节识别或精读生成失败时，任务会显示为
+失败/阻断，不会生成可发布结果。
+
+- Apple Vision 在本机执行首轮 OCR。
+- Codex CLI 必须是安全的、可直接执行的真实文件；符号链接或不满足安全检查的 CLI 会被拒绝。
+- 百度 OCR 只用于冲突、复杂或稳定抽样页面。百度 Key 是可选配置；未配置时相关页面会阻断，
+  不会静默降级或假装完成。
+- DeepSeek API Key 通过 macOS Keychain 保存；应用不会把 Key 写入课程文件、设置文件或日志。
+- 生成模型固定为 `deepseek-v4-pro`，不会静默切换到其他模型。
+
+### 当前真实教材验证状态
+
+已用真实扫描教材验证 Apple Vision 的 PDF 渲染和 OCR 缓存链路，包括《管理运筹学》和
+《数据、模型与决策》两本教材。当前机器上的 `/opt/homebrew/bin/codex` 是符号链接，
+被安全执行门禁正确拒绝，因此这两本教材尚未完成无人值守的 Codex 复核、百度升级、章节确认、
+DeepSeek 精读和 Markdown 发布。应用会正确返回阻断状态，不会伪造完成结果。
+
+要运行完整链路，需要准备：
+
+1. 可直接执行且通过安全检查的 Codex CLI。
+2. 在“精读设置”中保存并测试 DeepSeek API Key。
+3. 仅在需要百度升级时配置百度 OCR Key。
 
 ### 下载桌面客户端
 
@@ -120,6 +148,8 @@ CI 门禁摘要：版本一致性与真实网络 E2E 已加入发布门禁；Mer
 MIT
 
 ## English
+
+The complete English README is also available at [README_EN.md](README_EN.md).
 
 PDF2MD is a desktop app for intensive course reading. It helps turn course materials into Markdown notes, Mermaid diagrams, and reusable writing cards.
 

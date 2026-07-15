@@ -5,7 +5,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class WorkbenchSettings:
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-pro"
 
 
 def load_settings(path: str | Path) -> WorkbenchSettings:
@@ -13,7 +13,7 @@ def load_settings(path: str | Path) -> WorkbenchSettings:
     if not settings_path.exists():
         return WorkbenchSettings()
     data = json.loads(settings_path.read_text(encoding="utf-8"))
-    return WorkbenchSettings(deepseek_model=data.get("deepseek_model") or "deepseek-chat")
+    return WorkbenchSettings(deepseek_model=data.get("deepseek_model") or "deepseek-v4-pro")
 
 
 def save_settings(path: str | Path, settings: WorkbenchSettings) -> None:

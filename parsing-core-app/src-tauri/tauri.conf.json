@@ -27,13 +27,15 @@
   "bundle": {
     "active": true,
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "minimumSystemVersion": "13.0"
     },
     "icon": [
       "icons/icon.png"
     ],
     "externalBin": [
-      "binaries/python3"
+      "binaries/python3",
+      "binaries/vision-ocr"
     ],
     "resources": {
       "../../src": "src",

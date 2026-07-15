@@ -1,6 +1,8 @@
 import json
 import os
+import threading
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
@@ -38,6 +40,19 @@ from parsing_core.workbench.executors import StubIntensiveReadingExecutor
 from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
 from parsing_core.workbench.keychain import KeychainError, mask_secret, read_secret, save_secret
 from parsing_core.workbench.markdown_sync import sync_chapter_markdown
+from parsing_core.workbench.ocr.baidu import BaiduOcrClient
+from parsing_core.workbench.ocr.chapters import (
+    load_chapter_confirmation,
+    validate_chapter_confirmation,
+)
+from parsing_core.workbench.ocr.codex_vision import CodexVisionExecutor
+from parsing_core.workbench.ocr.deepseek_intensive_reading import (
+    DeepSeekIntensiveReadingGenerator,
+)
+from parsing_core.workbench.ocr.markdown_notes import build_intensive_reading_note
+from parsing_core.workbench.ocr.orchestrator import OcrOrchestrator
+from parsing_core.workbench.ocr.vision import RegisteredPdfSources, VisionClient
+from parsing_core.workbench.ocr.workflow import OcrWorkflow, bind_published_note
 from parsing_core.workbench.pipeline import (
     FIXED_CHAPTER_KINDS,
     ChapterMarkdownSyncError,
@@ -64,6 +79,8 @@ from parsing_core.workbench.topic_pipeline import (
 router = APIRouter(prefix="/api/workbench", tags=["workbench"])
 KEYCHAIN_SERVICE = "pdf2md.deepseek"
 KEYCHAIN_ACCOUNT = "api-key"
+_OCR_WORKFLOWS: dict[str, OcrWorkflow] = {}
+_OCR_WORKFLOWS_LOCK = threading.Lock()
 
 
 class TopicBlockPatchRequest(BaseModel):
@@ -148,6 +165,132 @@ def _source_response(source) -> SourceResponse:
         title=source.title,
         status=source.status,
     )
+
+
+def _ocr_state_root(course, source) -> Path:
+    return Path(course.root_dir) / ".pdf2md" / "ocr" / source.id
+
+
+def _find_vision_helper() -> Path:
+    candidates = []
+    configured = os.environ.get("PDF2MD_VISION_HELPER")
+    if configured:
+        candidates.append(Path(configured))
+    resources = os.environ.get("PDF2MD_RESOURCES")
+    if resources:
+        resources_path = Path(resources)
+        candidates.extend(
+            [resources_path / "vision-ocr", resources_path / "vision-ocr-aarch64-apple-darwin"]
+        )
+    project_root = Path(__file__).resolve().parents[4]
+    candidates.extend(
+        [
+            project_root / "parsing-core-app/src-tauri/binaries/vision-ocr-aarch64-apple-darwin",
+            project_root / "parsing-core-app/src-tauri/binaries/vision-ocr",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError("Apple Vision OCR helper is not available")
+
+
+class _DeadlineAdapter:
+    def __init__(self, client):
+        self.client = client
+
+    def recognize(self, *args, **kwargs):
+        kwargs.pop("deadline", None)
+        return self.client.recognize(*args, **kwargs)
+
+    def transcribe_page(self, *args, **kwargs):
+        kwargs.pop("deadline", None)
+        return self.client.transcribe_page(*args, **kwargs)
+
+    def adjudicate_page(self, *args, **kwargs):
+        kwargs.pop("deadline", None)
+        return self.client.adjudicate_page(*args, **kwargs)
+
+
+def _ocr_workflow(source, course) -> OcrWorkflow:
+    with _OCR_WORKFLOWS_LOCK:
+        existing = _OCR_WORKFLOWS.get(source.id)
+        if existing is not None:
+            return existing
+
+    pdf_path = Path(source.file_path)
+    if pdf_path.suffix.lower() != ".pdf":
+        raise HTTPException(422, "无人值守 OCR 当前只接受 PDF 教材")
+    state_root = _ocr_state_root(course, source)
+
+    def factory(is_cancelled):
+        try:
+            helper = _find_vision_helper()
+            codex_path = resolve_codex_path()
+            baidu_key = os.environ.get("PDF2MD_BAIDU_API_KEY", "").strip()
+            if not baidu_key:
+                raise RuntimeError("百度 OCR 未配置，任务已阻断")
+            validator = RegisteredPdfSources([pdf_path])
+            vision = VisionClient(
+                helper_path=helper,
+                cache_root=state_root / "cache",
+                source_validator=validator,
+                helper_version="bundled-vision",
+                timeout=90,
+            )
+            codex = CodexVisionExecutor(
+                codex_path=codex_path,
+                temp_root=state_root / "codex-tmp",
+                trusted_image_root=state_root / "cache" / "jobs",
+                timeout=180,
+            )
+            baidu = BaiduOcrClient(api_key=baidu_key)
+        except Exception as exc:
+            from parsing_core.workbench.ocr.workflow import WorkflowBlockedError
+
+            raise WorkflowBlockedError(str(exc)) from exc
+        return OcrOrchestrator(
+            vision=_DeadlineAdapter(vision),
+            codex=_DeadlineAdapter(codex),
+            baidu=_DeadlineAdapter(baidu),
+            state_root=state_root,
+            image_loader=lambda path, **_: Path(path).read_bytes(),
+            is_cancelled=is_cancelled,
+        )
+
+    workflow = OcrWorkflow(
+        source_path=pdf_path, state_root=state_root, orchestrator_factory=factory
+    )
+    with _OCR_WORKFLOWS_LOCK:
+        return _OCR_WORKFLOWS.setdefault(source.id, workflow)
+
+
+def _ocr_final_pages(state_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    final_path = state_root / "batch-final.json"
+    try:
+        final = json.loads(final_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(409, "OCR 尚未发布完整证据") from exc
+    if not isinstance(final, dict) or final.get("status") != "completed":
+        raise HTTPException(409, "OCR 尚未发布完整证据")
+    fingerprint = final.get("input_fingerprint")
+    pages = final.get("pages")
+    if not isinstance(fingerprint, str) or not isinstance(pages, dict):
+        raise HTTPException(409, "OCR 证据指纹无效")
+    normalized = []
+    for key in sorted(pages, key=int):
+        record = pages[key]
+        if not isinstance(record, dict) or record.get("status") != "completed":
+            raise HTTPException(409, "OCR 页证据不完整")
+        normalized_record = dict(record)
+        normalized_record["page_input_fingerprint"] = fingerprint
+        normalized.append(normalized_record)
+    return final, normalized
+
+
+class OcrChapterConfirmationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    chapter_id: str = Field(min_length=1, max_length=128)
 
 
 class _CourseNotFoundError(Exception):
@@ -305,6 +448,135 @@ async def list_sources(course_id: str, sch: SchedulerDep):
     if repo.get_course(course_id) is None:
         raise HTTPException(404, "course not found")
     return [_source_response(source) for source in repo.list_sources(course_id)]
+
+
+@router.post("/sources/{source_id}/ocr")
+async def start_source_ocr(source_id: str, sch: SchedulerDep):
+    repo = _repo(sch)
+    source = repo.get_source(source_id)
+    if source is None:
+        raise HTTPException(404, "source not found")
+    course = repo.get_course(source.course_id)
+    if course is None:
+        raise HTTPException(404, "course not found")
+    workflow = _ocr_workflow(source, course)
+    try:
+        workflow.start()
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return workflow.status()
+
+
+@router.get("/sources/{source_id}/ocr/status")
+async def source_ocr_status(source_id: str, sch: SchedulerDep):
+    repo = _repo(sch)
+    source = repo.get_source(source_id)
+    if source is None:
+        raise HTTPException(404, "source not found")
+    course = repo.get_course(source.course_id)
+    if course is None:
+        raise HTTPException(404, "course not found")
+    return _ocr_workflow(source, course).status()
+
+
+@router.post("/sources/{source_id}/ocr/cancel")
+async def cancel_source_ocr(source_id: str, sch: SchedulerDep):
+    repo = _repo(sch)
+    source = repo.get_source(source_id)
+    if source is None:
+        raise HTTPException(404, "source not found")
+    course = repo.get_course(source.course_id)
+    if course is None:
+        raise HTTPException(404, "course not found")
+    workflow = _ocr_workflow(source, course)
+    workflow.cancel()
+    return workflow.status()
+
+
+@router.post("/sources/{source_id}/ocr/chapters")
+async def recognize_source_chapters(source_id: str, sch: SchedulerDep):
+    repo = _repo(sch)
+    source = repo.get_source(source_id)
+    if source is None:
+        raise HTTPException(404, "source not found")
+    course = repo.get_course(source.course_id)
+    if course is None:
+        raise HTTPException(404, "course not found")
+    workflow = _ocr_workflow(source, course)
+    _final, pages = _ocr_final_pages(workflow.paths.root)
+    try:
+        tree = await run_in_threadpool(
+            lambda: workflow.detect_chapters() if pages else None
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if tree is None:
+        raise HTTPException(409, "OCR 证据为空")
+    return tree
+
+
+@router.post("/sources/{source_id}/ocr/chapters/confirm")
+async def confirm_source_chapter(
+    source_id: str, req: OcrChapterConfirmationRequest, sch: SchedulerDep
+):
+    repo = _repo(sch)
+    source = repo.get_source(source_id)
+    if source is None:
+        raise HTTPException(404, "source not found")
+    course = repo.get_course(source.course_id)
+    if course is None:
+        raise HTTPException(404, "course not found")
+    try:
+        return _ocr_workflow(source, course).confirm_chapter(req.chapter_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/sources/{source_id}/ocr/generate")
+async def generate_source_note(
+    source_id: str, req: OcrChapterConfirmationRequest, sch: SchedulerDep
+):
+    repo = _repo(sch)
+    source = repo.get_source(source_id)
+    if source is None:
+        raise HTTPException(404, "source not found")
+    course = repo.get_course(source.course_id)
+    if course is None:
+        raise HTTPException(404, "course not found")
+    workflow = _ocr_workflow(source, course)
+    final, pages = _ocr_final_pages(workflow.paths.root)
+    try:
+        tree = json.loads(workflow.paths.chapter_tree.read_text(encoding="utf-8"))
+        confirmation = load_chapter_confirmation(workflow.paths.confirmation)
+        validate_chapter_confirmation(confirmation, tree)
+        if confirmation["chapter_id"] != req.chapter_id:
+            raise ValueError("chapter confirmation target mismatch")
+        base = build_intensive_reading_note(
+            tree,
+            confirmation,
+            pages,
+            source_id=source.id,
+        )
+        api_key = _read_configured_deepseek_key()
+        settings = load_settings(_settings_path(sch))
+        generator = DeepSeekIntensiveReadingGenerator(
+            DeepSeekClient(api_key, settings.deepseek_model)
+        )
+        note = await run_in_threadpool(
+            lambda: generator.generate(base, output_path=workflow.paths.note)
+        )
+        bind_published_note(workflow.paths.final, workflow.paths.note, note["metadata"])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(409, "精读结果未通过证据门禁，未发布") from exc
+    return {
+        "status": "completed",
+        "publishable": True,
+        "markdown_path": str(workflow.paths.note),
+        "markdown": note["markdown"],
+        "input_fingerprint": final["input_fingerprint"],
+    }
 
 
 @router.post("/sources/{source_id}/detect-chapters", response_model=list[ChapterResponse])
@@ -554,7 +826,9 @@ async def get_workbench_settings(sch: SchedulerDep):
 async def save_deepseek_settings(req: DeepSeekSettingsRequest, sch: SchedulerDep):
     if req.api_key is not None and not req.api_key.strip():
         raise HTTPException(400, "deepseek api key cannot be empty")
-    settings = WorkbenchSettings(deepseek_model=req.model or "deepseek-chat")
+    if req.model != "deepseek-v4-pro":
+        raise HTTPException(400, "only deepseek-v4-pro is supported")
+    settings = WorkbenchSettings(deepseek_model=req.model or "deepseek-v4-pro")
     try:
         save_settings(_settings_path(sch), settings)
     except Exception as exc:

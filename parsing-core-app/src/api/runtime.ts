@@ -4,7 +4,7 @@ export function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in globalThis;
 }
 
-export type ServiceState = "starting" | "running" | "failed" | "restarting";
+export type ServiceState = "starting" | "running" | "offline" | "failed" | "restarting";
 export interface ServiceStatus {
   state: ServiceState;
   port: number;
@@ -26,7 +26,23 @@ export async function getWsBase(): Promise<string> {
 
 export async function getServiceStatus(): Promise<ServiceStatus> {
   if (!isTauriRuntime()) {
-    return { state: "running", port: Number(new URL(BROWSER_API_BASE).port) };
+    const port = Number(new URL(BROWSER_API_BASE).port);
+    try {
+      const response = await fetch(`${BROWSER_API_BASE}/health`, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(1500),
+      });
+      if (!response.ok) throw new Error(`health returned HTTP ${response.status}`);
+      const payload = await response.json() as { status?: unknown };
+      if (payload.status !== "ok") throw new Error("health response was not ok");
+      return { state: "running", port };
+    } catch (error) {
+      return {
+        state: "offline",
+        port,
+        error: { category: "offline", message: error instanceof Error ? error.message : "本地服务不可用" },
+      };
+    }
   }
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<ServiceStatus>("get_status");

@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 import urllib.request
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
@@ -8,6 +10,9 @@ DEFAULT_MAX_TOKENS = 4_096
 TOPIC_OUTLINE_MAX_TOKENS = 8_192
 FALLBACK_MAX_INPUT_TOKENS = 65_536
 MAX_HTTP_RESPONSE_BYTES = 3 * 1024 * 1024
+MODEL_NAME = "deepseek-v4-pro"
+MAX_TIMEOUT_SECONDS = 300
+MAX_RETRIES = 3
 
 
 class DeepSeekError(RuntimeError):
@@ -18,8 +23,10 @@ class DeepSeekClient:
     def __init__(self, api_key: str, model: str, base_url: str = "https://api.deepseek.com/chat/completions"):
         if not api_key:
             raise DeepSeekError("deepseek api key missing")
-        if not model:
-            raise DeepSeekError("deepseek model missing")
+        if model != MODEL_NAME:
+            raise DeepSeekError(f"only {MODEL_NAME} is supported")
+        if not base_url.lower().startswith("https://"):
+            raise DeepSeekError("DeepSeek endpoint must use HTTPS")
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
@@ -29,7 +36,15 @@ class DeepSeekClient:
         prompt: str,
         timeout: int = 120,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        cancel_event: threading.Event | None = None,
+        retries: int = 2,
     ) -> str:
+        if not isinstance(timeout, int) or timeout < 1 or timeout > MAX_TIMEOUT_SECONDS:
+            raise DeepSeekError("deepseek timeout is invalid")
+        if not isinstance(retries, int) or retries < 0 or retries > MAX_RETRIES:
+            raise DeepSeekError("deepseek retry limit is invalid")
+        if cancel_event is not None and cancel_event.is_set():
+            raise DeepSeekError("deepseek request cancelled")
         payload = json.dumps(
             {
                 "model": self.model,
@@ -49,11 +64,26 @@ class DeepSeekClient:
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as res:
-                raw = res.read(MAX_HTTP_RESPONSE_BYTES + 1)
-        except (HTTPError, URLError, TimeoutError) as exc:
-            raise DeepSeekError(str(exc)) from exc
+        raw = None
+        for attempt in range(retries + 1):
+            if cancel_event is not None and cancel_event.is_set():
+                raise DeepSeekError("deepseek request cancelled")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as res:
+                    raw = res.read(MAX_HTTP_RESPONSE_BYTES + 1)
+                break
+            except (HTTPError, URLError, TimeoutError) as exc:
+                if attempt >= retries or not _retryable(exc):
+                    raise DeepSeekError("deepseek request failed") from exc
+                delay = min(2**attempt, 4)
+                if cancel_event is not None:
+                    cancel_event.wait(delay)
+                else:
+                    time.sleep(delay)
+        if raw is None:
+            raise DeepSeekError("deepseek request failed")
+        if cancel_event is not None and cancel_event.is_set():
+            raise DeepSeekError("deepseek request cancelled")
         if len(raw) > MAX_HTTP_RESPONSE_BYTES:
             raise DeepSeekError("deepseek response exceeds limit")
         try:
@@ -65,6 +95,8 @@ class DeepSeekClient:
         choices = data.get("choices") or []
         if not isinstance(choices, list):
             raise DeepSeekError("deepseek returned malformed response")
+        if choices and not isinstance(choices[0], dict):
+            raise DeepSeekError("deepseek returned malformed response")
         message = choices[0].get("message", {}) if choices and isinstance(choices[0], dict) else {}
         if not isinstance(message, dict):
             raise DeepSeekError("deepseek returned malformed response")
@@ -73,7 +105,16 @@ class DeepSeekClient:
             raise DeepSeekError("deepseek returned malformed response")
         if not content.strip():
             raise DeepSeekError("deepseek returned empty content")
+        first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+        if first_choice.get("finish_reason") == "length":
+            raise DeepSeekError("deepseek response was truncated")
         return content
+
+
+def _retryable(exc: Exception) -> bool:
+    return isinstance(exc, URLError | TimeoutError) or (
+        isinstance(exc, HTTPError) and (exc.code == 429 or exc.code >= 500)
+    )
 
 
 class DeepSeekExecutor:

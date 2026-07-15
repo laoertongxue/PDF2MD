@@ -167,7 +167,7 @@ class WorkbenchSettingsResponse(BaseModel):
 
 class DeepSeekSettingsRequest(BaseModel):
     api_key: str | None = None
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-pro"
 
 
 class CardResponse(BaseModel):

@@ -4,6 +4,7 @@ import { ArrowLeft } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 import ImportTextbooks from "./ImportTextbooks";
 import { importSources } from "../../api/workbench";
+import OcrWorkflowPanel from "./OcrWorkflowPanel";
 
 export default function SourceDetail() {
   const { courses, detectChapters, loadCourses, loadSources, selectedCourseId, sources } = useWorkbenchStore();
@@ -45,6 +46,7 @@ export default function SourceDetail() {
           </div>
         </section>
       )}
+      {existingSources.filter((source) => source.file_path.toLowerCase().endsWith(".pdf")).map((source) => <OcrWorkflowPanel key={`ocr-${source.id}`} source={source} />)}
     </div>
   );
 }
