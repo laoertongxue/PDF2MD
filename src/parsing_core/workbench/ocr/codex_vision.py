@@ -738,7 +738,7 @@ def _copy_verified_image(
         current = os.stat(source_path, follow_symlinks=False)
         if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
             raise CodexVisionError("image input is not available")
-        if not stat.S_ISREG(info.st_mode):
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise CodexVisionError("image input is not available")
         if info.st_size <= 0 or info.st_size > _MAX_IMAGE_BYTES:
             raise CodexVisionError("image input is not available")

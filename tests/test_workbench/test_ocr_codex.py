@@ -750,6 +750,11 @@ def test_image_root_hash_and_format_are_enforced(tmp_path, fake_codex, page_imag
     with pytest.raises(CodexVisionError, match="image input is not available"):
         executor.transcribe_page(plain, page_number=1, width=1200, height=1600)
 
+    hardlink = page_image.parent / "hardlink.png"
+    hardlink.hardlink_to(page_image)
+    with pytest.raises(CodexVisionError, match="image input is not available"):
+        executor.transcribe_page(hardlink, page_number=1, width=1200, height=1600)
+
 
 def test_verified_image_copy_preserves_all_source_bytes(tmp_path, fake_codex, page_image):
     executor = _executor(fake_codex, tmp_path)
