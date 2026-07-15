@@ -3,6 +3,40 @@ import mermaid from "mermaid";
 import { afterEach, describe, expect, it } from "vitest";
 import MermaidBlock from "./MermaidBlock";
 
+if (!("CSSStyleSheet" in globalThis)) {
+  class TestCSSStyleSheet {
+    cssRules: string[] = [];
+
+    insertRule(rule: string, index: number) {
+      this.cssRules.splice(index, 0, rule);
+      return index;
+    }
+  }
+
+  Object.defineProperty(globalThis, "CSSStyleSheet", {
+    configurable: true,
+    value: TestCSSStyleSheet,
+  });
+}
+
+if (!("getComputedTextLength" in SVGElement.prototype)) {
+  Object.defineProperty(SVGElement.prototype, "getComputedTextLength", {
+    configurable: true,
+    value() {
+      return (this.textContent ?? "").length * 8;
+    },
+  });
+}
+
+if (!("getBBox" in SVGElement.prototype)) {
+  Object.defineProperty(SVGElement.prototype, "getBBox", {
+    configurable: true,
+    value() {
+      return { height: 20, width: (this.textContent ?? "").length * 8, x: 0, y: 0 };
+    },
+  });
+}
+
 const GENERATED_TOPIC_DIAGRAMS = [
   "graph TD\n  A[核心概念] --> B[融合框架]",
   "flowchart LR\n  A[识别问题] --> B[应用框架]",
@@ -31,9 +65,12 @@ describe("Mermaid 11 runtime contract", () => {
   it("renders a generated diagram without leaked Mermaid error output", async () => {
     const view = render(<MermaidBlock code={GENERATED_TOPIC_DIAGRAMS[0]} />);
 
-    await waitFor(() => expect(view.container.querySelector("svg")).not.toBeNull());
-    expect(view.container).toHaveTextContent("核心概念");
-    expect(view.container).toHaveTextContent("融合框架");
+    await waitFor(() => {
+      const labels = Array.from(view.container.querySelectorAll("svg text")).map(
+        (node) => node.textContent,
+      );
+      expect(labels).toEqual(expect.arrayContaining(["核心概念", "融合框架"]));
+    });
     expect(view.container.textContent).not.toContain("Syntax error in text");
     expect(document.body.textContent).not.toContain("Syntax error in text");
     expect(document.body.querySelectorAll('[id^="dmm-"]')).toHaveLength(0);

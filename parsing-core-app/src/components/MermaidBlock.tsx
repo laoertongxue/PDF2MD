@@ -72,7 +72,6 @@ function removeTemporaryNode(id: string) {
 
 function renderMermaid(module: typeof import("mermaid"), id: string, code: string) {
   const render = renderQueue.then(async () => {
-    await module.default.parse(code);
     try {
       return await module.default.render(id, code);
     } finally {
