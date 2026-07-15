@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import threading
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -43,6 +46,7 @@ class FakeEngines:
     codex_text: str = "一致文本"
 
     def __post_init__(self):
+        self.pdf_sha256 = "pdf-sha"
         self.calls: list[str] = []
         self.vision = SimpleNamespace(recognize=self._vision)
         self.codex = SimpleNamespace(
@@ -59,7 +63,7 @@ class FakeEngines:
             image_sha256="image-sha",
             width=1200,
             height=1600,
-            pdf_sha256="pdf-sha",
+            pdf_sha256=self.pdf_sha256,
             observation=_observation("apple_vision", self.apple_text),
         )
 
@@ -99,6 +103,10 @@ class FakeEngines:
 
 
 def _orchestrator(tmp_path, engines, **kwargs):
+    pdf_path = tmp_path / "book.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\nfixture textbook\n")
+    engines.pdf_sha256 = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    engines.pdf_path = pdf_path
     return OcrOrchestrator(
         vision=engines.vision,
         codex=engines.codex,
@@ -109,10 +117,16 @@ def _orchestrator(tmp_path, engines, **kwargs):
     )
 
 
+def _run(orchestrator, engines, **kwargs):
+    return orchestrator.run_batch(
+        engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0, **kwargs
+    )
+
+
 def test_consistent_page_stays_offline_and_runs_final_adjudication(tmp_path):
     engines = FakeEngines()
     result = _orchestrator(tmp_path, engines).run_batch(
-        "/books/book.pdf", pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
+        engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
 
     assert result.status is BatchStatus.COMPLETED
@@ -124,7 +138,7 @@ def test_consistent_page_stays_offline_and_runs_final_adjudication(tmp_path):
 def test_conflict_page_uses_bound_one_time_baidu_authorization(tmp_path):
     engines = FakeEngines(apple_text="利润为 10%", codex_text="利润为 40%")
     result = _orchestrator(tmp_path, engines).run_batch(
-        "/books/book.pdf", pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
+        engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
 
     assert result.status is BatchStatus.COMPLETED
@@ -134,7 +148,7 @@ def test_conflict_page_uses_bound_one_time_baidu_authorization(tmp_path):
 def test_missing_page_blocks_batch_and_writes_no_publishable_artifact(tmp_path):
     engines = FakeEngines()
     result = _orchestrator(tmp_path, engines).run_batch(
-        "/books/book.pdf", pages=[1, 3], dpi=300, languages=["zh-Hans"], sample_rate=0
+        engines.pdf_path, pages=[1, 3], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
 
     assert result.status is BatchStatus.BLOCKED
@@ -149,13 +163,13 @@ def test_failed_page_is_resumable_without_repeating_completed_vision(tmp_path):
     engines = FakeEngines(codex_failures=1)
     orchestrator = _orchestrator(tmp_path, engines)
     first = orchestrator.run_batch(
-        "/books/book.pdf", pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
+        engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
     assert first.status is BatchStatus.FAILED
     assert engines.calls == ["vision:1", "codex:1"]
 
     second = orchestrator.run_batch(
-        "/books/book.pdf", pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
+        engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
     assert second.status is BatchStatus.COMPLETED
     assert engines.calls == ["vision:1", "codex:1", "codex:1", "adjudicate:1"]
@@ -166,7 +180,7 @@ def test_cancel_stops_before_final_publish(tmp_path):
     def cancelled():
         return True
     result = _orchestrator(tmp_path, engines, is_cancelled=cancelled).run_batch(
-        "/books/book.pdf", pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
+        engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
 
     assert result.status is BatchStatus.CANCELLED
@@ -182,7 +196,7 @@ def test_invalid_final_schema_blocks_publication(tmp_path):
 
     engines.codex.adjudicate_page = invalid_adjudication
     result = _orchestrator(tmp_path, engines).run_batch(
-        "/books/book.pdf", pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
+        engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
 
     assert result.status is BatchStatus.FAILED
@@ -193,16 +207,101 @@ def test_retry_limit_is_explicit_and_bounded(tmp_path):
     engines = FakeEngines(codex_failures=3)
     orchestrator = _orchestrator(tmp_path, engines, max_page_attempts=2)
     first = orchestrator.run_batch(
-        "/books/book.pdf", pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
+        engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
     second = orchestrator.run_batch(
-        "/books/book.pdf", pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
+        engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
     third = orchestrator.run_batch(
-        "/books/book.pdf", pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
+        engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
 
     assert first.status is BatchStatus.FAILED
     assert second.status is BatchStatus.FAILED
     assert third.status is BatchStatus.FAILED
     assert engines.calls == ["vision:1", "codex:1", "codex:1"]
+
+
+def test_blocking_engine_isolated_by_batch_timeout_and_cannot_publish_late(tmp_path):
+    engines = FakeEngines()
+    started = threading.Event()
+
+    def blocked(*args, **kwargs):
+        started.set()
+        time.sleep(1)
+        engines.calls.append("late-vision")
+        return engines._vision(*args, **kwargs)
+
+    engines.vision.recognize = blocked
+    orchestrator = _orchestrator(tmp_path, engines)
+    began = time.monotonic()
+    result = _run(orchestrator, engines, timeout=0.05)
+    elapsed = time.monotonic() - began
+
+    assert started.is_set()
+    assert elapsed < 0.5
+    assert result.status is BatchStatus.FAILED
+    assert not (tmp_path / "ocr-state" / "batch-final.json").exists()
+    time.sleep(1.1)
+    state = json.loads((tmp_path / "ocr-state" / "batch-state.json").read_text())
+    assert state["status"] == "failed"
+    assert state["pages"]["1"]["status"] != "completed"
+
+
+def test_blocking_engine_isolated_by_batch_cancel(tmp_path):
+    engines = FakeEngines()
+    started = threading.Event()
+    cancel = threading.Event()
+
+    def blocked(*args, **kwargs):
+        started.set()
+        time.sleep(1)
+        return engines._vision(*args, **kwargs)
+
+    engines.vision.recognize = blocked
+    orchestrator = _orchestrator(tmp_path, engines, is_cancelled=cancel.is_set)
+    result_holder = []
+    worker = threading.Thread(
+        target=lambda: result_holder.append(_run(orchestrator, engines, timeout=2)),
+        daemon=True,
+    )
+    worker.start()
+    assert started.wait(timeout=0.5)
+    cancel.set()
+    worker.join(timeout=0.5)
+
+    assert not worker.is_alive()
+    assert result_holder[0].status is BatchStatus.CANCELLED
+    assert not (tmp_path / "ocr-state" / "batch-final.json").exists()
+
+
+def test_same_path_with_replaced_pdf_content_does_not_reuse_page_results(tmp_path):
+    engines = FakeEngines()
+    orchestrator = _orchestrator(tmp_path, engines)
+    first = _run(orchestrator, engines)
+    assert first.status is BatchStatus.COMPLETED
+    first_calls = list(engines.calls)
+    engines.pdf_path.write_bytes(b"%PDF-1.7\nreplacement textbook\n")
+
+    second = _run(orchestrator, engines)
+
+    assert second.status is BatchStatus.COMPLETED
+    assert engines.calls[len(first_calls):] == ["vision:1", "codex:1", "adjudicate:1"]
+
+
+def test_resume_rechecks_complete_evidence_and_reruns_when_decision_is_missing(tmp_path):
+    engines = FakeEngines()
+    orchestrator = _orchestrator(tmp_path, engines)
+    assert _run(orchestrator, engines).status is BatchStatus.COMPLETED
+    state_path = tmp_path / "ocr-state" / "batch-state.json"
+    state = json.loads(state_path.read_text())
+    del state["pages"]["1"]["decision"]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    resumed = _run(orchestrator, engines)
+
+    assert resumed.status is BatchStatus.COMPLETED
+    assert engines.calls[-1] == "adjudicate:1"
+    repaired = json.loads(state_path.read_text())
+    assert "decision" in repaired["pages"]["1"]
+    assert (tmp_path / "ocr-state" / "batch-final.json").is_file()

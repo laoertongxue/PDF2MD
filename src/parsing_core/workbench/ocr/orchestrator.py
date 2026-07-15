@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -53,6 +55,10 @@ class BatchRun:
     status: BatchStatus
     pages: dict[int, PageRun]
     error: str | None = None
+
+
+class _BatchCancelled(Exception):
+    pass
 
 
 class OcrOrchestrator:
@@ -116,7 +122,9 @@ class OcrOrchestrator:
         for page in page_numbers:
             current = page_state[str(page)]
             if current.get("status") == PageStatus.COMPLETED.value:
-                continue
+                if self._completed_evidence_is_valid(state, current, page, sample_rate):
+                    continue
+                self._reset_page(current)
             if int(current.get("attempts", 0)) >= self.max_page_attempts:
                 return self._finish(state, BatchStatus.FAILED, "OCR retry limit reached", page_runs)
             try:
@@ -129,6 +137,11 @@ class OcrOrchestrator:
                 self._run_page(
                     state, current, pdf_path, page, dpi, languages, sample_rate, deadline
                 )
+            except _BatchCancelled:
+                current["status"] = PageStatus.CANCELLED.value
+                current["error"] = "batch cancelled"
+                self._persist(state)
+                return self._finish(state, BatchStatus.CANCELLED, "batch cancelled", page_runs)
             except Exception as exc:
                 current["status"] = PageStatus.FAILED.value
                 current["error"] = _safe_error(exc)
@@ -149,7 +162,14 @@ class OcrOrchestrator:
         if "vision" not in current:
             current["status"] = PageStatus.RENDERING.value
             self._persist(state)
-            vision_result = self.vision.recognize(pdf_path, page=page, dpi=dpi, languages=languages)
+            vision_result = self._call_engine(
+                self.vision.recognize,
+                pdf_path,
+                page=page,
+                dpi=dpi,
+                languages=languages,
+                deadline=deadline,
+            )
             current["vision"] = _jsonable(vision_result)
         vision = current["vision"]
         image_path = _value(vision, "image_path")
@@ -164,12 +184,14 @@ class OcrOrchestrator:
             self._check_deadline(deadline)
             current["status"] = PageStatus.PRIMARY_OCR.value
             self._persist(state)
-            result = self.codex.transcribe_page(
+            result = self._call_engine(
+                self.codex.transcribe_page,
                 image_path,
                 page_number=page,
                 width=width,
                 height=height,
                 expected_image_sha256=image_hash,
+                deadline=deadline,
             )
             current["codex"] = _jsonable(result)
         codex = _value(current["codex"], "payload")
@@ -192,7 +214,9 @@ class OcrOrchestrator:
         alignment = current["alignment"]
         status = str(alignment["status"])
         page_hash = str(image_hash or _fingerprint(vision))
-        input_fingerprint = str(image_hash or _fingerprint({"page": page, "vision": vision}))
+        input_fingerprint = _fingerprint(
+            {"batch": state["input_fingerprint"], "page": page, "image_sha256": image_hash}
+        )
         baidu_observation = None
         if needs_baidu(page_hash, page, status, sample_rate=sample_rate):
             if "baidu" not in current:
@@ -208,13 +232,16 @@ class OcrOrchestrator:
                 )
                 if authorization is None:
                     raise ValueError("Baidu escalation authorization is missing")
-                baidu_observation = self.baidu.recognize(
-                    self.image_loader(image_path),
+                image = self._call_engine(self.image_loader, image_path, deadline=deadline)
+                baidu_observation = self._call_engine(
+                    self.baidu.recognize,
+                    image,
                     authorization=authorization,
                     page_hash=page_hash,
                     input_fingerprint=input_fingerprint,
                     page=page,
                     alignment_status=status,
+                    deadline=deadline,
                 )
                 current["baidu"] = _jsonable(baidu_observation)
             else:
@@ -224,7 +251,8 @@ class OcrOrchestrator:
             self._check_deadline(deadline)
             current["status"] = PageStatus.ADJUDICATING.value
             self._persist(state)
-            result = self.codex.adjudicate_page(
+            result = self._call_engine(
+                self.codex.adjudicate_page,
                 image_path,
                 page_number=page,
                 width=width,
@@ -234,12 +262,14 @@ class OcrOrchestrator:
                 diff=alignment,
                 baidu_observation=baidu_observation,
                 expected_image_sha256=image_hash,
+                deadline=deadline,
             )
             decision = _value(result, "payload")
             _validate_decision(decision, page, width, height)
             current["decision"] = _jsonable(result)
         else:
             _validate_decision(_value(current["decision"], "payload"), page, width, height)
+        current["page_input_fingerprint"] = input_fingerprint
         current["evidence_fingerprint"] = _fingerprint(
             {"vision": vision, "codex": codex, "alignment": alignment, "baidu": baidu_observation,
              "decision": current["decision"]}
@@ -250,9 +280,15 @@ class OcrOrchestrator:
 
     def _load_or_create_state(self, pdf_path, pages, dpi, languages, sample_rate):
         self.state_root.mkdir(parents=True, exist_ok=True)
+        snapshot = _snapshot_pdf(pdf_path)
         fingerprint = _fingerprint(
-            {"pdf": str(pdf_path), "pages": list(pages), "dpi": dpi, "languages": list(languages),
-             "sample_rate": sample_rate}
+            {
+                "pdf_snapshot": snapshot,
+                "pages": list(pages),
+                "dpi": dpi,
+                "languages": list(languages),
+                "sample_rate": sample_rate,
+            }
         )
         path = self.state_root / "batch-state.json"
         if path.exists():
@@ -264,13 +300,105 @@ class OcrOrchestrator:
                     return value
             except Exception:
                 pass
+        self._discard_final_artifact()
         return {
             "schema_version": 1,
             "status": BatchStatus.RUNNING.value,
             "input_fingerprint": fingerprint,
+            "pdf_snapshot": snapshot,
             "pages": {str(page): {"status": PageStatus.PENDING.value} for page in pages},
             "updated_at": int(time.time()),
         }
+
+    @staticmethod
+    def _reset_page(current):
+        current.clear()
+        current.update({"status": PageStatus.PENDING.value, "attempts": 0})
+
+    def _completed_evidence_is_valid(self, state, current, page, sample_rate):
+        try:
+            vision = current["vision"]
+            codex_record = current["codex"]
+            alignment = current["alignment"]
+            decision_record = current["decision"]
+            snapshot = state["pdf_snapshot"]
+            if not isinstance(vision, dict) or not isinstance(codex_record, dict):
+                return False
+            if not isinstance(decision_record, dict):
+                return False
+            if not isinstance(codex_record.get("record"), dict):
+                return False
+            if not isinstance(decision_record.get("record"), dict):
+                return False
+            if _value(vision, "pdf_sha256") != snapshot["sha256"]:
+                return False
+            if _value(vision, "page") != page:
+                return False
+            image_hash = _value(vision, "image_sha256")
+            if not isinstance(image_hash, str) or not image_hash:
+                return False
+            apple = _observation_payload(_value(vision, "observation"))
+            codex = _value(codex_record, "payload")
+            if not isinstance(apple, dict) or not isinstance(codex, dict):
+                return False
+            if apple.get("input_fingerprint") != image_hash:
+                return False
+            if codex.get("input_fingerprint") != image_hash:
+                return False
+            if not isinstance(alignment, dict) or not isinstance(alignment.get("status"), str):
+                return False
+            page_input = _fingerprint({"batch": state["input_fingerprint"], "page": page,
+                                       "image_sha256": image_hash})
+            if current.get("page_input_fingerprint") != page_input:
+                return False
+            status = alignment["status"]
+            baidu = current.get("baidu")
+            if needs_baidu(image_hash, page, status, sample_rate=sample_rate) and baidu is None:
+                return False
+            _validate_decision(_value(decision_record, "payload"), page,
+                               _value(vision, "width"), _value(vision, "height"))
+            expected = _fingerprint({"vision": vision, "codex": codex,
+                                     "alignment": alignment, "baidu": baidu,
+                                     "decision": decision_record})
+            return current.get("evidence_fingerprint") == expected
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _discard_final_artifact(self):
+        target = self.state_root / "batch-final.json"
+        try:
+            info = target.lstat()
+            if info.st_nlink == 1 and stat.S_ISREG(info.st_mode):
+                target.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _call_engine(self, function, *args, deadline, **kwargs):
+        result = []
+        failure = []
+        finished = threading.Event()
+
+        def invoke():
+            try:
+                result.append(function(*args, **kwargs))
+            except BaseException as exc:
+                failure.append(exc)
+            finally:
+                finished.set()
+
+        threading.Thread(target=invoke, daemon=True, name="ocr-engine-call").start()
+        while not finished.wait(0.01):
+            if self.is_cancelled():
+                raise _BatchCancelled()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("OCR batch timed out")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("OCR batch timed out")
+        if self.is_cancelled():
+            raise _BatchCancelled()
+        if failure:
+            raise failure[0]
+        return result[0]
 
     def _set_status(self, state, status):
         state["status"] = status.value
@@ -387,6 +515,42 @@ def _fingerprint(value: Any) -> str:
         _jsonable(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _snapshot_pdf(path: str | Path) -> dict[str, Any]:
+    candidate = Path(path)
+    try:
+        link_info = candidate.lstat()
+        if stat.S_ISLNK(link_info.st_mode):
+            raise ValueError
+        fd = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise ValueError
+            if before.st_size <= 0 or before.st_size > 2 * 1024 * 1024 * 1024:
+                raise ValueError
+            if os.pread(fd, 5, 0) != b"%PDF-":
+                raise ValueError
+            digest = hashlib.sha256()
+            os.lseek(fd, 0, os.SEEK_SET)
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            after = os.fstat(fd)
+            if (before.st_dev, before.st_ino, before.st_size) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+            ):
+                raise ValueError
+            return {"sha256": digest.hexdigest(), "size": before.st_size}
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        raise ValueError("PDF source is invalid") from None
 
 
 def _observation_payload(value: Any):
