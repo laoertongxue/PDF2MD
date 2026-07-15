@@ -8,7 +8,7 @@ from parsing_core.workbench.ocr.alignment import (
     needs_baidu,
     normalize_text,
 )
-from parsing_core.workbench.ocr.baidu import BaiduEscalationReason
+from parsing_core.workbench.ocr.baidu import BaiduEscalationAuthorization
 
 
 def block(
@@ -198,25 +198,18 @@ def test_baidu_authorization_is_typed_and_only_issued_for_upgrade_pages():
     authorization = authorize_baidu_escalation(
         "book-sha", 1, "conflict", input_fingerprint="input-sha", sample_rate=0
     )
-    assert (
-        authorization.reason
-        == BaiduEscalationReason.CONFLICT
-    )
-    assert authorization.page_hash == "book-sha"
-    assert authorization.input_fingerprint == "input-sha"
-    assert authorization.page == 1
-    assert authorization.alignment_status == "conflict"
-    assert (
+    assert isinstance(authorization, BaiduEscalationAuthorization)
+    assert isinstance(
         authorize_baidu_escalation(
             "book-sha", 1, "complex", input_fingerprint="input-sha", sample_rate=0
-        ).reason
-        == BaiduEscalationReason.COMPLEX
+        ),
+        BaiduEscalationAuthorization,
     )
-    assert (
+    assert isinstance(
         authorize_baidu_escalation(
             "book-sha", 1, "consistent", input_fingerprint="input-sha", sample_rate=1
-        ).reason
-        == BaiduEscalationReason.SAMPLE
+        ),
+        BaiduEscalationAuthorization,
     )
     assert (
         authorize_baidu_escalation(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import re
+import sys
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -20,60 +21,68 @@ class BaiduEscalationReason(StrEnum):
     SAMPLE = "sample"
 
 
-_AUTHORIZATION_CAPABILITY = object()
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class BaiduEscalationAuthorization:
+@dataclass(frozen=True, slots=True)
+class _AuthorizationContext:
     reason: BaiduEscalationReason
     page_hash: str
     input_fingerprint: str
     alignment_status: str
     page: int
 
-    def __init__(
-        self,
+
+class BaiduEscalationAuthorization:
+    __slots__ = ()
+
+    def __new__(cls, *args, **kwargs):
+        raise TypeError("Baidu escalation authorization requires a trusted alignment decision")
+
+    @classmethod
+    def _from_alignment(
+        cls,
         reason: BaiduEscalationReason,
-        page_hash: str | None = None,
-        input_fingerprint: str | None = None,
-        alignment_status: str | None = None,
-        page: int | None = None,
         *,
-        _capability: object | None = None,
-    ) -> None:
-        if _capability is not _AUTHORIZATION_CAPABILITY:
-            raise TypeError("Baidu escalation authorization requires a trusted factory")
-        if not isinstance(reason, BaiduEscalationReason):
-            raise ValueError("Baidu escalation reason is invalid")
-        if not all(isinstance(value, str) and value for value in (page_hash, input_fingerprint)):
-            raise ValueError("Baidu escalation context is invalid")
-        if alignment_status not in {"consistent", "conflict", "complex"}:
-            raise ValueError("Baidu escalation status is invalid")
-        if not isinstance(page, int) or page < 1:
-            raise ValueError("Baidu escalation page is invalid")
-        object.__setattr__(self, "reason", reason)
-        object.__setattr__(self, "page_hash", page_hash)
-        object.__setattr__(self, "input_fingerprint", input_fingerprint)
-        object.__setattr__(self, "alignment_status", alignment_status)
-        object.__setattr__(self, "page", page)
+        page_hash: str,
+        input_fingerprint: str,
+        alignment_status: str,
+        page: int,
+    ) -> BaiduEscalationAuthorization:
+        caller = sys._getframe(1)
+        if (
+            caller.f_code.co_name != "authorize_baidu_escalation"
+            or caller.f_globals.get("__name__") != "parsing_core.workbench.ocr.alignment"
+        ):
+            raise TypeError("Baidu escalation authorization requires a trusted alignment decision")
+        context = _AuthorizationContext(
+            reason, page_hash, input_fingerprint, alignment_status, page
+        )
+        _validate_authorization_context(context)
+        authorization = object.__new__(cls)
+        _AUTHORIZATION_REGISTRY[id(authorization)] = (authorization, context)
+        return authorization
+
+    def __reduce__(self):
+        return (_unpickled_authorization, ())
 
 
-def _issue_baidu_escalation_authorization(
-    reason: BaiduEscalationReason,
-    *,
-    page_hash: str,
-    input_fingerprint: str,
-    alignment_status: str,
-    page: int,
-) -> BaiduEscalationAuthorization:
-    return BaiduEscalationAuthorization(
-        reason,
-        page_hash,
-        input_fingerprint,
-        alignment_status,
-        page,
-        _capability=_AUTHORIZATION_CAPABILITY,
-    )
+_AUTHORIZATION_REGISTRY: dict[int, tuple[BaiduEscalationAuthorization, _AuthorizationContext]] = {}
+
+
+def _unpickled_authorization() -> BaiduEscalationAuthorization:
+    return object.__new__(BaiduEscalationAuthorization)
+
+
+def _validate_authorization_context(context: _AuthorizationContext) -> None:
+    if not isinstance(context.reason, BaiduEscalationReason):
+        raise ValueError("Baidu escalation reason is invalid")
+    if not all(
+        isinstance(value, str) and value
+        for value in (context.page_hash, context.input_fingerprint)
+    ):
+        raise ValueError("Baidu escalation context is invalid")
+    if context.alignment_status not in {"consistent", "conflict", "complex"}:
+        raise ValueError("Baidu escalation status is invalid")
+    if not isinstance(context.page, int) or context.page < 1:
+        raise ValueError("Baidu escalation page is invalid")
 
 
 @dataclass(frozen=True)
@@ -150,10 +159,11 @@ class BaiduOcrClient:
             if allow_network:
                 raise BaiduOcrError("Baidu OCR requires typed escalation authorization")
             raise BaiduOcrError("Baidu OCR network disabled")
-        if not isinstance(authorization.reason, BaiduEscalationReason):
-            raise BaiduOcrError("Baidu OCR unsupported escalation reason")
+        record = _AUTHORIZATION_REGISTRY.get(id(authorization))
+        if record is None or record[0] is not authorization:
+            raise BaiduOcrError("Baidu OCR authorization is not registered")
         if not _authorization_matches_context(
-            authorization,
+            record[1],
             page_hash=page_hash,
             input_fingerprint=input_fingerprint,
             page=page,
@@ -210,7 +220,7 @@ class BaiduOcrClient:
 
 
 def _authorization_matches_context(
-    authorization: BaiduEscalationAuthorization,
+    context: _AuthorizationContext,
     *,
     page_hash: str | None,
     input_fingerprint: str | None,
@@ -222,16 +232,16 @@ def _authorization_matches_context(
     if not isinstance(page, int) or not isinstance(alignment_status, str):
         return False
     return (
-        hmac.compare_digest(authorization.page_hash, page_hash)
-        and hmac.compare_digest(authorization.input_fingerprint, input_fingerprint)
-        and authorization.page == page
-        and authorization.alignment_status == alignment_status
+        hmac.compare_digest(context.page_hash, page_hash)
+        and hmac.compare_digest(context.input_fingerprint, input_fingerprint)
+        and context.page == page
+        and context.alignment_status == alignment_status
         and (
-            authorization.reason is BaiduEscalationReason.CONFLICT
+            context.reason is BaiduEscalationReason.CONFLICT
             and alignment_status == "conflict"
-            or authorization.reason is BaiduEscalationReason.COMPLEX
+            or context.reason is BaiduEscalationReason.COMPLEX
             and alignment_status == "complex"
-            or authorization.reason is BaiduEscalationReason.SAMPLE
+            or context.reason is BaiduEscalationReason.SAMPLE
             and alignment_status == "consistent"
         )
     )

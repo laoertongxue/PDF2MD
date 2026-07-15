@@ -13,7 +13,6 @@ from opencc import OpenCC
 from .baidu import (
     BaiduEscalationAuthorization,
     BaiduEscalationReason,
-    _issue_baidu_escalation_authorization,
 )
 from .models import OcrObservation
 
@@ -182,7 +181,7 @@ def authorize_baidu_escalation(
 ) -> BaiduEscalationAuthorization | None:
     status_value = status.value if isinstance(status, AlignmentDecision) else str(status)
     if status_value == AlignmentDecision.CONFLICT.value:
-        return _issue_baidu_escalation_authorization(
+        return BaiduEscalationAuthorization._from_alignment(
             BaiduEscalationReason.CONFLICT,
             page_hash=page_hash,
             input_fingerprint=input_fingerprint,
@@ -190,7 +189,7 @@ def authorize_baidu_escalation(
             page=page,
         )
     if status_value == AlignmentDecision.COMPLEX.value:
-        return _issue_baidu_escalation_authorization(
+        return BaiduEscalationAuthorization._from_alignment(
             BaiduEscalationReason.COMPLEX,
             page_hash=page_hash,
             input_fingerprint=input_fingerprint,
@@ -198,7 +197,7 @@ def authorize_baidu_escalation(
             page=page,
         )
     if needs_baidu(page_hash, page, status_value, sample_rate=sample_rate):
-        return _issue_baidu_escalation_authorization(
+        return BaiduEscalationAuthorization._from_alignment(
             BaiduEscalationReason.SAMPLE,
             page_hash=page_hash,
             input_fingerprint=input_fingerprint,

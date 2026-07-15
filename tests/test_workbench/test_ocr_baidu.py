@@ -1,3 +1,6 @@
+import copy
+import pickle
+
 import pytest
 
 from parsing_core.workbench.ocr.alignment import authorize_baidu_escalation
@@ -98,13 +101,63 @@ def test_baidu_client_rejects_untyped_or_invalid_upgrade_authorization():
 
 
 def test_baidu_client_rejects_directly_forged_authorization():
-    with pytest.raises(TypeError, match="trusted factory"):
+    with pytest.raises(TypeError, match="trusted alignment decision"):
         BaiduEscalationAuthorization(
             BaiduEscalationReason.CONFLICT,
             "page-sha",
             "input-sha",
             "conflict",
             1,
+        )
+
+
+@pytest.mark.parametrize("clone", [copy.copy, copy.deepcopy, pickle.loads])
+def test_baidu_client_rejects_copied_or_unpickled_authorization(clone):
+    authorization = _authorization()
+    cloned = clone(pickle.dumps(authorization)) if clone is pickle.loads else clone(authorization)
+    client = BaiduOcrClient(api_key="secret-key", transport=lambda _request: (200, b'{}'))
+
+    with pytest.raises(BaiduOcrError, match="authorization"):
+        client.recognize(
+            b"123",
+            authorization=cloned,
+            page_hash="page-sha",
+            input_fingerprint="input-sha",
+            page=1,
+            alignment_status="conflict",
+        )
+
+
+def test_baidu_client_rejects_object_new_authorization():
+    forged = object.__new__(BaiduEscalationAuthorization)
+    client = BaiduOcrClient(api_key="secret-key", transport=lambda _request: (200, b'{}'))
+
+    with pytest.raises(BaiduOcrError, match="authorization"):
+        client.recognize(
+            b"123",
+            authorization=forged,
+            page_hash="page-sha",
+            input_fingerprint="input-sha",
+            page=1,
+            alignment_status="conflict",
+        )
+
+
+def test_old_authorization_capability_is_not_exposed():
+    import parsing_core.workbench.ocr.baidu as baidu
+
+    assert not hasattr(baidu, "_AUTHORIZATION_CAPABILITY")
+    assert not hasattr(baidu, "_issue_baidu_escalation_authorization")
+
+
+def test_private_alignment_factory_rejects_direct_calls():
+    with pytest.raises(TypeError, match="trusted alignment decision"):
+        BaiduEscalationAuthorization._from_alignment(
+            BaiduEscalationReason.CONFLICT,
+            page_hash="page-sha",
+            input_fingerprint="input-sha",
+            alignment_status="conflict",
+            page=1,
         )
 
 
