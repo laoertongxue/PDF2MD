@@ -74,6 +74,9 @@ jobs:
       - name: Prepare embedded Python runtime
         run: ./parsing-core-app/scripts/prepare-sidecar-python.sh
 
+      - name: Build Apple Vision OCR helper
+        run: ./parsing-core-app/scripts/build-vision-ocr.sh
+
       - name: Run Rust quality gate
         working-directory: parsing-core-app/src-tauri
         run: cargo check
