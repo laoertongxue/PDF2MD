@@ -52,7 +52,7 @@ from parsing_core.workbench.ocr.deepseek_intensive_reading import (
 from parsing_core.workbench.ocr.markdown_notes import build_intensive_reading_note
 from parsing_core.workbench.ocr.orchestrator import OcrOrchestrator
 from parsing_core.workbench.ocr.vision import RegisteredPdfSources, VisionClient
-from parsing_core.workbench.ocr.workflow import OcrWorkflow
+from parsing_core.workbench.ocr.workflow import OcrWorkflow, bind_published_note
 from parsing_core.workbench.pipeline import (
     FIXED_CHAPTER_KINDS,
     ChapterMarkdownSyncError,
@@ -565,6 +565,7 @@ async def generate_source_note(
         note = await run_in_threadpool(
             lambda: generator.generate(base, output_path=workflow.paths.note)
         )
+        bind_published_note(workflow.paths.final, workflow.paths.note, note["metadata"])
     except HTTPException:
         raise
     except Exception as exc:

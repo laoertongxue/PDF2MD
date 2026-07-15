@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
+import stat
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -19,7 +24,20 @@ from .chapters import (
     persist_chapter_confirmation,
     validate_chapter_tree,
 )
-from .orchestrator import BatchStatus, OcrOrchestrator
+from .markdown_notes import validate_mermaid_block
+from .orchestrator import BatchStatus, OcrOrchestrator, _snapshot_pdf
+
+_MARKDOWN_FENCE_RE = re.compile(r"```mermaid\n([\s\S]*?)\n```", re.MULTILINE)
+_SECTION_HEADINGS = (
+    "原文证据",
+    "核心概念",
+    "通俗、有趣、生活化的解释",
+    "教材案例解读",
+    "实际例子与问题解决",
+    "实际应用",
+    "知识结构图",
+    "应用流程图",
+)
 
 
 class WorkflowStatus(StrEnum):
@@ -65,11 +83,16 @@ def status_payload(
     error: str | None = None,
 ) -> dict[str, Any]:
     paths = workflow_paths(state_root)
-    published = (
-        status is WorkflowStatus.COMPLETED and paths.final.is_file() and paths.note.is_file()
+    published = status is WorkflowStatus.COMPLETED and _final_publication_is_valid(
+        paths.final, paths.note, source_path
+    )
+    public_status = (
+        WorkflowStatus.BLOCKED
+        if status is WorkflowStatus.COMPLETED and not published
+        else status
     )
     return {
-        "status": status.value,
+        "status": public_status.value,
         "source_path": str(Path(source_path).expanduser()),
         "state_path": str(paths.state),
         "error": error,
@@ -77,6 +100,150 @@ def status_payload(
         "markdown_path": str(paths.note) if published else None,
         "chapter_tree_path": str(paths.chapter_tree) if paths.chapter_tree.is_file() else None,
     }
+
+
+def _final_publication_is_valid(
+    final_path: Path, note_path: Path, source_path: str | Path
+) -> bool:
+    try:
+        final = _read_regular_json(final_path)
+        if final.get("status") != BatchStatus.COMPLETED.value:
+            return False
+        snapshot = final.get("pdf_snapshot")
+        current_snapshot = _snapshot_pdf(source_path)
+        if not isinstance(snapshot, dict) or snapshot != current_snapshot:
+            return False
+        input_fingerprint = final.get("input_fingerprint")
+        pages = final.get("pages")
+        if not isinstance(input_fingerprint, str) or not input_fingerprint:
+            return False
+        if not isinstance(pages, dict) or not pages:
+            return False
+        page_numbers = sorted(int(key) for key in pages)
+        if page_numbers != list(range(1, len(page_numbers) + 1)):
+            return False
+        validator = OcrOrchestrator(
+            vision=None, codex=None, baidu=None, state_root=final_path.parent
+        )
+        for page in page_numbers:
+            record = pages[str(page)]
+            if not isinstance(record, dict) or record.get("status") != "completed":
+                return False
+            alignment = record.get("alignment")
+            if not isinstance(alignment, dict):
+                return False
+            sample_rate = 0.05 if alignment.get("baidu_required") else 0.0
+            if not validator._completed_evidence_is_valid(
+                final, record, page, sample_rate
+            ):
+                return False
+        return _markdown_publication_is_valid(final, note_path, input_fingerprint)
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return False
+
+
+def _read_regular_json(path: Path) -> dict[str, Any]:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 16 * 1024 * 1024:
+        raise ValueError("final artifact is not a regular file")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("final artifact is invalid")
+    return value
+
+
+def _markdown_publication_is_valid(
+    final: dict[str, Any], path: Path, input_fingerprint: str
+) -> bool:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 16 * 1024 * 1024:
+        return False
+    markdown = path.read_text(encoding="utf-8")
+    if not markdown.endswith("\n") or "待由 DeepSeek" in markdown:
+        return False
+    if final.get("markdown_sha256") != hashlib.sha256(markdown.encode("utf-8")).hexdigest():
+        return False
+    if final.get("model") != "deepseek-v4-pro" or final.get(
+        "ruleset"
+    ) != "mba-intensive-reading-v1":
+        return False
+    if final.get("note_input_fingerprint") != input_fingerprint:
+        return False
+    chapter_fingerprint = final.get("chapter_fingerprint")
+    evidence_fingerprint = final.get("note_evidence_fingerprint")
+    prompt_fingerprint = final.get("prompt_fingerprint")
+    if not all(
+        isinstance(value, str) and value
+        for value in (chapter_fingerprint, evidence_fingerprint, prompt_fingerprint)
+    ):
+        return False
+    if f"> 章节指纹：`{chapter_fingerprint}`" not in markdown:
+        return False
+    if f"> OCR 证据指纹：`{evidence_fingerprint}`" not in markdown:
+        return False
+    if f"> Prompt 指纹：`{prompt_fingerprint}`" not in markdown:
+        return False
+    if f"> 输入指纹：`{input_fingerprint}`" not in markdown:
+        return False
+    if "> 精读规则版本：`mba-intensive-reading-v1`" not in markdown:
+        return False
+    if "> 模型：`deepseek-v4-pro`" not in markdown:
+        return False
+    if not all(f"## {heading}" in markdown for heading in _SECTION_HEADINGS):
+        return False
+    diagrams = _MARKDOWN_FENCE_RE.findall(markdown)
+    if len(diagrams) != 2:
+        return False
+    try:
+        validate_mermaid_block(diagrams[0], expected_type="flowchart")
+        validate_mermaid_block(diagrams[1], expected_type="flowchart")
+    except Exception:
+        return False
+    return "[src:" in markdown
+
+
+def bind_published_note(
+    final_path: str | Path, note_path: str | Path, metadata: dict[str, Any]
+) -> None:
+    """Bind the generated note artifact to the completed OCR evidence."""
+    final = _read_regular_json(Path(final_path))
+    note = Path(note_path)
+    info = note.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ValueError("published note is invalid")
+    content = note.read_bytes()
+    if not isinstance(metadata, dict) or metadata.get("model") != "deepseek-v4-pro":
+        raise ValueError("published model is invalid")
+    if metadata.get("prompt_rules_version") != "mba-intensive-reading-v1":
+        raise ValueError("published ruleset is invalid")
+    final.update(
+        {
+            "markdown_sha256": hashlib.sha256(content).hexdigest(),
+            "model": metadata["model"],
+            "ruleset": metadata["prompt_rules_version"],
+            "prompt_fingerprint": metadata.get("prompt_fingerprint", ""),
+            "chapter_fingerprint": metadata.get("chapter_fingerprint", ""),
+            "note_input_fingerprint": metadata.get("input_fingerprint", ""),
+            "note_evidence_fingerprint": metadata.get("evidence_fingerprint", ""),
+        }
+    )
+    encoded = json.dumps(
+        final, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    fd, temp_name = tempfile.mkstemp(
+        prefix=".batch-final-note.", dir=Path(final_path).parent
+    )
+    try:
+        os.write(fd, encoded)
+        os.fsync(fd)
+        os.close(fd)
+        os.replace(temp_name, final_path)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        Path(temp_name).unlink(missing_ok=True)
 
 
 def build_confirmation(tree: dict[str, Any], chapter_id: str) -> dict[str, Any]:

@@ -390,8 +390,12 @@ def _render_markdown(chapter, metadata, sections, mermaid):
         f"> 章节指纹：`{metadata['chapter_fingerprint']}`",
         f"> OCR 证据指纹：`{metadata['evidence_fingerprint']}`",
         f"> 精读规则版本：`{metadata['prompt_rules_version']}`",
-        "",
     ]
+    if metadata.get("model"):
+        lines.append(f"> 模型：`{metadata['model']}`")
+    if metadata.get("prompt_fingerprint"):
+        lines.append(f"> Prompt 指纹：`{metadata['prompt_fingerprint']}`")
+    lines.append("")
     for section in sections:
         lines.extend([f"## {section['title']}", "", section["content"], ""])
         if section["key"] == "source_evidence":

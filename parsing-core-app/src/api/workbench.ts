@@ -202,7 +202,10 @@ function parseOcrStatus(value: unknown): OcrStatus {
     (value.error !== null && typeof value.error !== "string") || typeof value.publishable !== "boolean" ||
     (value.markdown_path !== null && typeof value.markdown_path !== "string") ||
     (value.chapter_tree_path !== null && typeof value.chapter_tree_path !== "string")) throw protocolError();
-  return value as unknown as OcrStatus;
+  const status = value.status === "completed" && value.publishable === false
+    ? "blocked"
+    : value.status;
+  return { ...value, status } as unknown as OcrStatus;
 }
 
 function parseOcrTree(value: unknown): OcrChapterTree {
