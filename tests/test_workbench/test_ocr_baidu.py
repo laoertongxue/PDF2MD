@@ -1,5 +1,7 @@
 import copy
+import gc
 import pickle
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -202,6 +204,118 @@ def test_baidu_client_allows_network_only_for_matching_upgrade_page():
     )
 
     assert result == {"result": []}
+    assert calls == [1]
+
+
+def test_baidu_authorization_is_consumed_after_matching_validation():
+    calls = []
+
+    def transport(_request):
+        calls.append(1)
+        return 200, b'{"result": []}'
+
+    authorization = _authorization()
+    client = BaiduOcrClient(api_key="secret-key", transport=transport)
+    context = {
+        "page_hash": "page-sha",
+        "input_fingerprint": "input-sha",
+        "page": 1,
+        "alignment_status": "conflict",
+    }
+
+    assert client.recognize(b"123", authorization=authorization, **context) == {
+        "result": []
+    }
+    with pytest.raises(BaiduOcrError, match="authorization"):
+        client.recognize(b"123", authorization=authorization, **context)
+    assert calls == [1]
+
+
+def test_baidu_wrong_context_does_not_consume_authorization():
+    calls = []
+
+    def transport(_request):
+        calls.append(1)
+        return 200, b'{"result": []}'
+
+    authorization = _authorization()
+    client = BaiduOcrClient(api_key="secret-key", transport=transport)
+    with pytest.raises(BaiduOcrError, match="authorization context"):
+        client.recognize(
+            b"123",
+            authorization=authorization,
+            page_hash="wrong-page",
+            input_fingerprint="input-sha",
+            page=1,
+            alignment_status="conflict",
+        )
+    assert client.recognize(
+        b"123",
+        authorization=authorization,
+        page_hash="page-sha",
+        input_fingerprint="input-sha",
+        page=1,
+        alignment_status="conflict",
+    ) == {"result": []}
+    assert calls == [1]
+
+
+def test_baidu_authorization_is_consumed_before_network_failure():
+    import parsing_core.workbench.ocr.baidu as baidu
+
+    authorization = _authorization()
+    client = BaiduOcrClient(
+        api_key="secret-key",
+        transport=lambda _request: (_ for _ in ()).throw(RuntimeError("offline")),
+        max_retries=0,
+    )
+    with pytest.raises(BaiduOcrError, match="offline"):
+        client.recognize(
+            b"123",
+            authorization=authorization,
+            page_hash="page-sha",
+            input_fingerprint="input-sha",
+            page=1,
+            alignment_status="conflict",
+        )
+    assert id(authorization) not in baidu._AUTHORIZATION_REGISTRY
+
+
+def test_baidu_authorization_registry_does_not_retain_expired_handles():
+    import parsing_core.workbench.ocr.baidu as baidu
+
+    authorizations = [_authorization() for _ in range(1000)]
+    assert len(baidu._AUTHORIZATION_REGISTRY) == 1000
+    del authorizations
+    gc.collect()
+    assert len(baidu._AUTHORIZATION_REGISTRY) == 0
+
+
+def test_baidu_authorization_is_single_use_under_concurrency():
+    calls = []
+
+    def transport(_request):
+        calls.append(1)
+        return 200, b'{"result": []}'
+
+    authorization = _authorization()
+    client = BaiduOcrClient(api_key="secret-key", transport=transport)
+    context = {
+        "page_hash": "page-sha",
+        "input_fingerprint": "input-sha",
+        "page": 1,
+        "alignment_status": "conflict",
+    }
+
+    def recognize():
+        try:
+            return client.recognize(b"123", authorization=authorization, **context)
+        except BaiduOcrError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _index: recognize(), range(8)))
+    assert results.count({"result": []}) == 1
     assert calls == [1]
 
 

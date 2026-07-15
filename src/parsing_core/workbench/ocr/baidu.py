@@ -4,8 +4,10 @@ import hmac
 import json
 import re
 import sys
+import threading
 import urllib.error
 import urllib.request
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -31,7 +33,7 @@ class _AuthorizationContext:
 
 
 class BaiduEscalationAuthorization:
-    __slots__ = ()
+    __slots__ = ("__weakref__",)
 
     def __new__(cls, *args, **kwargs):
         raise TypeError("Baidu escalation authorization requires a trusted alignment decision")
@@ -57,14 +59,27 @@ class BaiduEscalationAuthorization:
         )
         _validate_authorization_context(context)
         authorization = object.__new__(cls)
-        _AUTHORIZATION_REGISTRY[id(authorization)] = (authorization, context)
+        authorization_id = id(authorization)
+
+        def remove_expired(_reference, *, authorization_id=authorization_id):
+            with _AUTHORIZATION_REGISTRY_LOCK:
+                record = _AUTHORIZATION_REGISTRY.get(authorization_id)
+                if record is not None and record[0] is _reference:
+                    _AUTHORIZATION_REGISTRY.pop(authorization_id, None)
+
+        reference = weakref.ref(authorization, remove_expired)
+        with _AUTHORIZATION_REGISTRY_LOCK:
+            _AUTHORIZATION_REGISTRY[authorization_id] = (reference, context)
         return authorization
 
     def __reduce__(self):
         return (_unpickled_authorization, ())
 
 
-_AUTHORIZATION_REGISTRY: dict[int, tuple[BaiduEscalationAuthorization, _AuthorizationContext]] = {}
+_AUTHORIZATION_REGISTRY: dict[
+    int, tuple[weakref.ReferenceType[BaiduEscalationAuthorization], _AuthorizationContext]
+] = {}
+_AUTHORIZATION_REGISTRY_LOCK = threading.Lock()
 
 
 def _unpickled_authorization() -> BaiduEscalationAuthorization:
@@ -159,17 +174,20 @@ class BaiduOcrClient:
             if allow_network:
                 raise BaiduOcrError("Baidu OCR requires typed escalation authorization")
             raise BaiduOcrError("Baidu OCR network disabled")
-        record = _AUTHORIZATION_REGISTRY.get(id(authorization))
-        if record is None or record[0] is not authorization:
-            raise BaiduOcrError("Baidu OCR authorization is not registered")
-        if not _authorization_matches_context(
-            record[1],
-            page_hash=page_hash,
-            input_fingerprint=input_fingerprint,
-            page=page,
-            alignment_status=alignment_status,
-        ):
-            raise BaiduOcrError("Baidu OCR authorization context mismatch")
+        authorization_id = id(authorization)
+        with _AUTHORIZATION_REGISTRY_LOCK:
+            record = _AUTHORIZATION_REGISTRY.get(authorization_id)
+            if record is None or record[0]() is not authorization:
+                raise BaiduOcrError("Baidu OCR authorization is not registered")
+            if not _authorization_matches_context(
+                record[1],
+                page_hash=page_hash,
+                input_fingerprint=input_fingerprint,
+                page=page,
+                alignment_status=alignment_status,
+            ):
+                raise BaiduOcrError("Baidu OCR authorization context mismatch")
+            _AUTHORIZATION_REGISTRY.pop(authorization_id)
         request = BaiduRequest(
             url=self.endpoint,
             headers={
