@@ -183,6 +183,26 @@ def test_generator_blocks_untrusted_or_incomplete_output(mutator):
         ).generate(base)
 
 
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda value: value["sections"].reverse(),
+        lambda value: value["sections"].__setitem__(5, value["sections"][4].copy()),
+        lambda value: value["sections"].__setitem__(4, value["sections"][5].copy()),
+    ],
+)
+def test_generator_requires_canonical_section_order_and_membership(mutator):
+    base = _accepted_base_note()
+    output = _generated(base)
+    prompt = build_generation_prompt(base)
+    output["metadata"]["prompt_fingerprint"] = prompt_fingerprint(prompt)
+    mutator(output)
+    with pytest.raises(DeepSeekGenerationError, match="sections are out of order"):
+        DeepSeekIntensiveReadingGenerator(
+            FakeClient(json.dumps(output, ensure_ascii=False))
+        ).generate(base)
+
+
 def test_generator_reports_cancellation_without_publishing(tmp_path):
     event = threading.Event()
     event.set()

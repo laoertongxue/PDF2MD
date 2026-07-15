@@ -65,7 +65,9 @@ def build_generation_prompt(note: Mapping[str, Any]) -> str:
     }
     prompt = (
         RULESET
-        + "\n输出结构必须保持以下 key、section key/title 和 Mermaid key/type 不变。"
+        + "\n输出结构必须保持以下 section 顺序、key/title 和 Mermaid key/type 不变。"
+        + "\n精读栏目必须严格按此顺序输出："
+        + "、".join(key for key, _title in SECTION_ORDER)
         + "\n输入证据如下：\n"
         + json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
@@ -191,6 +193,13 @@ def _finalize_generated_note(
     ):
         raise DeepSeekGenerationError("generated note sections are incomplete")
     expected_by_key = {item[0]: item for item in SECTION_ORDER}
+    expected_section_keys = [item[0] for item in SECTION_ORDER]
+    actual_section_keys = [
+        section.get("key") if isinstance(section, Mapping) else None
+        for section in sections
+    ]
+    if actual_section_keys != expected_section_keys:
+        raise DeepSeekGenerationError("generated note sections are out of order")
     base_source = next(
         (item for item in base_sections if item.get("key") == "source_evidence"), None
     )
