@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from opencc import OpenCC
+
+from .baidu import BaiduEscalationAuthorization, BaiduEscalationReason
 from .models import OcrObservation
 
 
@@ -25,6 +28,7 @@ class AlignmentConflict:
     codex_text: str
     apple_block_id: str
     codex_block_id: str
+    evidence: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -57,15 +61,17 @@ _PUNCTUATION = str.maketrans(
         "／": "/",
     }
 )
-_TRADITIONAL = str.maketrans({"學": "学", "習": "习", "與": "与", "決": "决", "策": "策"})
 _NUMBER_RE = re.compile(r"(?:\d+(?:[.,]\d+)*%?|%\d+)")
 _FORMULA_OPERATOR_RE = re.compile(r"(?:<=|>=|!=|==|=|<|>|\+|-|\*|/|\^)")
+
+_OPENCC = OpenCC("t2s")
 
 
 def normalize_text(text: str) -> str:
     if not isinstance(text, str):
         raise TypeError("OCR block text must be a string")
-    value = text.translate(_PUNCTUATION).translate(_TRADITIONAL)
+    value = text.translate(_PUNCTUATION)
+    value = _OPENCC.convert(value)
     return " ".join(value.split())
 
 
@@ -79,30 +85,45 @@ def compare_observations(apple: Any, codex: Any) -> AlignmentResult:
     for left_index, left_block in enumerate(left):
         candidate = _best_match(left_block, right, unmatched_right)
         if candidate is None:
-            conflicts.append(_conflict("missing_block", left_block, None))
+            conflicts.append(_conflict("missing_block", left_block, None, apple, codex))
             continue
         unmatched_right.remove(candidate)
         matched.append((left_index, candidate))
         right_block = right[candidate]
         text_reason = _text_conflict_reason(left_block, right_block)
         if text_reason:
-            conflicts.append(_conflict(text_reason, left_block, right_block))
+            conflicts.append(_conflict(text_reason, left_block, right_block, apple, codex))
+        if left_block.get("type") == "formula" and right_block.get("type") == "formula":
+            if _formula_value(left_block) != _formula_value(right_block):
+                conflicts.append(
+                    _conflict("formula_conflict", left_block, right_block, apple, codex)
+                )
         if left_block.get("type") == "table" and right_block.get("type") == "table":
             if _table_shape(left_block.get("table")) != _table_shape(right_block.get("table")):
-                conflicts.append(_conflict("table_shape_conflict", left_block, right_block))
+                conflicts.append(
+                    _conflict("table_shape_conflict", left_block, right_block, apple, codex)
+                )
+            elif _table_value(left_block) != _table_value(right_block):
+                conflicts.append(
+                    _conflict("table_content_conflict", left_block, right_block, apple, codex)
+                )
         if left_block.get("type") == "page_number" and right_block.get("type") == "page_number":
             if normalize_text(left_block.get("text", "")) != normalize_text(
                 right_block.get("text", "")
             ):
-                conflicts.append(_conflict("page_number_conflict", left_block, right_block))
+                conflicts.append(
+                    _conflict("page_number_conflict", left_block, right_block, apple, codex)
+                )
         if left_block.get("type") == "footnote" and right_block.get("type") == "footnote":
             if normalize_text(left_block.get("text", "")) != normalize_text(
                 right_block.get("text", "")
             ):
-                conflicts.append(_conflict("footnote_conflict", left_block, right_block))
+                conflicts.append(
+                    _conflict("footnote_conflict", left_block, right_block, apple, codex)
+                )
 
     for right_index in sorted(unmatched_right):
-        conflicts.append(_conflict("missing_block", None, right[right_index]))
+        conflicts.append(_conflict("missing_block", None, right[right_index], apple, codex))
 
     left_order = [left[i].get("reading_order", i) for i, _ in matched]
     right_order = [right[j].get("reading_order", j) for _, j in matched]
@@ -110,7 +131,7 @@ def compare_observations(apple: Any, codex: Any) -> AlignmentResult:
         left_order[index] != right_order[index] for index in range(len(matched))
     ):
         first_left, first_right = left[matched[0][0]], right[matched[0][1]]
-        conflicts.append(_conflict("reading_order_conflict", first_left, first_right))
+        conflicts.append(_conflict("reading_order_conflict", first_left, first_right, apple, codex))
 
     return AlignmentResult(
         status=AlignmentDecision.CONFLICT if conflicts else AlignmentDecision.CONSISTENT,
@@ -145,6 +166,19 @@ def needs_baidu(
         return True
     bucket = int.from_bytes(hashlib.sha256(f"{page_hash}:{page}".encode()).digest()[:8], "big")
     return bucket % 10_000 < int(sample_rate * 10_000)
+
+
+def authorize_baidu_escalation(
+    page_hash: str, page: int, status: str | AlignmentDecision, *, sample_rate: float = 0.05
+) -> BaiduEscalationAuthorization | None:
+    status_value = status.value if isinstance(status, AlignmentDecision) else str(status)
+    if status_value == AlignmentDecision.CONFLICT.value:
+        return BaiduEscalationAuthorization(BaiduEscalationReason.CONFLICT)
+    if status_value == AlignmentDecision.COMPLEX.value:
+        return BaiduEscalationAuthorization(BaiduEscalationReason.COMPLEX)
+    if needs_baidu(page_hash, page, status_value, sample_rate=sample_rate):
+        return BaiduEscalationAuthorization(BaiduEscalationReason.SAMPLE)
+    return None
 
 
 def _blocks(observation: Any) -> list[dict[str, Any]]:
@@ -196,7 +230,11 @@ def _text_conflict_reason(left: dict[str, Any], right: dict[str, Any]) -> str | 
 
 
 def _conflict(
-    reason: str, left: dict[str, Any] | None, right: dict[str, Any] | None
+    reason: str,
+    left: dict[str, Any] | None,
+    right: dict[str, Any] | None,
+    apple: Any,
+    codex: Any,
 ) -> AlignmentConflict:
     source = left or right or {}
     return AlignmentConflict(
@@ -206,7 +244,58 @@ def _conflict(
         codex_text=(right or {}).get("text", ""),
         apple_block_id=(left or {}).get("id", ""),
         codex_block_id=(right or {}).get("id", ""),
+        evidence=_evidence(apple, codex, left, right),
     )
+
+
+def _metadata(observation: Any) -> dict[str, Any]:
+    if isinstance(observation, OcrObservation):
+        return {
+            "id": observation.id,
+            "engine": observation.engine,
+            "input_fingerprint": observation.input_hash,
+        }
+    if isinstance(observation, str):
+        try:
+            observation = json.loads(observation)
+        except json.JSONDecodeError:
+            return {}
+    return observation if isinstance(observation, dict) else {}
+
+
+def _evidence(
+    apple: Any,
+    codex: Any,
+    left: dict[str, Any] | None,
+    right: dict[str, Any] | None,
+) -> dict[str, Any]:
+    apple_meta, codex_meta = _metadata(apple), _metadata(codex)
+    return {
+        "candidate_text": {
+            "apple": (left or {}).get("text", ""),
+            "codex": (right or {}).get("text", ""),
+        },
+        "candidate_structures": {"apple": left or {}, "codex": right or {}},
+        "confidence": {
+            "apple": (left or {}).get("confidence"),
+            "codex": (right or {}).get("confidence"),
+        },
+        "observation_ids": {"apple": apple_meta.get("id", ""), "codex": codex_meta.get("id", "")},
+        "input_fingerprints": {
+            "apple": apple_meta.get("input_fingerprint", ""),
+            "codex": codex_meta.get("input_fingerprint", ""),
+        },
+        "page_fingerprints": {
+            "apple": apple_meta.get("page_fingerprint") or apple_meta.get("input_fingerprint", ""),
+            "codex": codex_meta.get("page_fingerprint") or codex_meta.get("input_fingerprint", ""),
+        },
+        "baidu_observation_refs": list(
+            dict.fromkeys(
+                (apple_meta.get("baidu_observation_refs") or [])
+                + (codex_meta.get("baidu_observation_refs") or [])
+            )
+        ),
+    }
 
 
 def _bbox(block: dict[str, Any]) -> dict[str, float]:
@@ -228,3 +317,18 @@ def _table_shape(table: Any) -> tuple[int, int] | None:
         return None
     rows = table["matrix"]
     return len(rows), max((len(row) for row in rows if isinstance(row, list)), default=0)
+
+
+def _formula_value(block: dict[str, Any]) -> str:
+    formula = block.get("formula")
+    if not isinstance(formula, dict):
+        return ""
+    return normalize_text(str(formula.get("latex", ""))).replace(" ", "")
+
+
+def _table_value(block: dict[str, Any]) -> str:
+    table = block.get("table")
+    if not isinstance(table, dict):
+        return ""
+    value = {key: table.get(key) for key in ("matrix", "cells") if key in table}
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

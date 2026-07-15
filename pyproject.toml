@@ -9,6 +9,7 @@ requires-python = ">=3.11"
 dependencies = [
   "markitdown[docx]>=0.0.1",
   "jsonschema>=4.23,<5",
+  "opencc-python-reimplemented>=0.1.7,<1",
 ]
 
 [project.optional-dependencies]

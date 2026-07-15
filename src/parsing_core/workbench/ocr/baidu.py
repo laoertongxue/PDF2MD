@@ -6,10 +6,22 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 
 
 class BaiduOcrError(RuntimeError):
     pass
+
+
+class BaiduEscalationReason(StrEnum):
+    CONFLICT = "conflict"
+    COMPLEX = "complex"
+    SAMPLE = "sample"
+
+
+@dataclass(frozen=True)
+class BaiduEscalationAuthorization:
+    reason: BaiduEscalationReason
 
 
 @dataclass(frozen=True)
@@ -63,13 +75,27 @@ class BaiduOcrClient:
         self.max_retries = max_retries
         self.transport = transport
 
-    def recognize(self, image: bytes, *, allow_network: bool = False) -> dict:
+    def recognize(
+        self,
+        image: bytes,
+        *,
+        authorization: BaiduEscalationAuthorization | None = None,
+        allow_network: bool = False,
+    ) -> dict:
         if not isinstance(image, bytes):
             raise BaiduOcrError("Baidu OCR image is invalid")
         if len(image) > self.max_image_bytes:
             raise BaiduOcrError("Baidu OCR image is too large")
-        if not allow_network:
+        if authorization is not None and not isinstance(
+            authorization, BaiduEscalationAuthorization
+        ):
+            raise BaiduOcrError("Baidu OCR unsupported escalation reason")
+        if not isinstance(authorization, BaiduEscalationAuthorization):
+            if allow_network:
+                raise BaiduOcrError("Baidu OCR requires typed escalation authorization")
             raise BaiduOcrError("Baidu OCR network disabled")
+        if not isinstance(authorization.reason, BaiduEscalationReason):
+            raise BaiduOcrError("Baidu OCR unsupported escalation reason")
         request = BaiduRequest(
             url=self.endpoint,
             headers={

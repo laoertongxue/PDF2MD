@@ -1,6 +1,8 @@
 import pytest
 
 from parsing_core.workbench.ocr.baidu import (
+    BaiduEscalationAuthorization,
+    BaiduEscalationReason,
     BaiduOcrClient,
     BaiduOcrError,
     redact_baidu_error,
@@ -43,7 +45,9 @@ def test_baidu_client_retries_only_bounded_transient_failures():
     client = BaiduOcrClient(api_key="secret-key", transport=transport, max_retries=2)
 
     with pytest.raises(BaiduOcrError, match="rate limited"):
-        client.recognize(b"123", allow_network=True)
+        client.recognize(
+            b"123", authorization=BaiduEscalationAuthorization(BaiduEscalationReason.CONFLICT)
+        )
     assert len(calls) == 3
 
 
@@ -55,8 +59,18 @@ def test_baidu_client_validates_json_and_never_logs_secret(monkeypatch):
         return 200, b'{"result": [{"text":"ok"}]}'
 
     client = BaiduOcrClient(api_key="secret-key", transport=transport)
-    result = client.recognize(b"123", allow_network=True)
+    result = client.recognize(
+        b"123", authorization=BaiduEscalationAuthorization(BaiduEscalationReason.SAMPLE)
+    )
 
     assert result == {"result": [{"text": "ok"}]}
     assert seen[0].headers["Authorization"] == "Bearer secret-key"
     assert b"123" in seen[0].body
+
+
+def test_baidu_client_rejects_untyped_or_invalid_upgrade_authorization():
+    client = BaiduOcrClient(api_key="secret-key")
+    with pytest.raises(BaiduOcrError, match="typed escalation authorization"):
+        client.recognize(b"123", allow_network=True)
+    with pytest.raises(BaiduOcrError, match="unsupported escalation reason"):
+        client.recognize(b"123", authorization="consistent")

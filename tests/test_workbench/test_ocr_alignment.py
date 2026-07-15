@@ -2,11 +2,13 @@ import pytest
 
 from parsing_core.workbench.ocr.alignment import (
     AlignmentDecision,
+    authorize_baidu_escalation,
     classify_page,
     compare_observations,
     needs_baidu,
     normalize_text,
 )
+from parsing_core.workbench.ocr.baidu import BaiduEscalationReason
 
 
 def block(
@@ -30,8 +32,16 @@ def block(
     return value
 
 
-def observation(blocks):
-    return {"page": {"number": 1, "width": 1200, "height": 1600}, "blocks": blocks}
+def observation(
+    blocks, *, observation_id="obs-1", engine="apple_vision", input_fingerprint="page-sha"
+):
+    return {
+        "id": observation_id,
+        "engine": engine,
+        "input_fingerprint": input_fingerprint,
+        "page": {"number": 1, "width": 1200, "height": 1600},
+        "blocks": blocks,
+    }
 
 
 @pytest.mark.parametrize(
@@ -39,6 +49,7 @@ def observation(blocks):
     [
         ("利润为 10%", "利润为10％", None),
         ("學習管理", "学习管理", None),
+        ("經濟管理與決策", "经济管理与决策", None),
         ("利润为 10%", "利润为 40%", "numeric_conflict"),
         ("x <= 3", "x >= 3", "formula_operator_conflict"),
     ],
@@ -83,6 +94,63 @@ def test_compare_observations_detects_table_shape_and_multicolumn_order():
     assert "table_shape_conflict" in reasons
 
 
+def test_compare_observations_detects_formula_latex_conflict():
+    result = compare_observations(
+        observation([block("x", block_type="formula", formula={"latex": "x+1"})]),
+        observation(
+            [block("x", block_type="formula", formula={"latex": "x-1"})], observation_id="codex"
+        ),
+    )
+
+    assert {item.reason for item in result.conflicts} == {"formula_conflict"}
+
+
+def test_compare_observations_detects_table_cell_content_conflict():
+    result = compare_observations(
+        observation([block("表", block_type="table", table={"matrix": [["收入", "10"]]})]),
+        observation(
+            [block("表", block_type="table", table={"matrix": [["收入", "40"]]})],
+            observation_id="codex",
+            engine="codex_vision",
+        ),
+    )
+
+    assert "table_content_conflict" in {item.reason for item in result.conflicts}
+
+
+def test_compare_observations_detects_structured_table_cells_conflict():
+    result = compare_observations(
+        observation([block("表", block_type="table", table={"cells": [{"row": 1, "text": "10"}]})]),
+        observation(
+            [block("表", block_type="table", table={"cells": [{"row": 1, "text": "40"}]})],
+            observation_id="codex",
+        ),
+    )
+
+    assert "table_content_conflict" in {item.reason for item in result.conflicts}
+
+
+def test_conflict_contains_final_adjudication_evidence_package():
+    result = compare_observations(
+        observation([block("利润为 10%", confidence=0.7)], input_fingerprint="apple-page"),
+        observation(
+            [block("利润为 40%", confidence=0.8)],
+            observation_id="codex-2",
+            engine="codex_vision",
+            input_fingerprint="codex-page",
+        ),
+    )
+
+    conflict = result.conflicts[0]
+    evidence = conflict.evidence
+    assert evidence["candidate_text"] == {"apple": "利润为 10%", "codex": "利润为 40%"}
+    assert evidence["candidate_structures"]["apple"]["type"] == "paragraph"
+    assert evidence["confidence"] == {"apple": 0.7, "codex": 0.8}
+    assert evidence["observation_ids"] == {"apple": "obs-1", "codex": "codex-2"}
+    assert evidence["input_fingerprints"] == {"apple": "apple-page", "codex": "codex-page"}
+    assert evidence["baidu_observation_refs"] == []
+
+
 def test_matching_different_engine_ids_does_not_create_order_conflict():
     result = compare_observations(
         observation([block("左", id="apple-1", reading_order=1)]),
@@ -124,6 +192,22 @@ def test_upgrade_is_required_for_conflict_or_complex_but_not_consistent_unsample
     assert needs_baidu("book-sha", 1, "conflict", sample_rate=0) is True
     assert needs_baidu("book-sha", 1, "complex", sample_rate=0) is True
     assert needs_baidu("book-sha", 1, "consistent", sample_rate=0) is False
+
+
+def test_baidu_authorization_is_typed_and_only_issued_for_upgrade_pages():
+    assert (
+        authorize_baidu_escalation("book-sha", 1, "conflict", sample_rate=0).reason
+        == BaiduEscalationReason.CONFLICT
+    )
+    assert (
+        authorize_baidu_escalation("book-sha", 1, "complex", sample_rate=0).reason
+        == BaiduEscalationReason.COMPLEX
+    )
+    assert (
+        authorize_baidu_escalation("book-sha", 1, "consistent", sample_rate=1).reason
+        == BaiduEscalationReason.SAMPLE
+    )
+    assert authorize_baidu_escalation("book-sha", 1, "consistent", sample_rate=0) is None
 
 
 def test_normalization_does_not_hide_numbers_or_formula_operators():
