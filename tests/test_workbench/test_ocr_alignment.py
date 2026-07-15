@@ -195,19 +195,35 @@ def test_upgrade_is_required_for_conflict_or_complex_but_not_consistent_unsample
 
 
 def test_baidu_authorization_is_typed_and_only_issued_for_upgrade_pages():
-    assert (
-        authorize_baidu_escalation("book-sha", 1, "conflict", sample_rate=0).reason
-        == BaiduEscalationReason.CONFLICT
+    authorization = authorize_baidu_escalation(
+        "book-sha", 1, "conflict", input_fingerprint="input-sha", sample_rate=0
     )
     assert (
-        authorize_baidu_escalation("book-sha", 1, "complex", sample_rate=0).reason
+        authorization.reason
+        == BaiduEscalationReason.CONFLICT
+    )
+    assert authorization.page_hash == "book-sha"
+    assert authorization.input_fingerprint == "input-sha"
+    assert authorization.page == 1
+    assert authorization.alignment_status == "conflict"
+    assert (
+        authorize_baidu_escalation(
+            "book-sha", 1, "complex", input_fingerprint="input-sha", sample_rate=0
+        ).reason
         == BaiduEscalationReason.COMPLEX
     )
     assert (
-        authorize_baidu_escalation("book-sha", 1, "consistent", sample_rate=1).reason
+        authorize_baidu_escalation(
+            "book-sha", 1, "consistent", input_fingerprint="input-sha", sample_rate=1
+        ).reason
         == BaiduEscalationReason.SAMPLE
     )
-    assert authorize_baidu_escalation("book-sha", 1, "consistent", sample_rate=0) is None
+    assert (
+        authorize_baidu_escalation(
+            "book-sha", 1, "consistent", input_fingerprint="input-sha", sample_rate=0
+        )
+        is None
+    )
 
 
 def test_normalization_does_not_hide_numbers_or_formula_operators():

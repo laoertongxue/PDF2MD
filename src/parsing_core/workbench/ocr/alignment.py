@@ -10,7 +10,11 @@ from typing import Any
 
 from opencc import OpenCC
 
-from .baidu import BaiduEscalationAuthorization, BaiduEscalationReason
+from .baidu import (
+    BaiduEscalationAuthorization,
+    BaiduEscalationReason,
+    _issue_baidu_escalation_authorization,
+)
 from .models import OcrObservation
 
 
@@ -169,15 +173,38 @@ def needs_baidu(
 
 
 def authorize_baidu_escalation(
-    page_hash: str, page: int, status: str | AlignmentDecision, *, sample_rate: float = 0.05
+    page_hash: str,
+    page: int,
+    status: str | AlignmentDecision,
+    *,
+    input_fingerprint: str,
+    sample_rate: float = 0.05,
 ) -> BaiduEscalationAuthorization | None:
     status_value = status.value if isinstance(status, AlignmentDecision) else str(status)
     if status_value == AlignmentDecision.CONFLICT.value:
-        return BaiduEscalationAuthorization(BaiduEscalationReason.CONFLICT)
+        return _issue_baidu_escalation_authorization(
+            BaiduEscalationReason.CONFLICT,
+            page_hash=page_hash,
+            input_fingerprint=input_fingerprint,
+            alignment_status=status_value,
+            page=page,
+        )
     if status_value == AlignmentDecision.COMPLEX.value:
-        return BaiduEscalationAuthorization(BaiduEscalationReason.COMPLEX)
+        return _issue_baidu_escalation_authorization(
+            BaiduEscalationReason.COMPLEX,
+            page_hash=page_hash,
+            input_fingerprint=input_fingerprint,
+            alignment_status=status_value,
+            page=page,
+        )
     if needs_baidu(page_hash, page, status_value, sample_rate=sample_rate):
-        return BaiduEscalationAuthorization(BaiduEscalationReason.SAMPLE)
+        return _issue_baidu_escalation_authorization(
+            BaiduEscalationReason.SAMPLE,
+            page_hash=page_hash,
+            input_fingerprint=input_fingerprint,
+            alignment_status=status_value,
+            page=page,
+        )
     return None
 
 

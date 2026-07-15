@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import re
 import urllib.error
@@ -19,9 +20,60 @@ class BaiduEscalationReason(StrEnum):
     SAMPLE = "sample"
 
 
-@dataclass(frozen=True)
+_AUTHORIZATION_CAPABILITY = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class BaiduEscalationAuthorization:
     reason: BaiduEscalationReason
+    page_hash: str
+    input_fingerprint: str
+    alignment_status: str
+    page: int
+
+    def __init__(
+        self,
+        reason: BaiduEscalationReason,
+        page_hash: str | None = None,
+        input_fingerprint: str | None = None,
+        alignment_status: str | None = None,
+        page: int | None = None,
+        *,
+        _capability: object | None = None,
+    ) -> None:
+        if _capability is not _AUTHORIZATION_CAPABILITY:
+            raise TypeError("Baidu escalation authorization requires a trusted factory")
+        if not isinstance(reason, BaiduEscalationReason):
+            raise ValueError("Baidu escalation reason is invalid")
+        if not all(isinstance(value, str) and value for value in (page_hash, input_fingerprint)):
+            raise ValueError("Baidu escalation context is invalid")
+        if alignment_status not in {"consistent", "conflict", "complex"}:
+            raise ValueError("Baidu escalation status is invalid")
+        if not isinstance(page, int) or page < 1:
+            raise ValueError("Baidu escalation page is invalid")
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "page_hash", page_hash)
+        object.__setattr__(self, "input_fingerprint", input_fingerprint)
+        object.__setattr__(self, "alignment_status", alignment_status)
+        object.__setattr__(self, "page", page)
+
+
+def _issue_baidu_escalation_authorization(
+    reason: BaiduEscalationReason,
+    *,
+    page_hash: str,
+    input_fingerprint: str,
+    alignment_status: str,
+    page: int,
+) -> BaiduEscalationAuthorization:
+    return BaiduEscalationAuthorization(
+        reason,
+        page_hash,
+        input_fingerprint,
+        alignment_status,
+        page,
+        _capability=_AUTHORIZATION_CAPABILITY,
+    )
 
 
 @dataclass(frozen=True)
@@ -81,6 +133,10 @@ class BaiduOcrClient:
         *,
         authorization: BaiduEscalationAuthorization | None = None,
         allow_network: bool = False,
+        page_hash: str | None = None,
+        input_fingerprint: str | None = None,
+        page: int | None = None,
+        alignment_status: str | None = None,
     ) -> dict:
         if not isinstance(image, bytes):
             raise BaiduOcrError("Baidu OCR image is invalid")
@@ -96,6 +152,14 @@ class BaiduOcrClient:
             raise BaiduOcrError("Baidu OCR network disabled")
         if not isinstance(authorization.reason, BaiduEscalationReason):
             raise BaiduOcrError("Baidu OCR unsupported escalation reason")
+        if not _authorization_matches_context(
+            authorization,
+            page_hash=page_hash,
+            input_fingerprint=input_fingerprint,
+            page=page,
+            alignment_status=alignment_status,
+        ):
+            raise BaiduOcrError("Baidu OCR authorization context mismatch")
         request = BaiduRequest(
             url=self.endpoint,
             headers={
@@ -131,6 +195,7 @@ class BaiduOcrClient:
             return value
         raise BaiduOcrError("Baidu OCR request failed")
 
+
     def _send(self, request: BaiduRequest) -> tuple[int, bytes]:
         if self.transport is not None:
             return self.transport(request)
@@ -142,6 +207,34 @@ class BaiduOcrClient:
                 return int(response.status), _read_bounded(response, self.max_response_bytes)
         except urllib.error.HTTPError as exc:
             return int(exc.code), _read_bounded(exc, self.max_response_bytes)
+
+
+def _authorization_matches_context(
+    authorization: BaiduEscalationAuthorization,
+    *,
+    page_hash: str | None,
+    input_fingerprint: str | None,
+    page: int | None,
+    alignment_status: str | None,
+) -> bool:
+    if not isinstance(page_hash, str) or not isinstance(input_fingerprint, str):
+        return False
+    if not isinstance(page, int) or not isinstance(alignment_status, str):
+        return False
+    return (
+        hmac.compare_digest(authorization.page_hash, page_hash)
+        and hmac.compare_digest(authorization.input_fingerprint, input_fingerprint)
+        and authorization.page == page
+        and authorization.alignment_status == alignment_status
+        and (
+            authorization.reason is BaiduEscalationReason.CONFLICT
+            and alignment_status == "conflict"
+            or authorization.reason is BaiduEscalationReason.COMPLEX
+            and alignment_status == "complex"
+            or authorization.reason is BaiduEscalationReason.SAMPLE
+            and alignment_status == "consistent"
+        )
+    )
 
 
 def redact_baidu_error(message: str) -> str:

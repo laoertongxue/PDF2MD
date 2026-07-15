@@ -1,5 +1,6 @@
 import pytest
 
+from parsing_core.workbench.ocr.alignment import authorize_baidu_escalation
 from parsing_core.workbench.ocr.baidu import (
     BaiduEscalationAuthorization,
     BaiduEscalationReason,
@@ -7,6 +8,16 @@ from parsing_core.workbench.ocr.baidu import (
     BaiduOcrError,
     redact_baidu_error,
 )
+
+
+def _authorization(status="conflict", *, page_hash="page-sha", input_fingerprint="input-sha"):
+    return authorize_baidu_escalation(
+        page_hash,
+        1,
+        status,
+        input_fingerprint=input_fingerprint,
+        sample_rate=1,
+    )
 
 
 def test_baidu_client_is_network_disabled_by_default():
@@ -46,7 +57,12 @@ def test_baidu_client_retries_only_bounded_transient_failures():
 
     with pytest.raises(BaiduOcrError, match="rate limited"):
         client.recognize(
-            b"123", authorization=BaiduEscalationAuthorization(BaiduEscalationReason.CONFLICT)
+            b"123",
+            authorization=_authorization(),
+            page_hash="page-sha",
+            input_fingerprint="input-sha",
+            page=1,
+            alignment_status="conflict",
         )
     assert len(calls) == 3
 
@@ -60,7 +76,12 @@ def test_baidu_client_validates_json_and_never_logs_secret(monkeypatch):
 
     client = BaiduOcrClient(api_key="secret-key", transport=transport)
     result = client.recognize(
-        b"123", authorization=BaiduEscalationAuthorization(BaiduEscalationReason.SAMPLE)
+        b"123",
+        authorization=_authorization("consistent"),
+        page_hash="page-sha",
+        input_fingerprint="input-sha",
+        page=1,
+        alignment_status="consistent",
     )
 
     assert result == {"result": [{"text": "ok"}]}
@@ -74,3 +95,71 @@ def test_baidu_client_rejects_untyped_or_invalid_upgrade_authorization():
         client.recognize(b"123", allow_network=True)
     with pytest.raises(BaiduOcrError, match="unsupported escalation reason"):
         client.recognize(b"123", authorization="consistent")
+
+
+def test_baidu_client_rejects_directly_forged_authorization():
+    with pytest.raises(TypeError, match="trusted factory"):
+        BaiduEscalationAuthorization(
+            BaiduEscalationReason.CONFLICT,
+            "page-sha",
+            "input-sha",
+            "conflict",
+            1,
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("page_hash", "other-page"),
+        ("input_fingerprint", "other-input"),
+        ("page", 2),
+        ("alignment_status", "consistent"),
+    ],
+)
+def test_baidu_client_rejects_authorization_for_wrong_page_context(field, value):
+    client = BaiduOcrClient(api_key="secret-key")
+    context = {
+        "page_hash": "page-sha",
+        "input_fingerprint": "input-sha",
+        "page": 1,
+        "alignment_status": "conflict",
+    }
+    context[field] = value
+
+    with pytest.raises(BaiduOcrError, match="authorization context"):
+        client.recognize(b"123", authorization=_authorization(), **context)
+
+
+def test_baidu_client_allows_network_only_for_matching_upgrade_page():
+    calls = []
+
+    def transport(_request):
+        calls.append(1)
+        return 200, b'{"result": []}'
+
+    client = BaiduOcrClient(api_key="secret-key", transport=transport)
+    result = client.recognize(
+        b"123",
+        authorization=_authorization(),
+        page_hash="page-sha",
+        input_fingerprint="input-sha",
+        page=1,
+        alignment_status="conflict",
+    )
+
+    assert result == {"result": []}
+    assert calls == [1]
+
+
+def test_baidu_client_stays_offline_without_authorization_even_with_context():
+    client = BaiduOcrClient(api_key="secret-key")
+
+    with pytest.raises(BaiduOcrError, match="network disabled"):
+        client.recognize(
+            b"123",
+            page_hash="page-sha",
+            input_fingerprint="input-sha",
+            page=1,
+            alignment_status="consistent",
+        )
