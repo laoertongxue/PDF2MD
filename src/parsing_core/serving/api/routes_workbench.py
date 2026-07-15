@@ -554,7 +554,9 @@ async def get_workbench_settings(sch: SchedulerDep):
 async def save_deepseek_settings(req: DeepSeekSettingsRequest, sch: SchedulerDep):
     if req.api_key is not None and not req.api_key.strip():
         raise HTTPException(400, "deepseek api key cannot be empty")
-    settings = WorkbenchSettings(deepseek_model=req.model or "deepseek-chat")
+    if req.model != "deepseek-v4-pro":
+        raise HTTPException(400, "only deepseek-v4-pro is supported")
+    settings = WorkbenchSettings(deepseek_model=req.model or "deepseek-v4-pro")
     try:
         save_settings(_settings_path(sch), settings)
     except Exception as exc:

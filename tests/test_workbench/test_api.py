@@ -1764,17 +1764,17 @@ def test_save_deepseek_settings_allows_model_only_update_with_existing_key(tmp_p
 
     res = c.post(
         "/api/workbench/settings/deepseek",
-        json={"model": "deepseek-reasoner"},
+        json={"model": "deepseek-v4-pro"},
     )
 
     assert res.status_code == 200
     assert res.json() == {
-        "deepseek_model": "deepseek-reasoner",
+        "deepseek_model": "deepseek-v4-pro",
         "deepseek_key_masked": "sk-****-key",
     }
     assert save_calls["count"] == 0
     assert json.loads(settings_path.read_text(encoding="utf-8")) == {
-        "deepseek_model": "deepseek-reasoner"
+        "deepseek_model": "deepseek-v4-pro"
     }
 
 
@@ -2049,12 +2049,12 @@ def test_workbench_settings_save_and_get(tmp_path, monkeypatch):
 
     post_res = c.post(
         "/api/workbench/settings/deepseek",
-        json={"api_key": "sk-abcdefghijklmnopqrstuvwxyz", "model": "deepseek-reasoner"},
+        json={"api_key": "sk-abcdefghijklmnopqrstuvwxyz", "model": "deepseek-v4-pro"},
     )
 
     assert post_res.status_code == 200
     assert post_res.json() == {
-        "deepseek_model": "deepseek-reasoner",
+        "deepseek_model": "deepseek-v4-pro",
         "deepseek_key_masked": "sk-****wxyz",
     }
 
@@ -2062,7 +2062,7 @@ def test_workbench_settings_save_and_get(tmp_path, monkeypatch):
 
     assert get_res.status_code == 200
     assert get_res.json() == {
-        "deepseek_model": "deepseek-reasoner",
+        "deepseek_model": "deepseek-v4-pro",
         "deepseek_key_masked": "sk-****wxyz",
     }
 
@@ -2070,7 +2070,7 @@ def test_workbench_settings_save_and_get(tmp_path, monkeypatch):
     settings_text = settings_path.read_text(encoding="utf-8")
     assert "api_key" not in settings_text
     assert "abcdefghijklmnopqrstuvwxyz" not in settings_text
-    assert json.loads(settings_text) == {"deepseek_model": "deepseek-reasoner"}
+    assert json.loads(settings_text) == {"deepseek_model": "deepseek-v4-pro"}
 
 
 def test_workbench_settings_get_without_key_returns_none(tmp_path, monkeypatch):
@@ -2085,7 +2085,7 @@ def test_workbench_settings_get_without_key_returns_none(tmp_path, monkeypatch):
 
     assert res.status_code == 200
     assert res.json() == {
-        "deepseek_model": "deepseek-chat",
+        "deepseek_model": "deepseek-v4-pro",
         "deepseek_key_masked": None,
     }
 
@@ -2105,7 +2105,7 @@ def test_workbench_settings_save_failure_does_not_touch_keychain(tmp_path, monke
 
     res = c.post(
         "/api/workbench/settings/deepseek",
-        json={"api_key": "sk-abcdefghijklmnopqrstuvwxyz", "model": "deepseek-reasoner"},
+        json={"api_key": "sk-abcdefghijklmnopqrstuvwxyz", "model": "deepseek-v4-pro"},
     )
 
     assert res.status_code == 500
@@ -2119,7 +2119,7 @@ def test_workbench_settings_test_connection(tmp_path, monkeypatch):
     calls = {}
     settings_path = tmp_path / "fs" / "workbench-settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(json.dumps({"deepseek_model": "deepseek-reasoner"}), encoding="utf-8")
+    settings_path.write_text(json.dumps({"deepseek_model": "deepseek-v4-pro"}), encoding="utf-8")
 
     monkeypatch.setattr(
         routes_workbench,
@@ -2145,7 +2145,7 @@ def test_workbench_settings_test_connection(tmp_path, monkeypatch):
     assert res.json() == {"status": "ok"}
     assert calls == {
         "api_key": "sk-test-12345678",
-        "model": "deepseek-reasoner",
+        "model": "deepseek-v4-pro",
         "prompt": "请只回复 ok",
         "timeout": 30,
     }

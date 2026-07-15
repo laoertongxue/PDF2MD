@@ -101,6 +101,8 @@ def build_intensive_reading_note(
         "prompt_rules_version": prompt_rules_version,
         "source_id": source_id,
         "chapter_id": chapter["id"],
+        "chapter_number": chapter["number"],
+        "chapter_title": chapter["title"],
         "page_start": chapter["page_start"],
         "page_end": chapter["page_end"],
         "citation_ids": source_refs,
