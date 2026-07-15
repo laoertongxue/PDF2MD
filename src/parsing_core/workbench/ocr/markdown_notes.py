@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import stat
+import weakref
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,39 @@ _MINDMAP_LINE_RE = re.compile(
 
 class MarkdownNoteError(ValueError):
     pass
+
+
+class AcceptedIntensiveReadingNote(dict):
+    """An in-memory note minted only by the accepted OCR builder."""
+
+    __slots__ = ("__weakref__",)
+
+
+_ACCEPTED_NOTE_REFS: dict[
+    int, tuple[weakref.ReferenceType[AcceptedIntensiveReadingNote], str]
+] = {}
+
+
+def _register_accepted_note(note: AcceptedIntensiveReadingNote) -> None:
+    note_id = id(note)
+
+    def remove(_ref, *, note_id=note_id):
+        _ACCEPTED_NOTE_REFS.pop(note_id, None)
+
+    _ACCEPTED_NOTE_REFS[note_id] = (
+        weakref.ref(note, remove),
+        note["metadata"]["note_fingerprint"],
+    )
+
+
+def _require_accepted_note(note: Mapping[str, Any]) -> None:
+    if type(note) is not AcceptedIntensiveReadingNote:
+        raise MarkdownNoteError("note is not an accepted OCR context")
+    registered = _ACCEPTED_NOTE_REFS.get(id(note))
+    if registered is None or registered[0]() is not note:
+        raise MarkdownNoteError("note is not an accepted OCR context")
+    if note.get("metadata", {}).get("note_fingerprint") != registered[1]:
+        raise MarkdownNoteError("accepted OCR context was modified")
 
 
 def build_intensive_reading_note(
@@ -135,14 +169,15 @@ def build_intensive_reading_note(
     metadata["note_fingerprint"] = _digest(
         {"metadata": metadata, "sections": sections, "mermaid": mermaid}
     )
-    note = {
+    note = AcceptedIntensiveReadingNote({
         "schema_version": NOTE_SCHEMA_VERSION,
         "metadata": metadata,
         "sections": sections,
         "mermaid": mermaid,
         "markdown": _render_markdown(chapter, metadata, sections, mermaid),
-    }
+    })
     validate_intensive_reading_note(note)
+    _register_accepted_note(note)
     return note
 
 

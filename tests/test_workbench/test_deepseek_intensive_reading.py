@@ -11,6 +11,12 @@ from parsing_core.workbench.ocr.deepseek_intensive_reading import (
     build_generation_prompt,
     prompt_fingerprint,
 )
+from parsing_core.workbench.ocr.markdown_notes import (
+    AcceptedIntensiveReadingNote,
+    _digest,
+    _register_accepted_note,
+    _render_markdown,
+)
 
 
 def _base_note():
@@ -71,6 +77,7 @@ def _base_note():
 def _generated(base):
     result = json.loads(json.dumps(base))
     result.pop("markdown", None)
+    result["metadata"].pop("note_fingerprint", None)
     result["metadata"]["model"] = MODEL_NAME
     result["metadata"]["prompt_fingerprint"] = "pending"
     result["sections"][1]["content"] = "需求预测回答的是未来需要多少，而不是凭感觉拍脑袋。"
@@ -98,6 +105,24 @@ def _generated(base):
         },
     ]
     return result
+
+
+def _accepted_base_note():
+    note = _base_note()
+    chapter = {"number": "", "title": "第 1 章 需求预测"}
+    note["markdown"] = _render_markdown(
+        chapter, note["metadata"], note["sections"], note["mermaid"]
+    )
+    note["metadata"]["note_fingerprint"] = _digest(
+        {
+            "metadata": note["metadata"],
+            "sections": note["sections"],
+            "mermaid": note["mermaid"],
+        }
+    )
+    accepted = AcceptedIntensiveReadingNote(note)
+    _register_accepted_note(accepted)
+    return accepted
 
 
 class FakeClient:
@@ -130,7 +155,7 @@ def test_generator_rejects_non_canonical_model():
 
 
 def test_generator_validates_output_and_binds_prompt_and_evidence():
-    base = _base_note()
+    base = _accepted_base_note()
     output = _generated(base)
     prompt = build_generation_prompt(base)
     output["metadata"]["prompt_fingerprint"] = prompt_fingerprint(prompt)
@@ -148,10 +173,13 @@ def test_generator_validates_output_and_binds_prompt_and_evidence():
         lambda value: value["sections"][0].update({"content": "模型改写后的原文"}),
         lambda value: value["sections"].__setitem__(1, {**value["sections"][1], "content": ""}),
         lambda value: value["mermaid"][0].update({"source": "```\n<script>bad</script>"}),
+        lambda value: value["mermaid"][0].update({"key": "application_flow"}),
+        lambda value: value["mermaid"][0].update({"title": "被模型修改的标题"}),
+        lambda value: value["mermaid"][0].update({"type": "graph"}),
     ],
 )
 def test_generator_blocks_untrusted_or_incomplete_output(mutator):
-    base = _base_note()
+    base = _accepted_base_note()
     output = _generated(base)
     prompt = build_generation_prompt(base)
     output["metadata"]["prompt_fingerprint"] = prompt_fingerprint(prompt)
@@ -169,10 +197,26 @@ def test_generator_reports_cancellation_without_publishing(tmp_path):
     output = tmp_path / "note.md"
     with pytest.raises(DeepSeekGenerationError, match="cancelled") as error:
         DeepSeekIntensiveReadingGenerator(client).generate(
-            _base_note(), cancel_event=event, output_path=output
+            _accepted_base_note(), cancel_event=event, output_path=output
         )
     assert error.value.status == "cancelled"
     assert not output.exists()
+
+
+def test_generator_rejects_self_consistent_forged_base_before_model_call():
+    client = FakeClient("{}")
+    with pytest.raises(DeepSeekGenerationError, match="accepted OCR note"):
+        DeepSeekIntensiveReadingGenerator(client).generate(_base_note())
+    assert client.calls == []
+
+
+def test_generator_rejects_mutated_registered_base_before_model_call():
+    base = _accepted_base_note()
+    base["mermaid"][0]["title"] = "被篡改"
+    client = FakeClient("{}")
+    with pytest.raises(DeepSeekGenerationError, match="accepted OCR note"):
+        DeepSeekIntensiveReadingGenerator(client).generate(base)
+    assert client.calls == []
 
 
 def test_client_rejects_non_canonical_model_and_non_https_url():

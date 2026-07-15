@@ -16,6 +16,7 @@ from .markdown_notes import (
     SECTION_ORDER,
     _digest,
     _render_markdown,
+    _require_accepted_note,
     persist_intensive_reading_note,
     validate_intensive_reading_note,
     validate_mermaid_block,
@@ -89,6 +90,13 @@ class DeepSeekIntensiveReadingGenerator:
     ) -> dict[str, Any]:
         if getattr(self.client, "model", None) != MODEL_NAME:
             raise DeepSeekGenerationError(f"only {MODEL_NAME} is supported")
+        try:
+            _require_accepted_note(note)
+            validate_intensive_reading_note(note)
+        except Exception as exc:
+            raise DeepSeekGenerationError(
+                "intensive-reading input is not an accepted OCR note"
+            ) from exc
         if cancel_event is not None and cancel_event.is_set():
             raise DeepSeekGenerationError(
                 "intensive-reading generation cancelled",
@@ -215,13 +223,21 @@ def _finalize_generated_note(
         if not isinstance(refs, list) or not refs or any(ref not in citation_ids for ref in refs):
             raise DeepSeekGenerationError("generated note section lacks evidence citations")
     mermaid = generated.get("mermaid")
-    if not isinstance(mermaid, list) or len(mermaid) != 2:
+    base_mermaid = base.get("mermaid")
+    if (
+        not isinstance(mermaid, list)
+        or not isinstance(base_mermaid, list)
+        or len(mermaid) != len(base_mermaid)
+        or len(mermaid) != 2
+    ):
         raise DeepSeekGenerationError("generated Mermaid diagrams are incomplete")
-    for diagram in mermaid:
+    for diagram, expected in zip(mermaid, base_mermaid, strict=True):
         if not isinstance(diagram, dict):
             raise DeepSeekGenerationError("generated Mermaid diagram is invalid")
         if set(diagram) != {"key", "title", "type", "source"}:
             raise DeepSeekGenerationError("generated Mermaid diagram is invalid")
+        if any(diagram.get(field) != expected.get(field) for field in ("key", "title", "type")):
+            raise DeepSeekGenerationError("generated Mermaid contract was changed")
         try:
             validate_mermaid_block(diagram["source"], expected_type=diagram["type"])
         except Exception as exc:
