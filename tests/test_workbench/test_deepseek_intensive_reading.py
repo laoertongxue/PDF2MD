@@ -1,4 +1,6 @@
+import copy
 import json
+import pickle
 import threading
 
 import pytest
@@ -13,10 +15,12 @@ from parsing_core.workbench.ocr.deepseek_intensive_reading import (
 )
 from parsing_core.workbench.ocr.markdown_notes import (
     AcceptedIntensiveReadingNote,
-    _digest,
-    _register_accepted_note,
-    _render_markdown,
+    MarkdownNoteError,
+    _BuildCredential,
+    _register_built_note,
+    build_intensive_reading_note,
 )
+from tests.test_workbench.test_ocr_markdown_notes import _inputs
 
 
 def _base_note():
@@ -108,21 +112,10 @@ def _generated(base):
 
 
 def _accepted_base_note():
-    note = _base_note()
-    chapter = {"number": "", "title": "第 1 章 需求预测"}
-    note["markdown"] = _render_markdown(
-        chapter, note["metadata"], note["sections"], note["mermaid"]
+    tree, confirmation, pages = _inputs()
+    return build_intensive_reading_note(
+        tree, confirmation, pages, source_id="book-1"
     )
-    note["metadata"]["note_fingerprint"] = _digest(
-        {
-            "metadata": note["metadata"],
-            "sections": note["sections"],
-            "mermaid": note["mermaid"],
-        }
-    )
-    accepted = AcceptedIntensiveReadingNote(note)
-    _register_accepted_note(accepted)
-    return accepted
 
 
 class FakeClient:
@@ -208,6 +201,30 @@ def test_generator_rejects_self_consistent_forged_base_before_model_call():
     with pytest.raises(DeepSeekGenerationError, match="accepted OCR note"):
         DeepSeekIntensiveReadingGenerator(client).generate(_base_note())
     assert client.calls == []
+
+
+def test_forged_note_cannot_use_registration_without_builder_credential():
+    forged = AcceptedIntensiveReadingNote(_base_note())
+    with pytest.raises(TypeError):
+        _register_built_note(forged)  # type: ignore[call-arg]
+    with pytest.raises(MarkdownNoteError):
+        _register_built_note(forged, object())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("operation", [copy.copy, copy.deepcopy, pickle.dumps])
+def test_forged_or_serialized_build_credentials_cannot_register(operation):
+    forged = AcceptedIntensiveReadingNote(_base_note())
+    credential = object.__new__(_BuildCredential)
+    with pytest.raises((TypeError, MarkdownNoteError)):
+        copied = operation(credential)
+        _register_built_note(forged, copied)  # type: ignore[arg-type]
+
+
+def test_real_builder_mints_and_consumes_opaque_credential():
+    accepted = _accepted_base_note()
+    assert isinstance(accepted, AcceptedIntensiveReadingNote)
+    with pytest.raises(MarkdownNoteError):
+        _register_built_note(accepted, object())  # type: ignore[arg-type]
 
 
 def test_generator_rejects_mutated_registered_base_before_model_call():

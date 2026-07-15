@@ -56,12 +56,38 @@ class AcceptedIntensiveReadingNote(dict):
     __slots__ = ("__weakref__",)
 
 
+class _BuildCredential:
+    """Opaque, single-use identity minted inside the accepted builder."""
+
+    __slots__ = ()
+
+    def __copy__(self):
+        raise TypeError("build credential cannot be copied")
+
+    def __deepcopy__(self, _memo):
+        raise TypeError("build credential cannot be copied")
+
+    def __reduce__(self):
+        raise TypeError("build credential cannot be serialized")
+
+    def __reduce_ex__(self, _protocol):
+        raise TypeError("build credential cannot be serialized")
+
+
 _ACCEPTED_NOTE_REFS: dict[
     int, tuple[weakref.ReferenceType[AcceptedIntensiveReadingNote], str]
 ] = {}
+_LIVE_BUILD_CREDENTIALS: dict[int, tuple[_BuildCredential, int]] = {}
 
 
-def _register_accepted_note(note: AcceptedIntensiveReadingNote) -> None:
+def _register_built_note(
+    note: AcceptedIntensiveReadingNote, credential: _BuildCredential
+) -> None:
+    if type(note) is not AcceptedIntensiveReadingNote or type(credential) is not _BuildCredential:
+        raise MarkdownNoteError("note was not built by the accepted OCR builder")
+    live = _LIVE_BUILD_CREDENTIALS.pop(id(credential), None)
+    if live is None or live[0] is not credential or live[1] != id(note):
+        raise MarkdownNoteError("note was not built by the accepted OCR builder")
     note_id = id(note)
 
     def remove(_ref, *, note_id=note_id):
@@ -177,7 +203,13 @@ def build_intensive_reading_note(
         "markdown": _render_markdown(chapter, metadata, sections, mermaid),
     })
     validate_intensive_reading_note(note)
-    _register_accepted_note(note)
+    credential = _BuildCredential()
+    _LIVE_BUILD_CREDENTIALS[id(credential)] = (credential, id(note))
+    try:
+        _register_built_note(note, credential)
+    except Exception:
+        _LIVE_BUILD_CREDENTIALS.pop(id(credential), None)
+        raise
     return note
 
 
