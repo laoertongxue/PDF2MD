@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PDF2MD Intensive Reading Markdown Note",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "metadata", "sections", "mermaid", "markdown"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "metadata": {"$ref": "#/$defs/metadata"},
+    "sections": {
+      "type": "array", "minItems": 6, "maxItems": 6,
+      "items": {"$ref": "#/$defs/section"}
+    },
+    "mermaid": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "items": {"$ref": "#/$defs/mermaid"}
+    },
+    "markdown": {"type": "string", "minLength": 1, "maxLength": 200000}
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input_fingerprint", "chapter_fingerprint", "evidence_fingerprint", "prompt_rules_version", "source_id", "chapter_id"],
+      "properties": {
+        "input_fingerprint": {"type": "string", "minLength": 1, "maxLength": 128},
+        "chapter_fingerprint": {"type": "string", "minLength": 1, "maxLength": 128},
+        "evidence_fingerprint": {"type": "string", "minLength": 1, "maxLength": 128},
+        "prompt_rules_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "source_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "chapter_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "page_start": {"type": "integer", "minimum": 1},
+        "page_end": {"type": "integer", "minimum": 1},
+        "citation_ids": {"type": "array", "maxItems": 4096, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+        "note_fingerprint": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "section": {
+      "type": "object", "additionalProperties": false,
+      "required": ["key", "title", "content", "source_refs"],
+      "properties": {
+        "key": {"type": "string", "enum": ["source_evidence", "concepts", "plain_explain", "cases", "problem_solving", "applications"]},
+        "title": {"type": "string", "minLength": 1, "maxLength": 128},
+        "content": {"type": "string", "minLength": 1, "maxLength": 100000},
+        "source_refs": {"type": "array", "maxItems": 4096, "items": {"type": "string", "minLength": 1, "maxLength": 256}}
+      }
+    },
+    "mermaid": {
+      "type": "object", "additionalProperties": false,
+      "required": ["key", "title", "type", "source"],
+      "properties": {
+        "key": {"type": "string", "enum": ["concept_map", "application_flow"]},
+        "title": {"type": "string", "minLength": 1, "maxLength": 128},
+        "type": {"type": "string", "enum": ["flowchart", "graph", "mindmap"]},
+        "source": {"type": "string", "minLength": 1, "maxLength": 20000}
+      }
+    }
+  }
+}
