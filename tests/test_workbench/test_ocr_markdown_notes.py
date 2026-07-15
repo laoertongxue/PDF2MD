@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 
 import pytest
 
@@ -47,7 +49,7 @@ def _page(number: int, *texts: str) -> dict:
                 "status": "accepted",
             }
         },
-        "page_input_fingerprint": f"page-input-{number}",
+        "page_input_fingerprint": "book-input",
         "evidence_fingerprint": f"evidence-{number}",
     }
 
@@ -176,6 +178,13 @@ def test_rejects_incomplete_or_unaccepted_ocr_and_wrong_chapter(tmp_path):
     assert target.read_text(encoding="utf-8") == "previous"
 
 
+def test_rejects_foreign_page_input_fingerprint():
+    tree, confirmation, pages = _inputs()
+    pages[1]["page_input_fingerprint"] = "foreign-book"
+    with pytest.raises(MarkdownNoteError, match="input fingerprint"):
+        build_intensive_reading_note(tree, confirmation, pages, source_id="source-1")
+
+
 def test_persists_contract_atomically_and_rejects_symlink(tmp_path):
     tree, confirmation, pages = _inputs()
     note = build_intensive_reading_note(tree, confirmation, pages, source_id="source-1")
@@ -193,6 +202,51 @@ def test_persists_contract_atomically_and_rejects_symlink(tmp_path):
     with pytest.raises(MarkdownNoteError, match="target"):
         persist_intensive_reading_note(link, note)
     assert outside.read_text(encoding="utf-8") == "outside"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO is unavailable")
+def test_persist_rejects_unsafe_parent_and_hardlinked_target(tmp_path):
+    tree, confirmation, pages = _inputs()
+    note = build_intensive_reading_note(tree, confirmation, pages, source_id="source-1")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    parent_link = tmp_path / "parent-link"
+    parent_link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(MarkdownNoteError, match="parent"):
+        persist_intensive_reading_note(parent_link / "note.md", note)
+
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(MarkdownNoteError, match="parent"):
+        persist_intensive_reading_note(fifo / "note.md", note)
+
+    target = tmp_path / "hardlinked.md"
+    target.write_text("outside", encoding="utf-8")
+    alias = tmp_path / "alias.md"
+    os.link(target, alias)
+    assert stat.S_ISREG(alias.stat().st_mode)
+    with pytest.raises(MarkdownNoteError, match="target"):
+        persist_intensive_reading_note(target, note)
+    assert target.read_text(encoding="utf-8") == "outside"
+
+
+def test_persist_replaces_using_the_open_directory_fd(tmp_path, monkeypatch):
+    tree, confirmation, pages = _inputs()
+    note = build_intensive_reading_note(tree, confirmation, pages, source_id="source-1")
+    target = tmp_path / "note.md"
+    calls = []
+    original_replace = os.replace
+
+    def record_replace(source, destination, **kwargs):
+        calls.append((source, destination, kwargs))
+        return original_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", record_replace)
+    persist_intensive_reading_note(target, note)
+    assert calls
+    assert calls[0][1] == target.name
+    assert calls[0][2]["src_dir_fd"] == calls[0][2]["dst_dir_fd"]
 
 
 def test_validation_rejects_tampered_metadata_or_fences():

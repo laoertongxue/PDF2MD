@@ -6,8 +6,8 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
-import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -73,12 +73,14 @@ def build_intensive_reading_note(
         raise MarkdownNoteError("source and prompt rule identifiers are invalid")
 
     chapter = confirmation["chapter"]
-    page_records = _accepted_pages(pages, chapter)
+    page_records = _accepted_pages(
+        pages, chapter, expected_input_fingerprint=chapter_tree["input_fingerprint"]
+    )
     if not page_records:
         raise MarkdownNoteError("accepted OCR pages are required")
     source_refs: list[str] = []
     evidence_lines: list[str] = []
-    for page, evidence, blocks in page_records:
+    for page, evidence, page_input, blocks in page_records:
         for block in blocks:
             block_id = block["id"]
             citation = f"[src:{source_id}:p{page}:{block_id}]"
@@ -86,7 +88,8 @@ def build_intensive_reading_note(
             if text:
                 source_refs.append(citation)
                 evidence_lines.append(
-                    f"- {citation}（PDF 第 {page} 页；证据指纹 `{evidence}`）：{text}"
+                    f"- {citation}（PDF 第 {page} 页；OCR 输入指纹 `{page_input}`；"
+                    f"证据指纹 `{evidence}`）：{text}"
                 )
     if not evidence_lines:
         raise MarkdownNoteError("accepted OCR contains no text evidence")
@@ -204,72 +207,72 @@ def persist_intensive_reading_note(path: str | Path, note: Mapping[str, Any]) ->
     target = Path(path)
     if not target.is_absolute():
         raise MarkdownNoteError("note target must be absolute")
-    _ensure_safe_parent(target.parent)
-    try:
-        info = target.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise MarkdownNoteError("note target is not safe")
-    except FileNotFoundError:
-        pass
     if target.suffix.lower() == ".md":
         content = note["markdown"]
     else:
         content = json.dumps(note, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-    fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+
+    directory_fd = _open_safe_parent(target.parent)
+    temp_name: str | None = None
     backup_name: str | None = None
+    temp_fd: int | None = None
     replaced = False
     try:
-        if target.exists():
-            backup_fd, backup_name = tempfile.mkstemp(
-                prefix=f".{target.name}.backup.", dir=target.parent
-            )
-            os.close(backup_fd)
-            os.unlink(backup_name)
-            os.link(target, backup_name)
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        target_exists = _validate_target_at(directory_fd, target.name)
+        temp_fd, temp_name = _create_temp_at(directory_fd, f".{target.name}.")
+        if target_exists:
+            backup_name = _link_backup_at(directory_fd, target.name)
+        with os.fdopen(temp_fd, "w", encoding="utf-8", newline="\n") as handle:
+            temp_fd = None
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_name, target)
+        os.replace(temp_name, target.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         replaced = True
-        directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        os.fsync(directory_fd)
     except Exception as exc:
         if replaced:
             try:
                 if backup_name is not None:
-                    os.replace(backup_name, target)
+                    os.replace(
+                        backup_name,
+                        target.name,
+                        src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd,
+                    )
                 else:
-                    os.unlink(target)
-                directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
+                    os.unlink(target.name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
             except OSError:
                 pass
-        Path(temp_name).unlink(missing_ok=True)
+        if temp_name is not None:
+            _unlink_at(directory_fd, temp_name)
+        if temp_fd is not None:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
         if backup_name is not None:
-            Path(backup_name).unlink(missing_ok=True)
+            _unlink_at(directory_fd, backup_name)
         if isinstance(exc, MarkdownNoteError):
             raise
         raise MarkdownNoteError("note could not be published") from exc
-    if backup_name is not None:
-        try:
-            os.unlink(backup_name)
-            directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+    finally:
+        if backup_name is not None and replaced:
             try:
+                os.unlink(backup_name, dir_fd=directory_fd)
                 os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError as exc:
-            raise MarkdownNoteError("note published but backup cleanup failed") from exc
+            except OSError as exc:
+                raise MarkdownNoteError("note published but backup cleanup failed") from exc
+        os.close(directory_fd)
 
 
-def _accepted_pages(pages: Iterable[Mapping[str, Any]], chapter: Mapping[str, Any]):
+def _accepted_pages(
+    pages: Iterable[Mapping[str, Any]],
+    chapter: Mapping[str, Any],
+    *,
+    expected_input_fingerprint: str,
+):
     records = sorted(list(pages), key=lambda item: _page_number(item))
     start, end = chapter["page_start"], chapter["page_end"]
     if start is None or end is None or end < start:
@@ -297,9 +300,15 @@ def _accepted_pages(pages: Iterable[Mapping[str, Any]], chapter: Mapping[str, An
         blocks = sorted(
             payload["final_blocks"], key=lambda item: (item["reading_order"], item["id"])
         )
-        if not record.get("evidence_fingerprint") or not record.get("page_input_fingerprint"):
+        page_input = record.get("page_input_fingerprint")
+        evidence = record.get("evidence_fingerprint")
+        if not isinstance(evidence, str) or not evidence:
             raise MarkdownNoteError("chapter OCR fingerprints are missing")
-        result.append((record["page"], record["evidence_fingerprint"], blocks))
+        if not isinstance(page_input, str) or not page_input:
+            raise MarkdownNoteError("chapter OCR fingerprints are missing")
+        if page_input != expected_input_fingerprint:
+            raise MarkdownNoteError("chapter OCR input fingerprint is inconsistent")
+        result.append((record["page"], evidence, page_input, blocks))
     return result
 
 
@@ -380,17 +389,72 @@ def _load_schema() -> dict[str, Any]:
         raise MarkdownNoteError("note schema cannot be loaded") from exc
 
 
-def _ensure_safe_parent(parent: Path) -> None:
-    current = Path(parent.anchor)
-    for part in parent.parts[1:]:
-        current /= part
-        try:
-            info = current.lstat()
-        except FileNotFoundError:
+def _open_safe_parent(parent: Path) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(parent.anchor, flags)
+    try:
+        for part in parent.parts[1:]:
+            if not part:
+                continue
             try:
-                current.mkdir(mode=0o700)
-            except FileExistsError:
-                pass
-            info = current.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                child_fd = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode):
             raise MarkdownNoteError("note parent is not safe")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise MarkdownNoteError("note parent is not safe") from None
+
+
+def _validate_target_at(directory_fd: int, name: str) -> bool:
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise MarkdownNoteError("note target is not safe")
+    return True
+
+
+def _create_temp_at(directory_fd: int, prefix: str) -> tuple[int, str]:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    for _ in range(10):
+        name = f"{prefix}{secrets.token_hex(16)}"
+        try:
+            return os.open(name, flags, 0o600, dir_fd=directory_fd), name
+        except FileExistsError:
+            continue
+    raise MarkdownNoteError("note temporary file could not be created")
+
+
+def _link_backup_at(directory_fd: int, target_name: str) -> str:
+    for _ in range(10):
+        name = f".{target_name}.backup.{secrets.token_hex(16)}"
+        try:
+            os.link(
+                target_name,
+                name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            return name
+        except FileExistsError:
+            continue
+    raise MarkdownNoteError("note backup could not be created")
+
+
+def _unlink_at(directory_fd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except FileNotFoundError:
+        pass
