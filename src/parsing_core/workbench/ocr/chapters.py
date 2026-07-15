@@ -121,6 +121,7 @@ def validate_chapter_confirmation(value: Any, tree: dict[str, Any]) -> None:
     """Validate schema and ensure a confirmation still belongs to this proposal."""
     if not isinstance(tree, dict):
         raise ChapterConfirmationError("chapter tree is invalid")
+    validate_chapter_tree(tree)
     validator = _validator("chapter-confirmation.json")
     errors = sorted(validator.iter_errors(value), key=lambda error: list(error.path))
     if errors:
@@ -131,10 +132,22 @@ def validate_chapter_confirmation(value: Any, tree: dict[str, Any]) -> None:
     chapter = _find_chapter(tree.get("chapters", []), value["chapter_id"])
     if chapter is None:
         raise ChapterConfirmationError("chapter confirmation target is missing")
-    if value["action"] != "reject" and value.get("chapter") is None:
-        raise ChapterConfirmationError("edited or confirmed chapter is required")
-    if value.get("chapter") is not None and value["chapter"]["id"] != chapter["id"]:
+    if value["action"] == "reject":
+        if value["chapter"] is not None or value["chapter_fingerprint"] is not None:
+            raise ChapterConfirmationError("rejected chapter must not contain edited content")
+        return
+
+    confirmed = value["chapter"]
+    if confirmed is None or confirmed["id"] != chapter["id"]:
         raise ChapterConfirmationError("chapter confirmation target is inconsistent")
+    if value["chapter_fingerprint"] != _chapter_fingerprint(confirmed):
+        raise ChapterConfirmationError("chapter content fingerprint is invalid")
+    if value["action"] == "confirm":
+        if confirmed != chapter:
+            raise ChapterConfirmationError("confirmed chapter does not match proposal")
+        return
+
+    _validate_edited_chapter(confirmed, chapter)
 
 
 def persist_chapter_confirmation(path: str | Path, value: dict[str, Any]) -> None:
@@ -481,6 +494,32 @@ def _find_chapter(items, chapter_id):
         if found:
             return found
     return None
+
+
+_EDITABLE_CHAPTER_FIELDS = frozenset(
+    {"title", "number", "page_start", "page_end", "warnings", "needs_confirmation"}
+)
+_IMMUTABLE_CHAPTER_FIELDS = frozenset(
+    {"id", "level", "toc_page", "source_evidence", "confidence", "children"}
+)
+
+
+def _chapter_fingerprint(chapter: dict[str, Any]) -> str:
+    return _digest(chapter)
+
+
+def _validate_edited_chapter(edited: dict[str, Any], proposal: dict[str, Any]) -> None:
+    """Allow only explicit metadata edits; OCR provenance and tree shape stay fixed."""
+    if set(edited) != set(proposal):
+        raise ChapterConfirmationError("edited chapter fields are invalid")
+    for field in _IMMUTABLE_CHAPTER_FIELDS:
+        if edited[field] != proposal[field]:
+            raise ChapterConfirmationError(f"chapter {field} cannot be edited")
+    if not set(edited).issuperset(_EDITABLE_CHAPTER_FIELDS):
+        raise ChapterConfirmationError("edited chapter fields are incomplete")
+    if edited["page_start"] is not None and edited["page_end"] is not None:
+        if edited["page_end"] < edited["page_start"]:
+            raise ChapterConfirmationError("edited chapter page boundary is invalid")
 
 
 def _validator(name):

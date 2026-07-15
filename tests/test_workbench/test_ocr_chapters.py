@@ -1,9 +1,11 @@
+import copy
 import json
 
 import pytest
 
 from parsing_core.workbench.ocr.chapters import (
     ChapterConfirmationError,
+    _chapter_fingerprint,
     detect_chapter_tree,
     load_chapter_confirmation,
     persist_chapter_confirmation,
@@ -128,6 +130,7 @@ def test_confirmation_is_versioned_and_bound_to_current_evidence(tmp_path):
         "proposal_fingerprint": tree["proposal_fingerprint"],
         "evidence_fingerprint": tree["evidence_fingerprint"],
         "chapter": tree["chapters"][0],
+        "chapter_fingerprint": _chapter_fingerprint(tree["chapters"][0]),
     }
     target = tmp_path / "confirmation.json"
     persist_chapter_confirmation(target, confirmation)
@@ -151,6 +154,7 @@ def test_confirmation_rejects_unknown_fields_and_symlink_target(tmp_path):
         "proposal_fingerprint": tree["proposal_fingerprint"],
         "evidence_fingerprint": tree["evidence_fingerprint"],
         "chapter": None,
+        "chapter_fingerprint": None,
         "extra": "must fail",
     }
     with pytest.raises(ChapterConfirmationError):
@@ -167,3 +171,78 @@ def test_confirmation_rejects_unknown_fields_and_symlink_target(tmp_path):
         persist_chapter_confirmation(
             link, {key: value for key, value in confirmation.items() if key != "extra"}
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "mutate"),
+    [
+        ("title", lambda chapter: chapter.update(title="恶意标题")),
+        ("page range", lambda chapter: chapter.update(page_end=99)),
+        (
+            "children",
+            lambda chapter: chapter["children"].append(copy.deepcopy(chapter["children"][0])),
+        ),
+        (
+            "evidence",
+            lambda chapter: chapter["source_evidence"][0].update(excerpt="伪造证据"),
+        ),
+    ],
+)
+def test_confirm_rejects_any_tampered_chapter_content(field, mutate):
+    tree = detect_chapter_tree(
+        [
+            _page(1, "目录", "第一章 战略管理 ........ 2", "1.1 范围 ........ 3"),
+            _page(2, "第一章 战略管理", "正文"),
+            _page(3, "1.1 范围", "正文"),
+        ],
+        input_fingerprint="book-input",
+    )
+    original = tree["chapters"][0]
+    confirmation = {
+        "schema_version": 1,
+        "revision": 1,
+        "action": "confirm",
+        "chapter_id": original["id"],
+        "input_fingerprint": tree["input_fingerprint"],
+        "proposal_fingerprint": tree["proposal_fingerprint"],
+        "evidence_fingerprint": tree["evidence_fingerprint"],
+        "chapter": copy.deepcopy(original),
+        "chapter_fingerprint": _chapter_fingerprint(original),
+    }
+    mutate(confirmation["chapter"])
+    confirmation["chapter_fingerprint"] = _chapter_fingerprint(confirmation["chapter"])
+
+    with pytest.raises(ChapterConfirmationError, match="match proposal"):
+        validate_chapter_confirmation(confirmation, tree)
+
+
+def test_edit_requires_new_content_fingerprint_and_keeps_evidence_bound():
+    tree = detect_chapter_tree(
+        [_page(1, "第一章 战略管理", "正文"), _page(2, "第二章 外部环境", "正文")],
+        input_fingerprint="book-input",
+    )
+    original = tree["chapters"][0]
+    edited = copy.deepcopy(original)
+    edited["title"] = "战略管理：修订标题"
+    confirmation = {
+        "schema_version": 1,
+        "revision": 2,
+        "action": "edit",
+        "chapter_id": original["id"],
+        "input_fingerprint": tree["input_fingerprint"],
+        "proposal_fingerprint": tree["proposal_fingerprint"],
+        "evidence_fingerprint": tree["evidence_fingerprint"],
+        "chapter": edited,
+        "chapter_fingerprint": _chapter_fingerprint(edited),
+    }
+    validate_chapter_confirmation(confirmation, tree)
+
+    confirmation["chapter_fingerprint"] = _chapter_fingerprint(original)
+    with pytest.raises(ChapterConfirmationError, match="content fingerprint"):
+        validate_chapter_confirmation(confirmation, tree)
+
+    confirmation["chapter_fingerprint"] = _chapter_fingerprint(edited)
+    edited["source_evidence"][0]["excerpt"] = "篡改后的来源"
+    confirmation["chapter_fingerprint"] = _chapter_fingerprint(edited)
+    with pytest.raises(ChapterConfirmationError, match="cannot be edited"):
+        validate_chapter_confirmation(confirmation, tree)
