@@ -19,6 +19,7 @@ from .alignment import (
     compare_observations,
     needs_baidu,
 )
+from .codex_vision import CodexVisionError, validate_persisted_payload
 
 
 class BatchStatus(StrEnum):
@@ -171,7 +172,9 @@ class OcrOrchestrator:
                 deadline=deadline,
             )
             current["vision"] = _jsonable(vision_result)
+            _validate_vision_pdf_snapshot(current["vision"], state["pdf_snapshot"])
         vision = current["vision"]
+        _validate_vision_pdf_snapshot(vision, state["pdf_snapshot"])
         image_path = _value(vision, "image_path")
         image_hash = _value(vision, "image_sha256")
         width = _value(vision, "width")
@@ -194,29 +197,39 @@ class OcrOrchestrator:
                 deadline=deadline,
             )
             current["codex"] = _jsonable(result)
-        codex = _value(current["codex"], "payload")
-        if not isinstance(codex, dict):
+        codex_payload = _value(current["codex"], "payload")
+        if not isinstance(codex_payload, dict):
             raise ValueError("Codex evidence is missing")
+        try:
+            validate_persisted_payload(
+                codex_payload,
+                kind="transcription",
+                page=page,
+                width=width,
+                height=height,
+            )
+        except CodexVisionError:
+            raise ValueError("Codex evidence schema is invalid") from None
+        codex = _codex_observation(codex_payload, image_hash, page, width, height)
+        page_hash = str(image_hash or _fingerprint(vision))
+        input_fingerprint = _fingerprint(
+            {"batch": state["input_fingerprint"], "page": page, "image_sha256": image_hash}
+        )
 
         if "alignment" not in current:
             self._check_deadline(deadline)
             current["status"] = PageStatus.DIFFING.value
             self._persist(state)
-            alignment = compare_observations(apple, codex)
-            classification = classify_page(apple, codex)
-            current["alignment"] = _jsonable(
-                {
-                    "status": classification.value,
-                    "conflicts": [asdict(conflict) for conflict in alignment.conflicts],
-                    "matched_blocks": alignment.matched_blocks,
-                }
+            current["alignment"] = _alignment_payload(
+                apple,
+                codex,
+                page=page,
+                page_hash=page_hash,
+                input_fingerprint=input_fingerprint,
+                sample_rate=sample_rate,
             )
         alignment = current["alignment"]
         status = str(alignment["status"])
-        page_hash = str(image_hash or _fingerprint(vision))
-        input_fingerprint = _fingerprint(
-            {"batch": state["input_fingerprint"], "page": page, "image_sha256": image_hash}
-        )
         baidu_observation = None
         if needs_baidu(page_hash, page, status, sample_rate=sample_rate):
             if "baidu" not in current:
@@ -243,9 +256,21 @@ class OcrOrchestrator:
                     alignment_status=status,
                     deadline=deadline,
                 )
-                current["baidu"] = _jsonable(baidu_observation)
+                current["baidu"] = _baidu_envelope(
+                    baidu_observation,
+                    page_hash=page_hash,
+                    input_fingerprint=input_fingerprint,
+                    page=page,
+                    alignment_status=status,
+                )
             else:
-                baidu_observation = current["baidu"]
+                baidu_observation = _validate_baidu_envelope(
+                    current["baidu"],
+                    page_hash=page_hash,
+                    input_fingerprint=input_fingerprint,
+                    page=page,
+                    alignment_status=status,
+                )
 
         if "decision" not in current:
             self._check_deadline(deadline)
@@ -265,9 +290,29 @@ class OcrOrchestrator:
                 deadline=deadline,
             )
             decision = _value(result, "payload")
+            try:
+                validate_persisted_payload(
+                    decision,
+                    kind="adjudication",
+                    page=page,
+                    width=width,
+                    height=height,
+                )
+            except CodexVisionError:
+                raise ValueError("final adjudication schema is invalid") from None
             _validate_decision(decision, page, width, height)
             current["decision"] = _jsonable(result)
         else:
+            try:
+                validate_persisted_payload(
+                    _value(current["decision"], "payload"),
+                    kind="adjudication",
+                    page=page,
+                    width=width,
+                    height=height,
+                )
+            except CodexVisionError:
+                raise ValueError("final adjudication schema is invalid") from None
             _validate_decision(_value(current["decision"], "payload"), page, width, height)
         current["page_input_fingerprint"] = input_fingerprint
         current["evidence_fingerprint"] = _fingerprint(
@@ -338,30 +383,64 @@ class OcrOrchestrator:
             if not isinstance(image_hash, str) or not image_hash:
                 return False
             apple = _observation_payload(_value(vision, "observation"))
-            codex = _value(codex_record, "payload")
-            if not isinstance(apple, dict) or not isinstance(codex, dict):
+            codex_payload = _value(codex_record, "payload")
+            if not isinstance(apple, dict) or not isinstance(codex_payload, dict):
                 return False
+            _validate_apple_observation(apple, page, _value(vision, "width"),
+                                        _value(vision, "height"), image_hash)
+            validate_persisted_payload(
+                codex_payload,
+                kind="transcription",
+                page=page,
+                width=_value(vision, "width"),
+                height=_value(vision, "height"),
+            )
             if apple.get("input_fingerprint") != image_hash:
                 return False
-            if codex.get("input_fingerprint") != image_hash:
-                return False
-            if not isinstance(alignment, dict) or not isinstance(alignment.get("status"), str):
-                return False
+            codex = _codex_observation(codex_payload, image_hash, page,
+                                       _value(vision, "width"), _value(vision, "height"))
             page_input = _fingerprint({"batch": state["input_fingerprint"], "page": page,
                                        "image_sha256": image_hash})
+            expected_alignment = _alignment_payload(
+                apple,
+                codex,
+                page=page,
+                page_hash=image_hash,
+                input_fingerprint=page_input,
+                sample_rate=sample_rate,
+            )
+            if alignment != expected_alignment:
+                return False
             if current.get("page_input_fingerprint") != page_input:
                 return False
             status = alignment["status"]
             baidu = current.get("baidu")
-            if needs_baidu(image_hash, page, status, sample_rate=sample_rate) and baidu is None:
+            if needs_baidu(image_hash, page, status, sample_rate=sample_rate):
+                if baidu is None:
+                    return False
+                baidu_response = _validate_baidu_envelope(
+                    baidu,
+                    page_hash=image_hash,
+                    input_fingerprint=page_input,
+                    page=page,
+                    alignment_status=status,
+                )
+            elif baidu is not None:
                 return False
-            _validate_decision(_value(decision_record, "payload"), page,
-                               _value(vision, "width"), _value(vision, "height"))
+            else:
+                baidu_response = None
+            validate_persisted_payload(
+                _value(decision_record, "payload"),
+                kind="adjudication",
+                page=page,
+                width=_value(vision, "width"),
+                height=_value(vision, "height"),
+            )
             expected = _fingerprint({"vision": vision, "codex": codex,
-                                     "alignment": alignment, "baidu": baidu,
+                                     "alignment": alignment, "baidu": baidu_response,
                                      "decision": decision_record})
             return current.get("evidence_fingerprint") == expected
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, CodexVisionError):
             return False
 
     def _discard_final_artifact(self):
@@ -560,6 +639,116 @@ def _observation_payload(value: Any):
         except (TypeError, json.JSONDecodeError):
             return None
     return value
+
+
+def _validate_vision_pdf_snapshot(vision: Any, snapshot: Any) -> None:
+    if not isinstance(vision, dict) or not isinstance(snapshot, dict):
+        raise ValueError("Apple Vision evidence is missing")
+    if vision.get("pdf_sha256") != snapshot.get("sha256"):
+        raise ValueError("Apple Vision PDF snapshot mismatch")
+
+
+def _validate_apple_observation(
+    apple: Any, page: int, width: int, height: int, image_hash: str
+) -> None:
+    if not isinstance(apple, dict) or apple.get("input_fingerprint") != image_hash:
+        raise ValueError("Apple Vision evidence is invalid")
+    if apple.get("page") != {"number": page, "width": width, "height": height}:
+        raise ValueError("Apple Vision evidence is invalid")
+    if not isinstance(apple.get("blocks"), list):
+        raise ValueError("Apple Vision evidence is invalid")
+    # compare_observations performs the detailed block/region checks used by the
+    # production alignment path; this guard prevents a metadata-only forgery.
+    for block in apple["blocks"]:
+        if not isinstance(block, dict) or not isinstance(block.get("id"), str):
+            raise ValueError("Apple Vision evidence is invalid")
+
+
+def _codex_observation(
+    payload: dict[str, Any], image_hash: str, page: int, width: int, height: int
+) -> dict[str, Any]:
+    observation = dict(payload)
+    observation.update(
+        {
+            "id": f"codex-{_fingerprint(payload)[:24]}",
+            "engine": "codex_vision",
+            "input_fingerprint": image_hash,
+            "page": {"number": page, "width": width, "height": height},
+        }
+    )
+    return observation
+
+
+def _alignment_payload(
+    apple: Any,
+    codex: Any,
+    *,
+    page: int,
+    page_hash: str,
+    input_fingerprint: str,
+    sample_rate: float,
+) -> dict[str, Any]:
+    comparison = compare_observations(apple, codex)
+    classification = classify_page(apple, codex)
+    status = classification.value
+    return _jsonable(
+        {
+            "page": page,
+            "page_hash": page_hash,
+            "input_fingerprint": input_fingerprint,
+            "status": status,
+            "baidu_required": needs_baidu(
+                page_hash, page, status, sample_rate=sample_rate
+            ),
+            "conflicts": [asdict(conflict) for conflict in comparison.conflicts],
+            "matched_blocks": comparison.matched_blocks,
+        }
+    )
+
+
+def _baidu_envelope(
+    response: Any,
+    *,
+    page_hash: str,
+    input_fingerprint: str,
+    page: int,
+    alignment_status: str,
+) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise ValueError("Baidu OCR evidence is invalid")
+    response = _jsonable(response)
+    return {
+        "page_hash": page_hash,
+        "input_fingerprint": input_fingerprint,
+        "page": page,
+        "alignment_status": alignment_status,
+        "observation_ref": _fingerprint(response),
+        "response": response,
+    }
+
+
+def _validate_baidu_envelope(
+    envelope: Any,
+    *,
+    page_hash: str,
+    input_fingerprint: str,
+    page: int,
+    alignment_status: str,
+) -> dict[str, Any]:
+    if not isinstance(envelope, dict):
+        raise ValueError("Baidu OCR evidence is invalid")
+    expected = {
+        "page_hash": page_hash,
+        "input_fingerprint": input_fingerprint,
+        "page": page,
+        "alignment_status": alignment_status,
+    }
+    if any(envelope.get(key) != value for key, value in expected.items()):
+        raise ValueError("Baidu OCR evidence context mismatch")
+    response = envelope.get("response")
+    if not isinstance(response, dict) or envelope.get("observation_ref") != _fingerprint(response):
+        raise ValueError("Baidu OCR evidence reference is invalid")
+    return response
 
 
 def _validate_decision(value: Any, page: int, width: int, height: int) -> None:

@@ -64,6 +64,18 @@ _SCHEMA_VALIDATORS = {
 }
 
 
+def validate_persisted_payload(
+    payload: Any, *, kind: str, page: int, width: int, height: int
+) -> None:
+    """Re-validate a persisted Codex payload before it can be resumed."""
+    expected = "transcription" if kind == "transcription" else "adjudication"
+    if kind not in {"transcription", "adjudication"}:
+        raise CodexVisionError("codex cli returned invalid schema")
+    if not isinstance(payload, dict):
+        raise CodexVisionError("codex cli returned invalid schema")
+    _validate_result_payload(payload, expected, page, width, height)
+
+
 @dataclass(frozen=True)
 class CodexVisionResult:
     payload: dict[str, Any]

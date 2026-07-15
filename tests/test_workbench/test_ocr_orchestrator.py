@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+
 from parsing_core.workbench.ocr.orchestrator import (
     BatchStatus,
     OcrOrchestrator,
@@ -36,6 +38,8 @@ def _observation(engine: str, text: str = "一致文本") -> dict:
                 "source_region": "r1",
             }
         ],
+        "uncertain_items": [],
+        "reading_order": [f"{engine}-block"],
     }
 
 
@@ -72,8 +76,12 @@ class FakeEngines:
         if self.codex_failures:
             self.codex_failures -= 1
             raise RuntimeError("codex unavailable /Users/private/book.pdf")
+        payload = _observation("codex_vision", self.codex_text)
+        payload.pop("id")
+        payload.pop("engine")
+        payload.pop("input_fingerprint")
         return SimpleNamespace(
-            payload=_observation("codex_vision", self.codex_text),
+            payload=payload,
             record={"engine": "codex_vision", "evidence_sha256": "codex-record-sha"},
         )
 
@@ -282,6 +290,7 @@ def test_same_path_with_replaced_pdf_content_does_not_reuse_page_results(tmp_pat
     assert first.status is BatchStatus.COMPLETED
     first_calls = list(engines.calls)
     engines.pdf_path.write_bytes(b"%PDF-1.7\nreplacement textbook\n")
+    engines.pdf_sha256 = hashlib.sha256(engines.pdf_path.read_bytes()).hexdigest()
 
     second = _run(orchestrator, engines)
 
@@ -305,3 +314,54 @@ def test_resume_rechecks_complete_evidence_and_reruns_when_decision_is_missing(t
     repaired = json.loads(state_path.read_text())
     assert "decision" in repaired["pages"]["1"]
     assert (tmp_path / "ocr-state" / "batch-final.json").is_file()
+
+
+@pytest.mark.parametrize("evidence_key, forged", [
+    ("codex", {"record": {"forged": True}, "payload": {"forged": True}}),
+    ("alignment", {"status": "consistent"}),
+    ("decision", {"record": {}, "payload": {"status": "accepted"}}),
+])
+def test_resume_rejects_forged_evidence_and_rebuilds_page(
+    tmp_path, evidence_key, forged
+):
+    engines = FakeEngines(apple_text="利润为 10%", codex_text="利润为 40%")
+    orchestrator = _orchestrator(tmp_path, engines)
+    assert _run(orchestrator, engines).status is BatchStatus.COMPLETED
+    state_path = tmp_path / "ocr-state" / "batch-state.json"
+    state = json.loads(state_path.read_text())
+    state["pages"]["1"][evidence_key] = forged
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    resumed = _run(orchestrator, engines)
+
+    assert resumed.status is BatchStatus.COMPLETED
+    assert engines.calls[-4:] == ["vision:1", "codex:1", "baidu:1", "adjudicate:1"]
+    assert (tmp_path / "ocr-state" / "batch-final.json").is_file()
+
+
+def test_resume_rejects_forged_baidu_envelope(tmp_path):
+    engines = FakeEngines(apple_text="利润为 10%", codex_text="利润为 40%")
+    orchestrator = _orchestrator(tmp_path, engines)
+    assert _run(orchestrator, engines).status is BatchStatus.COMPLETED
+    state_path = tmp_path / "ocr-state" / "batch-state.json"
+    state = json.loads(state_path.read_text())
+    state["pages"]["1"]["baidu"]["response"] = {"forged": True}
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    resumed = _run(orchestrator, engines)
+
+    assert resumed.status is BatchStatus.COMPLETED
+    assert engines.calls[-4:] == ["vision:1", "codex:1", "baidu:1", "adjudicate:1"]
+
+
+@pytest.mark.parametrize("pdf_sha256", ["wrong", None])
+def test_first_vision_result_must_match_pdf_snapshot(tmp_path, pdf_sha256):
+    engines = FakeEngines()
+    orchestrator = _orchestrator(tmp_path, engines)
+    engines.pdf_sha256 = pdf_sha256
+
+    result = _run(orchestrator, engines)
+
+    assert result.status is BatchStatus.FAILED
+    assert engines.calls == ["vision:1"]
+    assert not (tmp_path / "ocr-state" / "batch-final.json").exists()
