@@ -25,11 +25,11 @@ test -x "$runtime/bin/python3" || { echo "runtime is not executable" >&2; exit 1
 forbidden='(^|[^A-Za-z0-9_])/(Users/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*|opt/homebrew(/[A-Za-z0-9._-]+)*|usr/bin/python[0-9.]*|Library/Frameworks(/[A-Za-z0-9._-]+)*)'
 while IFS= read -r -d '' file; do
   if ! file "$file" | grep -q 'Mach-O'; then
-    if rg -a -n "$forbidden" "$file"; then
+    if grep -aEn "$forbidden" "$file"; then
       echo "release bundle contains a development-machine or external Python path: $file" >&2
       exit 1
     fi
-    if rg -a -n '/Library/Frameworks' "$file" | rg -v '/System/Library/Frameworks'; then
+    if grep -aEn '/Library/Frameworks' "$file" | grep -aEv '/System/Library/Frameworks'; then
       echo "release bundle contains a non-system framework path: $file" >&2
       exit 1
     fi
@@ -51,7 +51,7 @@ done < <(find "$runtime" -type f -perm -111 -print0)
 
 while IFS= read -r -d '' file; do
   if file "$file" | grep -q 'Mach-O'; then
-    if otool -L "$file" | rg -q '^\s+(/opt/homebrew|/usr/local|/Library/Frameworks|/Users/)'; then
+    if otool -L "$file" | grep -Eq '^[[:space:]]+(/opt/homebrew|/usr/local|/Library/Frameworks|/Users/)'; then
       echo "Mach-O dependency escapes the release bundle: $file" >&2
       otool -L "$file" >&2
       exit 1
