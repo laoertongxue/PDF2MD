@@ -112,7 +112,7 @@ class DeepSeekClient:
 
 
 def _retryable(exc: Exception) -> bool:
-    return isinstance(exc, (URLError, TimeoutError)) or (
+    return isinstance(exc, URLError | TimeoutError) or (
         isinstance(exc, HTTPError) and (exc.code == 429 or exc.code >= 500)
     )
 

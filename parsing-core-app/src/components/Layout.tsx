@@ -53,10 +53,11 @@ export function ServiceStatusView({ service, onRetry }: { service: ServiceStatus
     <div className="flex items-start gap-2 text-xs text-zinc-500" aria-live="polite">
       <span className="relative flex h-2 w-2">
         {service.state === "running" && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />}
-        <span className={`relative inline-flex h-2 w-2 rounded-full ${service.state === "running" ? "bg-emerald-500" : service.state === "failed" ? "bg-red-500" : "bg-amber-500"}`} />
+        <span className={`relative inline-flex h-2 w-2 rounded-full ${service.state === "running" ? "bg-emerald-500" : service.state === "failed" || service.state === "offline" ? "bg-red-500" : "bg-amber-500"}`} />
       </span>
       <div className="min-w-0">
-        <p>{service.state === "running" ? `服务运行中 :${service.port}` : service.state === "failed" ? "服务启动失败" : service.state === "restarting" ? "服务正在重启" : "服务正在启动"}</p>
+        <p>{service.state === "running" ? `服务运行中 :${service.port}` : service.state === "offline" ? "本地服务不可用" : service.state === "failed" ? "服务启动失败" : service.state === "restarting" ? "服务正在重启" : "服务正在启动"}</p>
+        {service.state === "offline" && <p className="mt-1 break-words text-red-600">{service.error?.message ?? "请启动本地服务后重试"}</p>}
         {service.state === "failed" && <><p className="mt-1 break-words text-red-600">{service.error?.message ?? "请查看运行日志"}</p>{service.logPath && <p className="mt-1 break-all text-zinc-400">日志：{service.logPath}</p>}<button type="button" onClick={onRetry} className="mt-2 font-medium text-emerald-700 hover:text-emerald-800">重试启动</button></>}
       </div>
     </div>

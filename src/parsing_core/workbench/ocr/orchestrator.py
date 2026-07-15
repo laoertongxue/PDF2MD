@@ -574,13 +574,13 @@ def _value(value: Any, name: str, default=None):
 
 
 def _jsonable(value: Any):
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, str | int | float | bool):
         return value
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [_jsonable(item) for item in value]
     if hasattr(value, "__dataclass_fields__"):
         return _jsonable(asdict(value))
@@ -772,7 +772,7 @@ def _validate_decision(value: Any, page: int, width: int, height: int) -> None:
         raise ValueError("final adjudication schema is invalid")
     if value["page"] != {"number": page, "width": width, "height": height}:
         raise ValueError("final adjudication schema is invalid")
-    if not isinstance(value["confidence"], (int, float)) or not 0 <= value["confidence"] <= 1:
+    if not isinstance(value["confidence"], int | float) or not 0 <= value["confidence"] <= 1:
         raise ValueError("final adjudication schema is invalid")
     if value["status"] != "accepted":
         raise ValueError("final adjudication schema is invalid")
