@@ -1,4 +1,5 @@
 from .models import OcrDecision, OcrDiff, OcrLease, OcrObservation, OcrPage, PageBlock
+from .orchestrator import BatchRun, BatchStatus, OcrOrchestrator, PageRun, PageStatus
 
 __all__ = [
     "OcrDecision",
@@ -7,4 +8,9 @@ __all__ = [
     "OcrObservation",
     "OcrPage",
     "PageBlock",
+    "BatchRun",
+    "BatchStatus",
+    "OcrOrchestrator",
+    "PageRun",
+    "PageStatus",
 ]
