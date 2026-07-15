@@ -25,6 +25,46 @@ export interface ImportedSource {
   stored_path: string;
 }
 
+export type OcrWorkflowStatus = "idle" | "running" | "completed" | "blocked" | "failed" | "cancelled";
+
+export interface OcrStatus {
+  status: OcrWorkflowStatus;
+  source_path: string;
+  state_path: string;
+  error: string | null;
+  publishable: boolean;
+  markdown_path: string | null;
+  chapter_tree_path: string | null;
+}
+
+export interface OcrChapter {
+  id: string;
+  number: string;
+  title: string;
+  page_start: number | null;
+  page_end: number | null;
+  needs_confirmation: boolean;
+  warnings: string[];
+  children: OcrChapter[];
+}
+
+export interface OcrChapterTree {
+  input_fingerprint: string;
+  evidence_fingerprint: string;
+  proposal_fingerprint: string;
+  needs_confirmation: boolean;
+  warnings: string[];
+  chapters: OcrChapter[];
+}
+
+export interface OcrNoteResult {
+  status: "completed";
+  publishable: true;
+  markdown_path: string;
+  markdown: string;
+  input_fingerprint: string;
+}
+
 export interface Chapter {
   id: string;
   source_id: string;

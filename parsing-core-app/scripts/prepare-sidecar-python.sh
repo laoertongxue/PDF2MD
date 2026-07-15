@@ -146,6 +146,8 @@ export PYTHONPATH="$resources/src:$runtime/lib/python3.13/site-packages"
 export XDG_DATA_HOME="$support/data"
 export XDG_CACHE_HOME="$support/cache"
 export TMPDIR="$support/tmp"
+export PDF2MD_RESOURCES="$resources"
+export PDF2MD_VISION_HELPER="${PDF2MD_VISION_HELPER:-$resources/vision-ocr}"
 exec "$python" -s -m parsing_core.serving.serve "$@"
 LAUNCHER
 chmod 755 "$launcher"

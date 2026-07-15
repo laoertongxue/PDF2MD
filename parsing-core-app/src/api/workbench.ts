@@ -22,6 +22,9 @@ import type {
   TopicStatus,
   TopicSyncStatus,
   WorkbenchSettings,
+  OcrStatus,
+  OcrChapterTree,
+  OcrNoteResult,
 } from "./workbenchTypes";
 import { getApiBase } from "./runtime";
 
@@ -69,6 +72,7 @@ const TOPIC_STATUSES = new Set<TopicStatus>(["DRAFT", "NOT_READY", "READY", "RUN
 const TOPIC_SYNC_STATUSES = new Set<TopicSyncStatus>(["PENDING", "SYNCING", "SYNCED", "FAILED"]);
 const TOPIC_RUN_STATUSES = new Set<TopicRunStatus>(["RUNNING", "COMPLETED", "FAILED"]);
 const CHAPTER_RUN_STATUSES = new Set(["PENDING", "RUNNING", "COMPLETED", "FAILED"]);
+const OCR_STATUSES = new Set(["idle", "running", "completed", "blocked", "failed", "cancelled"]);
 
 function protocolError(): SafeApiError {
   return new SafeApiError("protocol");
@@ -192,6 +196,29 @@ function parseChapterDraftState(value: unknown): ChapterDraftState {
   return { chapters, fingerprint: value.fingerprint };
 }
 
+function parseOcrStatus(value: unknown): OcrStatus {
+  if (!isRecord(value) || typeof value.status !== "string" || !OCR_STATUSES.has(value.status) ||
+    typeof value.source_path !== "string" || typeof value.state_path !== "string" ||
+    (value.error !== null && typeof value.error !== "string") || typeof value.publishable !== "boolean" ||
+    (value.markdown_path !== null && typeof value.markdown_path !== "string") ||
+    (value.chapter_tree_path !== null && typeof value.chapter_tree_path !== "string")) throw protocolError();
+  return value as unknown as OcrStatus;
+}
+
+function parseOcrTree(value: unknown): OcrChapterTree {
+  if (!isRecord(value) || typeof value.input_fingerprint !== "string" ||
+    typeof value.evidence_fingerprint !== "string" || typeof value.proposal_fingerprint !== "string" ||
+    typeof value.needs_confirmation !== "boolean" || !isStringArray(value.warnings) || !Array.isArray(value.chapters)) throw protocolError();
+  return value as unknown as OcrChapterTree;
+}
+
+function parseOcrNote(value: unknown): OcrNoteResult {
+  if (!isRecord(value) || value.status !== "completed" || value.publishable !== true ||
+    typeof value.markdown_path !== "string" || typeof value.markdown !== "string" ||
+    typeof value.input_fingerprint !== "string") throw protocolError();
+  return value as unknown as OcrNoteResult;
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit,
@@ -264,6 +291,30 @@ export function importSources(courseId: string, paths: string[], titles?: string
 
 export function listSources(courseId: string): Promise<Source[]> {
   return request<Source[]>(`/api/workbench/courses/${courseId}/sources`);
+}
+
+export function startSourceOcr(sourceId: string): Promise<OcrStatus> {
+  return post<OcrStatus>(`/api/workbench/sources/${sourceId}/ocr`, undefined, parseOcrStatus);
+}
+
+export function getSourceOcrStatus(sourceId: string): Promise<OcrStatus> {
+  return request<OcrStatus>(`/api/workbench/sources/${sourceId}/ocr/status`, undefined, parseOcrStatus);
+}
+
+export function cancelSourceOcr(sourceId: string): Promise<OcrStatus> {
+  return post<OcrStatus>(`/api/workbench/sources/${sourceId}/ocr/cancel`, undefined, parseOcrStatus);
+}
+
+export function recognizeSourceChapters(sourceId: string): Promise<OcrChapterTree> {
+  return post<OcrChapterTree>(`/api/workbench/sources/${sourceId}/ocr/chapters`, undefined, parseOcrTree);
+}
+
+export function confirmSourceChapter(sourceId: string, chapterId: string): Promise<unknown> {
+  return post<unknown>(`/api/workbench/sources/${sourceId}/ocr/chapters/confirm`, { chapter_id: chapterId });
+}
+
+export function generateSourceNote(sourceId: string, chapterId: string): Promise<OcrNoteResult> {
+  return post<OcrNoteResult>(`/api/workbench/sources/${sourceId}/ocr/generate`, { chapter_id: chapterId }, parseOcrNote);
 }
 
 export function detectChapters(sourceId: string): Promise<Chapter[]> {
