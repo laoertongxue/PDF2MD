@@ -19,3 +19,11 @@ parsing-core-app/node_modules/
 .worktrees/
 .playwright-cli/
 output/
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+service-account.json

@@ -4,6 +4,10 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from parsing_core.log import get_logger
+
+log = get_logger(__name__)
+
 from parsing_core.serving.config import (
     DEFAULT_BATCH_CONCURRENCY,
     MAX_GLOBAL_CONCURRENCY,
@@ -199,6 +203,7 @@ class Scheduler:
                 await ws.send_text(event_template.model_dump_json())
             except Exception:
                 self._subscribers[batch_id].discard(ws)
+                log.debug("ws_subscriber_removed", batch_id=batch_id)
 
     async def cancel_batch(self, batch_id: str) -> dict:
         self._cancelled.add(batch_id)

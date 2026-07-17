@@ -14,6 +14,9 @@ from parsing_core.storage.fs_layout import FsLayout
 from parsing_core.storage.repository import Repository
 from parsing_core.utils.file_lock import snapshot
 from parsing_core.utils.hashing import file_sha256
+from parsing_core.log import get_logger
+
+log = get_logger(__name__)
 
 
 class Orchestrator:
@@ -135,6 +138,7 @@ class Orchestrator:
                 "status": "COMPLETED",
             }
         except Exception as e:
+            log.exception("pipeline_failed", task_id=task_id, file=file_path)
             self.repo.update_task_status(task_id, "FAILED", error_msg=str(e))
             self._maybe_progress(task_id, "TASK_STATE", {"status": "FAILED", "error": str(e)})
             raise
