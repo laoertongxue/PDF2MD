@@ -17,6 +17,7 @@ parsing-core-app/src-tauri/binaries/python3*
 parsing-core-app/src-tauri/binaries/vision-ocr*
 parsing-core-app/node_modules/
 .worktrees/
+.codegraph/
 .playwright-cli/
 output/
 
