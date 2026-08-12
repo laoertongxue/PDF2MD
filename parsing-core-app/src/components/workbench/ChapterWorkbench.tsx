@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle, CheckCircle2, Circle, Loader2, Sparkles, XCircle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -26,6 +26,13 @@ interface AcceptedNavigation {
   searchParams: string;
 }
 
+interface CourseLoadState {
+  courseId: string | null;
+  requestId: number;
+  status: "idle" | "loading" | "success" | "error";
+  error: string | null;
+}
+
 function searchParamsForChapter(searchParams: URLSearchParams, chapterId: string | null) {
   const next = new URLSearchParams(searchParams);
   if (chapterId) next.set("chapterId", chapterId);
@@ -45,6 +52,15 @@ export default function ChapterWorkbench() {
     chapterId: null,
     searchParams: searchParams.toString(),
   }));
+  const acceptedNavigationRef = useRef(acceptedNavigation);
+  const courseLoadRequestRef = useRef(0);
+  const rollbackCourseRef = useRef<string | null>(null);
+  const [courseLoadState, setCourseLoadState] = useState<CourseLoadState>({
+    courseId: null,
+    requestId: 0,
+    status: "idle",
+    error: null,
+  });
   const acceptedCourseId = acceptedNavigation.courseId;
   const activeChapterId = acceptedNavigation.chapterId;
   const dirty = Object.values(dirtyKinds).some(Boolean);
@@ -97,14 +113,51 @@ export default function ChapterWorkbench() {
   }, [requestedChapterId, requestedCourseChapters, store.noteBlocksByChapter]);
 
   useEffect(() => {
+    acceptedNavigationRef.current = acceptedNavigation;
+  }, [acceptedNavigation]);
+  useEffect(() => {
     loadCourses().catch((reason: unknown) => setError(message(reason, "课程加载失败")));
   }, [loadCourses]);
   useEffect(() => {
-    if (!store.selectedCourseId) return;
-    loadSources(store.selectedCourseId)
-      .then((items) => Promise.all(items.map((source) => loadChapters(source.id))))
-      .catch((reason: unknown) => setError(message(reason, "章节加载失败")));
-  }, [loadChapters, loadSources, store.selectedCourseId]);
+    const courseId = store.selectedCourseId;
+    if (!courseId) {
+      courseLoadRequestRef.current += 1;
+      rollbackCourseRef.current = null;
+      setCourseLoadState({ courseId: null, requestId: courseLoadRequestRef.current, status: "idle", error: null });
+      return;
+    }
+    if (rollbackCourseRef.current === courseId) {
+      rollbackCourseRef.current = null;
+      return;
+    }
+
+    const requestId = ++courseLoadRequestRef.current;
+    setError(null);
+    setCourseLoadState({ courseId, requestId, status: "loading", error: null });
+    async function loadCourseChapters(targetCourseId: string) {
+      try {
+        const items = await loadSources(targetCourseId);
+        if (courseLoadRequestRef.current !== requestId) return;
+        await Promise.all(items.map((source) => loadChapters(source.id)));
+        if (courseLoadRequestRef.current !== requestId) return;
+        setCourseLoadState({ courseId: targetCourseId, requestId, status: "success", error: null });
+      } catch (reason) {
+        if (courseLoadRequestRef.current !== requestId) return;
+        const loadError = message(reason, "章节加载失败");
+        setCourseLoadState({ courseId: targetCourseId, requestId, status: "error", error: loadError });
+        const accepted = acceptedNavigationRef.current;
+        if (accepted.courseId && accepted.courseId !== targetCourseId) {
+          rollbackCourseRef.current = accepted.courseId;
+          selectCourse(accepted.courseId);
+          setSearchParams(new URLSearchParams(accepted.searchParams), { replace: true });
+        }
+      }
+    }
+    void loadCourseChapters(courseId);
+    return () => {
+      if (courseLoadRequestRef.current === requestId) courseLoadRequestRef.current += 1;
+    };
+  }, [loadChapters, loadSources, selectCourse, setSearchParams, store.selectedCourseId]);
   useEffect(() => {
     if (activeChapterId !== null) return;
     let cancelled = false;
@@ -266,10 +319,20 @@ export default function ChapterWorkbench() {
       setRunningHybrid(false);
     }
   };
-  const saveBlock = async (block: NoteBlock, code: string, expected: string) => {
-    if (!activeChapterId) return false;
-    await store.saveChapterBlock(activeChapterId, block.kind, code, expected);
-    setDirtyKinds((current) => ({ ...current, [block.kind]: false }));
+  const saveBlock = async (
+    chapterId: string,
+    editorIdentity: string,
+    block: NoteBlock,
+    code: string,
+    expected: string,
+  ) => {
+    await store.saveChapterBlock(chapterId, block.kind, code, expected);
+    setDirtyKinds((current) => {
+      if (!current[editorIdentity]) return current;
+      const next = { ...current };
+      delete next[editorIdentity];
+      return next;
+    });
     return true;
   };
   const trackDirty = useCallback(
@@ -281,6 +344,7 @@ export default function ChapterWorkbench() {
   const review = runs.find((run) => run.round_key === "review");
   const latestRun = [...runs].sort((a, b) => b.updated_at - a.updated_at)[0];
   const hasContent = blocks.length > 0;
+  const displayedError = courseLoadState.error ?? error;
 
   return (
     <div className="animate-in space-y-5">
@@ -311,9 +375,9 @@ export default function ChapterWorkbench() {
           </Link>
         </div>
       </header>
-      {error && (
+      {displayedError && (
         <p role="alert" className="border-l-2 border-red-500 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {error}
+          {displayedError}
         </p>
       )}
       {courseChapters.length > 0 && (
@@ -372,13 +436,14 @@ export default function ChapterWorkbench() {
             </section>
             {(["knowledge_mermaid", "application_mermaid"] as const).map((kind) => {
               const block = blocks.find((item) => item.kind === kind);
-              return block ? (
-                <section key={`${activeChapterId}:${block.id}`} className="py-6">
+              const editorIdentity = activeChapterId && block ? `${activeChapterId}:${block.id}` : null;
+              return block && activeChapterId && editorIdentity ? (
+                <section key={editorIdentity} className="py-6">
                   <MermaidEditor
                     title={block.title}
                     initial={block.body}
-                    onSave={(code, expected) => saveBlock(block, code, expected)}
-                    onDirtyChange={(value) => trackDirty(kind, value)}
+                    onSave={(code, expected) => saveBlock(activeChapterId, editorIdentity, block, code, expected)}
+                    onDirtyChange={(value) => trackDirty(editorIdentity, value)}
                   />
                 </section>
               ) : null;
