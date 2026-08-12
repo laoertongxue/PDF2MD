@@ -5,9 +5,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from parsing_core.log import get_logger
-
-log = get_logger(__name__)
-
 from parsing_core.serving.config import (
     DEFAULT_BATCH_CONCURRENCY,
     MAX_GLOBAL_CONCURRENCY,
@@ -16,6 +13,8 @@ from parsing_core.serving.config import (
 )
 from parsing_core.serving.models.api import BatchResponse, WSEvent
 from parsing_core.serving.ring_buffer import EventRingBuffer
+
+log = get_logger(__name__)
 
 
 @dataclass

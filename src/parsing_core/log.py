@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import sys
-import time
 from pathlib import Path
 
 LOG_LEVEL = os.environ.get("PDF2MD_LOG_LEVEL", "INFO")

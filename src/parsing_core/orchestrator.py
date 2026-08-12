@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from parsing_core.llm.base import LLMClient
+from parsing_core.log import get_logger
 from parsing_core.models.dataclasses import AIArtifact, Section, Task
 from parsing_core.parser.chunker import split_sections
 from parsing_core.parser.image_extractor import extract_images
@@ -14,7 +15,6 @@ from parsing_core.storage.fs_layout import FsLayout
 from parsing_core.storage.repository import Repository
 from parsing_core.utils.file_lock import snapshot
 from parsing_core.utils.hashing import file_sha256
-from parsing_core.log import get_logger
 
 log = get_logger(__name__)
 
