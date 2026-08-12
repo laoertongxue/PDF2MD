@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
@@ -45,6 +45,12 @@ const blocks = [
   body,
   seq,
   updated_at: seq + 1,
+}));
+const secondChapterBlocks = blocks.map((block) => ({
+  ...block,
+  id: `${block.id}-ch2`,
+  chapter_id: "ch2",
+  body: block.kind === "knowledge_mermaid" ? "flowchart LR\nC-->D" : block.body,
 }));
 const runs = [
   {
@@ -178,6 +184,63 @@ describe("ChapterWorkbench", () => {
     const event = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(event);
     expect(event.defaultPrevented).toBe(true);
+    confirm.mockRestore();
+  });
+
+  it("keeps a dirty non-first chapter active when an older chapter load finishes late", async () => {
+    let finishOldLoad: (() => void) | undefined;
+    const oldLoad = new Promise<void>((resolve) => {
+      finishOldLoad = resolve;
+    });
+    state = {
+      ...state,
+      noteBlocksByChapter: { ch1: [], ch2: [] },
+    };
+    actions.loadChapterNoteBlocks.mockImplementation(async (chapterId: string) => {
+      if (chapterId === "ch1" && (state.noteBlocksByChapter as Record<string, unknown[]>).ch1?.length === 0) {
+        await oldLoad;
+        state = {
+          ...state,
+          noteBlocksByChapter: { ch1: blocks, ch2: secondChapterBlocks },
+        };
+        return blocks;
+      }
+      return chapterId === "ch2" ? secondChapterBlocks : blocks;
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const view = render(
+      <MemoryRouter initialEntries={["/workbench/chapter"]}>
+        <ChapterWorkbench />
+      </MemoryRouter>,
+    );
+
+    state = {
+      ...state,
+      noteBlocksByChapter: { ch1: [], ch2: secondChapterBlocks },
+    };
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter"]}>
+        <ChapterWorkbench />
+      </MemoryRouter>,
+    );
+    const editor = await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+    expect(screen.getByLabelText("选择章节")).toHaveValue("ch2");
+    await userEvent.type(editor, "\nD-->E");
+
+    await act(async () => {
+      finishOldLoad?.();
+      await oldLoad;
+    });
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter"]}>
+        <ChapterWorkbench />
+      </MemoryRouter>,
+    );
+    await act(async () => undefined);
+
+    expect(screen.getByLabelText("选择章节")).toHaveValue("ch2");
+    expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nC-->D\nD-->E");
+    expect(confirm).not.toHaveBeenCalled();
     confirm.mockRestore();
   });
 });

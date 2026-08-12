@@ -67,6 +67,7 @@ export default function ChapterWorkbench() {
       .catch((reason: unknown) => setError(message(reason, "章节加载失败")));
   }, [loadChapters, loadSources, store.selectedCourseId]);
   useEffect(() => {
+    if (activeChapterId !== null) return;
     let cancelled = false;
     async function chooseInitial() {
       if (!initialChapterId) {
@@ -74,13 +75,13 @@ export default function ChapterWorkbench() {
         return;
       }
       await Promise.all([loadChapterNoteBlocks(initialChapterId), loadChapterRuns(initialChapterId)]);
-      if (!cancelled) setActiveChapterId(initialChapterId);
+      if (!cancelled) setActiveChapterId((current) => current ?? initialChapterId);
     }
     chooseInitial().catch((reason: unknown) => setError(message(reason, "精读结果加载失败")));
     return () => {
       cancelled = true;
     };
-  }, [initialChapterId, loadChapterNoteBlocks, loadChapterRuns]);
+  }, [activeChapterId, initialChapterId, loadChapterNoteBlocks, loadChapterRuns]);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (dirty) {
