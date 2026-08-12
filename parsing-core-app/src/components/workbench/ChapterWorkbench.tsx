@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle, CheckCircle2, Circle, Loader2, Sparkles, XCircle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -20,31 +20,47 @@ const ROUND_LABELS: Record<string, string> = {
 const SOURCE_RE = /\[《([^\]\n]+)》·第\s*(\d+)\s*章\]/g;
 const leaveMessage = "当前 Mermaid 有未保存修改，确定离开吗？";
 
+interface AcceptedNavigation {
+  courseId: string | null;
+  chapterId: string | null;
+  searchParams: string;
+}
+
 export default function ChapterWorkbench() {
   const store = useWorkbenchStore();
-  const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [runningHybrid, setRunningHybrid] = useState(false);
   const [dirtyKinds, setDirtyKinds] = useState<Record<string, boolean>>({});
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedChapterId = searchParams.get("chapterId");
-  const acceptedSearchParams = useRef(searchParams.toString());
+  const [acceptedNavigation, setAcceptedNavigation] = useState<AcceptedNavigation>(() => ({
+    courseId: store.selectedCourseId,
+    chapterId: null,
+    searchParams: searchParams.toString(),
+  }));
+  const acceptedCourseId = acceptedNavigation.courseId;
+  const activeChapterId = acceptedNavigation.chapterId;
   const dirty = Object.values(dirtyKinds).some(Boolean);
   const confirmLeave = useCallback(() => !dirty || window.confirm(leaveMessage), [dirty]);
+  const selectCourse = store.selectCourse;
   const loadCourses = store.loadCourses;
   const loadSources = store.loadSources;
   const loadChapters = store.loadChapters;
   const loadChapterNoteBlocks = store.loadChapterNoteBlocks;
   const loadChapterRuns = store.loadChapterRuns;
   const chapterGroups = useMemo(
+    () => createSourceChapterGroups(acceptedCourseId ? (store.sources[acceptedCourseId] ?? []) : [], store.chapters),
+    [acceptedCourseId, store.chapters, store.sources],
+  );
+  const courseChapters = useMemo(() => chapterGroups.flatMap((group) => group.chapters), [chapterGroups]);
+  const requestedCourseChapters = useMemo(
     () =>
       createSourceChapterGroups(
         store.selectedCourseId ? (store.sources[store.selectedCourseId] ?? []) : [],
         store.chapters,
-      ),
+      ).flatMap((group) => group.chapters),
     [store.chapters, store.selectedCourseId, store.sources],
   );
-  const courseChapters = useMemo(() => chapterGroups.flatMap((group) => group.chapters), [chapterGroups]);
   const activeChapter = courseChapters.find((chapter) => chapter.id === activeChapterId) ?? null;
   const blocks = useMemo(
     () => (activeChapterId ? (store.noteBlocksByChapter[activeChapterId] ?? []) : []),
@@ -58,6 +74,13 @@ export default function ChapterWorkbench() {
       courseChapters.find((chapter) => ["CONFIRMED", "COMPLETED", "FAILED"].includes(chapter.status));
     return next?.id ?? null;
   }, [courseChapters, requestedChapterId, store.noteBlocksByChapter]);
+  const requestedCourseInitialChapterId = useMemo(() => {
+    const next =
+      (requestedChapterId && requestedCourseChapters.find((chapter) => chapter.id === requestedChapterId)) ||
+      requestedCourseChapters.find((chapter) => (store.noteBlocksByChapter[chapter.id] ?? []).length) ||
+      requestedCourseChapters.find((chapter) => ["CONFIRMED", "COMPLETED", "FAILED"].includes(chapter.status));
+    return next?.id ?? null;
+  }, [requestedChapterId, requestedCourseChapters, store.noteBlocksByChapter]);
 
   useEffect(() => {
     loadCourses().catch((reason: unknown) => setError(message(reason, "课程加载失败")));
@@ -72,19 +95,46 @@ export default function ChapterWorkbench() {
     if (activeChapterId !== null) return;
     let cancelled = false;
     async function chooseInitial() {
-      if (!initialChapterId) {
-        setActiveChapterId(null);
-        return;
-      }
+      if (!initialChapterId) return;
       await Promise.all([loadChapterNoteBlocks(initialChapterId), loadChapterRuns(initialChapterId)]);
-      if (!cancelled) setActiveChapterId((current) => current ?? initialChapterId);
+      if (!cancelled) {
+        setAcceptedNavigation((current) =>
+          current.courseId === acceptedCourseId && current.chapterId === null
+            ? { ...current, chapterId: initialChapterId }
+            : current,
+        );
+      }
     }
     chooseInitial().catch((reason: unknown) => setError(message(reason, "精读结果加载失败")));
     return () => {
       cancelled = true;
     };
-  }, [activeChapterId, initialChapterId, loadChapterNoteBlocks, loadChapterRuns]);
+  }, [acceptedCourseId, activeChapterId, initialChapterId, loadChapterNoteBlocks, loadChapterRuns]);
   useEffect(() => {
+    const requestedCourseId = store.selectedCourseId;
+    if (requestedCourseId !== acceptedCourseId) {
+      const targetChapterId = requestedCourseInitialChapterId;
+      if (!requestedCourseId || !targetChapterId) return;
+      if (!confirmLeave()) {
+        if (acceptedCourseId) selectCourse(acceptedCourseId);
+        setSearchParams(new URLSearchParams(acceptedNavigation.searchParams), { replace: true });
+        return;
+      }
+
+      const nextSearchParams = new URLSearchParams(searchParams);
+      nextSearchParams.set("chapterId", targetChapterId);
+      setDirtyKinds({});
+      setAcceptedNavigation({
+        courseId: requestedCourseId,
+        chapterId: targetChapterId,
+        searchParams: nextSearchParams.toString(),
+      });
+      setSearchParams(nextSearchParams, { replace: true });
+      Promise.all([loadChapterNoteBlocks(targetChapterId), loadChapterRuns(targetChapterId)]).catch((reason: unknown) =>
+        setError(message(reason, "精读结果加载失败")),
+      );
+      return;
+    }
     if (activeChapterId === null) return;
     const requestedTarget =
       requestedChapterId &&
@@ -97,34 +147,42 @@ export default function ChapterWorkbench() {
     if (!targetChapterId || targetChapterId === activeChapterId) return;
     if (!confirmLeave()) {
       if (requestedTarget) {
-        setSearchParams(new URLSearchParams(acceptedSearchParams.current), { replace: true });
+        setSearchParams(new URLSearchParams(acceptedNavigation.searchParams), { replace: true });
       }
       return;
     }
 
     setDirtyKinds({});
-    setActiveChapterId(targetChapterId);
-    if (requestedTarget) {
-      acceptedSearchParams.current = searchParams.toString();
-    } else {
+    let nextAcceptedSearchParams = searchParams.toString();
+    if (!requestedTarget) {
       const nextSearchParams = new URLSearchParams(searchParams);
       nextSearchParams.set("chapterId", targetChapterId);
-      acceptedSearchParams.current = nextSearchParams.toString();
+      nextAcceptedSearchParams = nextSearchParams.toString();
       setSearchParams(nextSearchParams, { replace: true });
     }
+    setAcceptedNavigation((current) => ({
+      ...current,
+      chapterId: targetChapterId,
+      searchParams: nextAcceptedSearchParams,
+    }));
     Promise.all([loadChapterNoteBlocks(targetChapterId), loadChapterRuns(targetChapterId)]).catch((reason: unknown) =>
       setError(message(reason, "精读结果加载失败")),
     );
   }, [
+    acceptedCourseId,
+    acceptedNavigation.searchParams,
     activeChapterId,
     confirmLeave,
     courseChapters,
     initialChapterId,
     loadChapterNoteBlocks,
     loadChapterRuns,
+    requestedCourseInitialChapterId,
     requestedChapterId,
     searchParams,
+    selectCourse,
     setSearchParams,
+    store.selectedCourseId,
   ]);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -140,10 +198,13 @@ export default function ChapterWorkbench() {
   const chooseChapter = (chapterId: string) => {
     if (!confirmLeave()) return;
     setDirtyKinds({});
-    setActiveChapterId(chapterId);
     const nextSearchParams = new URLSearchParams(searchParams);
     nextSearchParams.set("chapterId", chapterId);
-    acceptedSearchParams.current = nextSearchParams.toString();
+    setAcceptedNavigation((current) => ({
+      ...current,
+      chapterId,
+      searchParams: nextSearchParams.toString(),
+    }));
     setSearchParams(nextSearchParams);
     Promise.all([store.loadChapterNoteBlocks(chapterId), store.loadChapterRuns(chapterId)]).catch((reason: unknown) =>
       setError(message(reason, "精读结果加载失败")),
