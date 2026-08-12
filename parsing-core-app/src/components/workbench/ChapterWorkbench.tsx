@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle, CheckCircle2, Circle, Loader2, Sparkles, XCircle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -28,7 +28,9 @@ export default function ChapterWorkbench() {
   const [dirtyKinds, setDirtyKinds] = useState<Record<string, boolean>>({});
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedChapterId = searchParams.get("chapterId");
+  const acceptedSearchParams = useRef(searchParams.toString());
   const dirty = Object.values(dirtyKinds).some(Boolean);
+  const confirmLeave = useCallback(() => !dirty || window.confirm(leaveMessage), [dirty]);
   const loadCourses = store.loadCourses;
   const loadSources = store.loadSources;
   const loadChapters = store.loadChapters;
@@ -83,6 +85,48 @@ export default function ChapterWorkbench() {
     };
   }, [activeChapterId, initialChapterId, loadChapterNoteBlocks, loadChapterRuns]);
   useEffect(() => {
+    if (activeChapterId === null) return;
+    const requestedTarget =
+      requestedChapterId &&
+      requestedChapterId !== activeChapterId &&
+      courseChapters.some((chapter) => chapter.id === requestedChapterId)
+        ? requestedChapterId
+        : null;
+    const activeChapterIsValid = courseChapters.some((chapter) => chapter.id === activeChapterId);
+    const targetChapterId = requestedTarget ?? (!activeChapterIsValid ? initialChapterId : null);
+    if (!targetChapterId || targetChapterId === activeChapterId) return;
+    if (!confirmLeave()) {
+      if (requestedTarget) {
+        setSearchParams(new URLSearchParams(acceptedSearchParams.current), { replace: true });
+      }
+      return;
+    }
+
+    setDirtyKinds({});
+    setActiveChapterId(targetChapterId);
+    if (requestedTarget) {
+      acceptedSearchParams.current = searchParams.toString();
+    } else {
+      const nextSearchParams = new URLSearchParams(searchParams);
+      nextSearchParams.set("chapterId", targetChapterId);
+      acceptedSearchParams.current = nextSearchParams.toString();
+      setSearchParams(nextSearchParams, { replace: true });
+    }
+    Promise.all([loadChapterNoteBlocks(targetChapterId), loadChapterRuns(targetChapterId)]).catch((reason: unknown) =>
+      setError(message(reason, "精读结果加载失败")),
+    );
+  }, [
+    activeChapterId,
+    confirmLeave,
+    courseChapters,
+    initialChapterId,
+    loadChapterNoteBlocks,
+    loadChapterRuns,
+    requestedChapterId,
+    searchParams,
+    setSearchParams,
+  ]);
+  useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (dirty) {
         event.preventDefault();
@@ -93,12 +137,14 @@ export default function ChapterWorkbench() {
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [dirty]);
 
-  const confirmLeave = () => !dirty || window.confirm(leaveMessage);
   const chooseChapter = (chapterId: string) => {
     if (!confirmLeave()) return;
     setDirtyKinds({});
     setActiveChapterId(chapterId);
-    setSearchParams({ chapterId });
+    const nextSearchParams = new URLSearchParams(searchParams);
+    nextSearchParams.set("chapterId", chapterId);
+    acceptedSearchParams.current = nextSearchParams.toString();
+    setSearchParams(nextSearchParams);
     Promise.all([store.loadChapterNoteBlocks(chapterId), store.loadChapterRuns(chapterId)]).catch((reason: unknown) =>
       setError(message(reason, "精读结果加载失败")),
     );

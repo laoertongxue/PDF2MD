@@ -1,7 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { requireAt } from "../../test/requireValue";
 import ChapterWorkbench from "./ChapterWorkbench";
 
@@ -20,6 +20,23 @@ const actions = {
 };
 let state: Record<string, unknown>;
 vi.mock("../../store/useWorkbenchStore", () => ({ useWorkbenchStore: () => state }));
+
+function ChapterNavigationHarness() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <>
+      <button type="button" onClick={() => navigate("/workbench/chapter?chapterId=ch1")}>
+        导航到第一章
+      </button>
+      <button type="button" onClick={() => navigate("/workbench/chapter?chapterId=ch2")}>
+        导航到第二章
+      </button>
+      <output data-testid="current-location">{`${location.pathname}${location.search}`}</output>
+      <ChapterWorkbench />
+    </>
+  );
+}
 
 const chapter = (id: string, title: string) => ({
   id,
@@ -51,6 +68,12 @@ const secondChapterBlocks = blocks.map((block) => ({
   id: `${block.id}-ch2`,
   chapter_id: "ch2",
   body: block.kind === "knowledge_mermaid" ? "flowchart LR\nC-->D" : block.body,
+}));
+const thirdChapterBlocks = blocks.map((block) => ({
+  ...block,
+  id: `${block.id}-ch3`,
+  chapter_id: "ch3",
+  body: block.kind === "knowledge_mermaid" ? "flowchart LR\nE-->F" : block.body,
 }));
 const runs = [
   {
@@ -113,7 +136,10 @@ describe("ChapterWorkbench", () => {
     actions.loadChapterRuns.mockResolvedValue(runs);
     reset();
   });
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
 
   it("renders the complete note, sources, review and all round states", async () => {
     render(
@@ -185,6 +211,106 @@ describe("ChapterWorkbench", () => {
     window.dispatchEvent(event);
     expect(event.defaultPrevented).toBe(true);
     confirm.mockRestore();
+  });
+
+  it("follows clean URL chapter navigation without remounting", async () => {
+    state = {
+      ...state,
+      noteBlocksByChapter: { ch1: blocks, ch2: secondChapterBlocks },
+    };
+    const confirm = vi.spyOn(window, "confirm");
+    render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nA-->B");
+
+    await userEvent.click(screen.getByRole("button", { name: "导航到第二章" }));
+
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch2"));
+    expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nC-->D");
+    expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch2");
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("restores the URL when dirty chapter navigation is cancelled", async () => {
+    state = {
+      ...state,
+      noteBlocksByChapter: { ch1: blocks, ch2: secondChapterBlocks },
+    };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    const editor = await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+    await userEvent.type(editor, "\nB-->C");
+
+    await userEvent.click(screen.getByRole("button", { name: "导航到第二章" }));
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+    expect(screen.getByLabelText("选择章节")).toHaveValue("ch1");
+    expect(editor).toHaveValue("flowchart LR\nA-->B\nB-->C");
+    expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch1");
+  });
+
+  it("follows confirmed dirty URL chapter navigation", async () => {
+    state = {
+      ...state,
+      noteBlocksByChapter: { ch1: blocks, ch2: secondChapterBlocks },
+    };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    const editor = await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+    await userEvent.type(editor, "\nB-->C");
+
+    await userEvent.click(screen.getByRole("button", { name: "导航到第二章" }));
+
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch2"));
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nC-->D");
+    expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch2");
+  });
+
+  it("selects a valid chapter when the course changes without remounting", async () => {
+    state = {
+      ...state,
+      sources: {
+        ...(state.sources as Record<string, unknown[]>),
+        c2: [{ id: "s2", course_id: "c2", title: "组织教材", kind: "main", file_path: "/org.pdf", status: "READY" }],
+      },
+      chapters: {
+        ...(state.chapters as Record<string, unknown[]>),
+        s2: [{ ...chapter("ch3", "组织能力"), source_id: "s2", course_id: "c2", seq: 0 }],
+      },
+      noteBlocksByChapter: { ch1: blocks, ch2: secondChapterBlocks, ch3: thirdChapterBlocks },
+      chapterRunsById: { ch1: runs, ch2: [], ch3: [] },
+    };
+    const confirm = vi.spyOn(window, "confirm");
+    const view = render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nA-->B");
+
+    state = { ...state, selectedCourseId: "c2" };
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch3"));
+    expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nE-->F");
+    expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch3");
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("keeps a dirty non-first chapter active when an older chapter load finishes late", async () => {
