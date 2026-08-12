@@ -26,6 +26,13 @@ interface AcceptedNavigation {
   searchParams: string;
 }
 
+function searchParamsForChapter(searchParams: URLSearchParams, chapterId: string | null) {
+  const next = new URLSearchParams(searchParams);
+  if (chapterId) next.set("chapterId", chapterId);
+  else next.delete("chapterId");
+  return next;
+}
+
 export default function ChapterWorkbench() {
   const store = useWorkbenchStore();
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +68,13 @@ export default function ChapterWorkbench() {
       ).flatMap((group) => group.chapters),
     [store.chapters, store.selectedCourseId, store.sources],
   );
+  const requestedCourseDataLoaded = useMemo(() => {
+    const courseId = store.selectedCourseId;
+    if (!courseId || !Object.prototype.hasOwnProperty.call(store.sources, courseId)) return false;
+    return (store.sources[courseId] ?? []).every((source) =>
+      Object.prototype.hasOwnProperty.call(store.chapters, source.id),
+    );
+  }, [store.chapters, store.selectedCourseId, store.sources]);
   const activeChapter = courseChapters.find((chapter) => chapter.id === activeChapterId) ?? null;
   const blocks = useMemo(
     () => (activeChapterId ? (store.noteBlocksByChapter[activeChapterId] ?? []) : []),
@@ -98,31 +112,41 @@ export default function ChapterWorkbench() {
       if (!initialChapterId) return;
       await Promise.all([loadChapterNoteBlocks(initialChapterId), loadChapterRuns(initialChapterId)]);
       if (!cancelled) {
+        const nextSearchParams = searchParamsForChapter(searchParams, initialChapterId);
+        const nextSearch = nextSearchParams.toString();
         setAcceptedNavigation((current) =>
           current.courseId === acceptedCourseId && current.chapterId === null
-            ? { ...current, chapterId: initialChapterId }
+            ? { ...current, chapterId: initialChapterId, searchParams: nextSearch }
             : current,
         );
+        if (nextSearch !== searchParams.toString()) setSearchParams(nextSearchParams, { replace: true });
       }
     }
     chooseInitial().catch((reason: unknown) => setError(message(reason, "精读结果加载失败")));
     return () => {
       cancelled = true;
     };
-  }, [acceptedCourseId, activeChapterId, initialChapterId, loadChapterNoteBlocks, loadChapterRuns]);
+  }, [
+    acceptedCourseId,
+    activeChapterId,
+    initialChapterId,
+    loadChapterNoteBlocks,
+    loadChapterRuns,
+    searchParams,
+    setSearchParams,
+  ]);
   useEffect(() => {
     const requestedCourseId = store.selectedCourseId;
     if (requestedCourseId !== acceptedCourseId) {
       const targetChapterId = requestedCourseInitialChapterId;
-      if (!requestedCourseId || !targetChapterId) return;
+      if (!requestedCourseId || !requestedCourseDataLoaded) return;
       if (!confirmLeave()) {
         if (acceptedCourseId) selectCourse(acceptedCourseId);
         setSearchParams(new URLSearchParams(acceptedNavigation.searchParams), { replace: true });
         return;
       }
 
-      const nextSearchParams = new URLSearchParams(searchParams);
-      nextSearchParams.set("chapterId", targetChapterId);
+      const nextSearchParams = searchParamsForChapter(searchParams, targetChapterId);
       setDirtyKinds({});
       setAcceptedNavigation({
         courseId: requestedCourseId,
@@ -130,12 +154,24 @@ export default function ChapterWorkbench() {
         searchParams: nextSearchParams.toString(),
       });
       setSearchParams(nextSearchParams, { replace: true });
-      Promise.all([loadChapterNoteBlocks(targetChapterId), loadChapterRuns(targetChapterId)]).catch((reason: unknown) =>
-        setError(message(reason, "精读结果加载失败")),
-      );
+      if (targetChapterId) {
+        Promise.all([loadChapterNoteBlocks(targetChapterId), loadChapterRuns(targetChapterId)]).catch(
+          (reason: unknown) => setError(message(reason, "精读结果加载失败")),
+        );
+      }
       return;
     }
-    if (activeChapterId === null) return;
+    if (activeChapterId === null) {
+      if (requestedCourseDataLoaded && !initialChapterId) {
+        const nextSearchParams = searchParamsForChapter(searchParams, null);
+        const nextSearch = nextSearchParams.toString();
+        if (acceptedNavigation.searchParams !== nextSearch) {
+          setAcceptedNavigation((current) => ({ ...current, searchParams: nextSearch }));
+        }
+        if (searchParams.toString() !== nextSearch) setSearchParams(nextSearchParams, { replace: true });
+      }
+      return;
+    }
     const requestedTarget =
       requestedChapterId &&
       requestedChapterId !== activeChapterId &&
@@ -144,7 +180,17 @@ export default function ChapterWorkbench() {
         : null;
     const activeChapterIsValid = courseChapters.some((chapter) => chapter.id === activeChapterId);
     const targetChapterId = requestedTarget ?? (!activeChapterIsValid ? initialChapterId : null);
-    if (!targetChapterId || targetChapterId === activeChapterId) return;
+    if (!targetChapterId || targetChapterId === activeChapterId) {
+      if (activeChapterIsValid) {
+        const nextSearchParams = searchParamsForChapter(searchParams, activeChapterId);
+        const nextSearch = nextSearchParams.toString();
+        if (acceptedNavigation.searchParams !== nextSearch) {
+          setAcceptedNavigation((current) => ({ ...current, searchParams: nextSearch }));
+        }
+        if (searchParams.toString() !== nextSearch) setSearchParams(nextSearchParams, { replace: true });
+      }
+      return;
+    }
     if (!confirmLeave()) {
       if (requestedTarget) {
         setSearchParams(new URLSearchParams(acceptedNavigation.searchParams), { replace: true });
@@ -153,18 +199,14 @@ export default function ChapterWorkbench() {
     }
 
     setDirtyKinds({});
-    let nextAcceptedSearchParams = searchParams.toString();
-    if (!requestedTarget) {
-      const nextSearchParams = new URLSearchParams(searchParams);
-      nextSearchParams.set("chapterId", targetChapterId);
-      nextAcceptedSearchParams = nextSearchParams.toString();
-      setSearchParams(nextSearchParams, { replace: true });
-    }
+    const nextSearchParams = searchParamsForChapter(searchParams, targetChapterId);
+    const nextAcceptedSearchParams = nextSearchParams.toString();
     setAcceptedNavigation((current) => ({
       ...current,
       chapterId: targetChapterId,
       searchParams: nextAcceptedSearchParams,
     }));
+    if (searchParams.toString() !== nextAcceptedSearchParams) setSearchParams(nextSearchParams, { replace: true });
     Promise.all([loadChapterNoteBlocks(targetChapterId), loadChapterRuns(targetChapterId)]).catch((reason: unknown) =>
       setError(message(reason, "精读结果加载失败")),
     );
@@ -177,6 +219,7 @@ export default function ChapterWorkbench() {
     initialChapterId,
     loadChapterNoteBlocks,
     loadChapterRuns,
+    requestedCourseDataLoaded,
     requestedCourseInitialChapterId,
     requestedChapterId,
     searchParams,
@@ -330,7 +373,7 @@ export default function ChapterWorkbench() {
             {(["knowledge_mermaid", "application_mermaid"] as const).map((kind) => {
               const block = blocks.find((item) => item.kind === kind);
               return block ? (
-                <section key={kind} className="py-6">
+                <section key={`${activeChapterId}:${block.id}`} className="py-6">
                   <MermaidEditor
                     title={block.title}
                     initial={block.body}
