@@ -2,32 +2,35 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC_RELATIVE = Path("src")
 WORKBENCH_RELATIVE = Path("src/parsing_core/workbench")
 LAYERS = ("domain", "application", "ports")
-INTERNAL_MODULE_NAMES = {"application", "domain", "infrastructure", "ocr", "ports"}
-FORBIDDEN = {
+WORKBENCH_MODULE = "parsing_core.workbench"
+ALLOWED_WORKBENCH_PREFIXES = {
+    "domain": {"parsing_core.workbench.domain"},
+    "application": {
+        "parsing_core.workbench.application",
+        "parsing_core.workbench.domain",
+        "parsing_core.workbench.ports",
+    },
+    "ports": {
+        "parsing_core.workbench.ports",
+        "parsing_core.workbench.domain",
+    },
+}
+FORBIDDEN_PREFIXES = {
     "domain": {
         "fastapi",
         "sqlite3",
         "requests",
         "httpx",
         "pathlib",
-        "application",
-        "ports",
-        "infrastructure",
-        "parsing_core.workbench.application",
-        "parsing_core.workbench.ports",
-        "parsing_core.workbench.infrastructure",
     },
     "application": {
         "fastapi",
         "sqlite3",
         "requests",
         "httpx",
-        "infrastructure",
-        "ocr",
-        "parsing_core.workbench.infrastructure",
-        "parsing_core.workbench.ocr",
         "parsing_core.serving",
     },
     "ports": {
@@ -35,45 +38,54 @@ FORBIDDEN = {
         "sqlite3",
         "requests",
         "httpx",
-        "application",
-        "infrastructure",
-        "ocr",
-        "parsing_core.workbench.application",
-        "parsing_core.workbench.infrastructure",
-        "parsing_core.workbench.ocr",
         "parsing_core.serving",
     },
 }
 
 
-def imported_modules(path: Path) -> set[str]:
+def imported_modules(path: Path, src_root: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    current_package = path.relative_to(src_root).parent.parts
     modules: set[str] = set()
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            relative_prefix = "." * node.level
-            if node.module:
-                module = f"{relative_prefix}{node.module}"
-                modules.add(module)
-                for alias in node.names:
-                    if alias.name in INTERNAL_MODULE_NAMES:
-                        modules.add(f"{module}.{alias.name}")
+            if node.level:
+                parent_count = len(current_package) - node.level + 1
+                module_parts = list(current_package[: max(parent_count, 0)])
             else:
-                modules.update(f"{relative_prefix}{alias.name}" for alias in node.names)
+                module_parts = []
+            if node.module:
+                module_parts.extend(node.module.split("."))
+
+            base_module = ".".join(module_parts)
+            for alias in node.names:
+                if alias.name == "*":
+                    if base_module:
+                        modules.add(base_module)
+                    continue
+                modules.add(".".join((*module_parts, alias.name)))
 
     return modules
 
 
-def _is_forbidden(module: str, forbidden: set[str]) -> bool:
-    normalized = module.lstrip(".")
-    return any(normalized == prefix or normalized.startswith(f"{prefix}.") for prefix in forbidden)
+def _matches_prefix(module: str, prefixes: set[str]) -> bool:
+    return any(module == prefix or module.startswith(f"{prefix}.") for prefix in prefixes)
+
+
+def _is_forbidden(layer: str, module: str) -> bool:
+    if module == WORKBENCH_MODULE:
+        return False
+    if module.startswith(f"{WORKBENCH_MODULE}."):
+        return not _matches_prefix(module, ALLOWED_WORKBENCH_PREFIXES[layer])
+    return _matches_prefix(module, FORBIDDEN_PREFIXES[layer])
 
 
 def find_violations(root: Path) -> list[str]:
     violations: list[str] = []
+    src_root = root / SRC_RELATIVE
     workbench = root / WORKBENCH_RELATIVE
 
     for layer in LAYERS:
@@ -85,8 +97,8 @@ def find_violations(root: Path) -> list[str]:
             continue
 
         for path in sorted(layer_dir.rglob("*.py")):
-            for module in sorted(imported_modules(path)):
-                if _is_forbidden(module, FORBIDDEN[layer]):
+            for module in sorted(imported_modules(path, src_root)):
+                if _is_forbidden(layer, module):
                     relative_path = path.relative_to(root)
                     violations.append(f"{relative_path}: forbidden import {module}")
 
@@ -127,6 +139,7 @@ def test_find_violations_rejects_forbidden_domain_dependencies(tmp_path: Path) -
         "httpx",
         "pathlib",
         "parsing_core.workbench.application",
+        "parsing_core.workbench.ocr",
         "parsing_core.workbench.ports",
         "parsing_core.workbench.infrastructure",
     }
@@ -141,6 +154,7 @@ def test_find_violations_rejects_forbidden_domain_dependencies(tmp_path: Path) -
                 "import httpx",
                 "from pathlib import Path",
                 "from parsing_core.workbench.application import UseCase",
+                "from parsing_core.workbench import ocr",
                 "from parsing_core.workbench.ports import Gateway",
                 "from parsing_core.workbench.infrastructure import Repository",
             )
@@ -159,6 +173,7 @@ def test_find_violations_rejects_forbidden_application_dependencies(tmp_path: Pa
         "httpx",
         "parsing_core.workbench.infrastructure",
         "parsing_core.workbench.ocr",
+        "parsing_core.workbench.schema",
         "parsing_core.serving",
     }
     _write_layer_module(
@@ -172,6 +187,7 @@ def test_find_violations_rejects_forbidden_application_dependencies(tmp_path: Pa
                 "import httpx",
                 "from parsing_core.workbench.infrastructure import Repository",
                 "from parsing_core.workbench.ocr import OcrEngine",
+                "from parsing_core.workbench import schema",
                 "from parsing_core.serving import Scheduler",
             )
         ),
@@ -190,6 +206,7 @@ def test_find_violations_rejects_forbidden_ports_dependencies(tmp_path: Path) ->
         "parsing_core.workbench.application",
         "parsing_core.workbench.infrastructure",
         "parsing_core.workbench.ocr",
+        "parsing_core.workbench.schema",
         "parsing_core.serving",
     }
     _write_layer_module(
@@ -204,12 +221,24 @@ def test_find_violations_rejects_forbidden_ports_dependencies(tmp_path: Path) ->
                 "from parsing_core.workbench.application import UseCase",
                 "from parsing_core.workbench.infrastructure import Repository",
                 "from parsing_core.workbench.ocr import OcrEngine",
+                "from parsing_core.workbench import schema",
                 "from parsing_core.serving import Scheduler",
             )
         ),
     )
 
     _assert_forbidden_modules(tmp_path, expected)
+
+
+def test_find_violations_resolves_forbidden_relative_imports(tmp_path: Path) -> None:
+    _create_package_boundaries(tmp_path)
+    _write_layer_module(tmp_path, "domain", "from .. import ocr\n")
+    _write_layer_module(tmp_path, "application", "from .. import schema\n")
+
+    _assert_forbidden_modules(
+        tmp_path,
+        {"parsing_core.workbench.ocr", "parsing_core.workbench.schema"},
+    )
 
 
 def test_find_violations_allows_intended_layer_dependencies(tmp_path: Path) -> None:
@@ -220,6 +249,8 @@ def test_find_violations_allows_intended_layer_dependencies(tmp_path: Path) -> N
         "application",
         "\n".join(
             (
+                "from .use_cases import UseCase",
+                "from .. import domain, ports",
                 "from parsing_core.workbench.domain import Entity",
                 "from parsing_core.workbench.ports import Repository",
             )
@@ -228,7 +259,13 @@ def test_find_violations_allows_intended_layer_dependencies(tmp_path: Path) -> N
     _write_layer_module(
         tmp_path,
         "ports",
-        "from parsing_core.workbench.domain import Entity\n",
+        "\n".join(
+            (
+                "from .gateway import Gateway",
+                "from .. import domain",
+                "from parsing_core.workbench.domain import Entity",
+            )
+        ),
     )
 
     assert find_violations(tmp_path) == []
