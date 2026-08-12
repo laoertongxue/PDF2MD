@@ -12,8 +12,8 @@ REPO = Path(__file__).resolve().parents[1]
 PREPARE = REPO / "parsing-core-app/scripts/prepare-sidecar-python.sh"
 RUNTIME_HELPER = REPO / "parsing-core-app/scripts/sidecar_runtime.py"
 RUNTIME = REPO / "parsing-core-app/src-tauri/sidecar-runtime/python"
-ARCHIVE_NAME = "cpython-3.13.13+20260510-aarch64-apple-darwin-install_only.tar.gz"
-ARCHIVE_SHA256 = "1ad1ed518447005d4b6dfa16d4f847d45790e17e94e30164a0a6e6c79a99730f"
+ARCHIVE_NAME = "cpython-3.12.13+20260510-aarch64-apple-darwin-install_only.tar.gz"
+ARCHIVE_SHA256 = "5a30271f8d345a5b02b0c9e4e31e0f1e1455a8e4a04fba95cd9762472abc3b17"
 
 
 def _prepare(**env_overrides: str) -> subprocess.CompletedProcess[str]:
@@ -73,14 +73,14 @@ def _isolated_prepare(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
 
     payload = tmp_path / "payload/python"
     (payload / "bin").mkdir(parents=True)
-    (payload / "lib/python3.13/ctypes/macholib").mkdir(parents=True)
-    (payload / "lib/python3.13/site-packages/markitdown").mkdir(parents=True)
-    fake_python = payload / "bin/python3.13"
+    (payload / "lib/python3.12/ctypes/macholib").mkdir(parents=True)
+    (payload / "lib/python3.12/site-packages/markitdown").mkdir(parents=True)
+    fake_python = payload / "bin/python3.12"
     fake_python.write_text(
         textwrap.dedent(
             """\
             #!/bin/bash
-            if [[ ${1:-} == -c ]]; then printf '3.13.13\\n'; exit 0; fi
+            if [[ ${1:-} == -c ]]; then printf '3.12.13\\n'; exit 0; fi
             if [[ ${1:-} == -m && ${2:-} == pip ]]; then
               printf 'install\\n' >> "$PDF2MD_TEST_INSTALL_LOG"
               sleep "${PDF2MD_TEST_INSTALL_DELAY:-0}"
@@ -93,11 +93,11 @@ def _isolated_prepare(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
-    (payload / "bin/python").symlink_to("python3.13")
-    (payload / "bin/python3").symlink_to("python3.13")
-    (payload / "lib/python3.13/os.py").write_text("", encoding="utf-8")
-    (payload / "lib/python3.13/ctypes/macholib/dyld.py").write_text("", encoding="utf-8")
-    (payload / "lib/python3.13/site-packages/markitdown/_markitdown.py").write_text(
+    (payload / "bin/python").symlink_to("python3.12")
+    (payload / "bin/python3").symlink_to("python3.12")
+    (payload / "lib/python3.12/os.py").write_text("", encoding="utf-8")
+    (payload / "lib/python3.12/ctypes/macholib/dyld.py").write_text("", encoding="utf-8")
+    (payload / "lib/python3.12/site-packages/markitdown/_markitdown.py").write_text(
         "", encoding="utf-8"
     )
 
@@ -135,7 +135,7 @@ def test_prepare_repairs_missing_python_and_tampered_stdlib():
     initial = _prepare()
     assert initial.returncode == 0, initial.stderr
     python = RUNTIME / "bin/python3"
-    stdlib = RUNTIME / "lib/python3.13/os.py"
+    stdlib = RUNTIME / "lib/python3.12/os.py"
     expected_stdlib = _digest(stdlib)
 
     python.unlink()
@@ -184,10 +184,10 @@ def test_archive_validation_accepts_contained_symlink(tmp_path):
     archive = tmp_path / "runtime.tar.gz"
     directory = tarfile.TarInfo("python/bin")
     directory.type = tarfile.DIRTYPE
-    executable = tarfile.TarInfo("python/bin/python3.13")
+    executable = tarfile.TarInfo("python/bin/python3.12")
     link = tarfile.TarInfo("python/bin/python3")
     link.type = tarfile.SYMTYPE
-    link.linkname = "python3.13"
+    link.linkname = "python3.12"
     _archive(archive, [directory, executable, link])
 
     result = _validate_archive(archive)

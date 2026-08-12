@@ -31,7 +31,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.12"
           cache: pip
 
       - name: Validate release tag and resolve version
@@ -97,7 +97,7 @@ jobs:
           app_executables=("$app/Contents/MacOS/parsing-core-app")
           test "${#app_executables[@]}" -eq 1
           file "${app_executables[0]}" | grep -q 'arm64'
-          file "$app/Contents/Resources/python-runtime/bin/python3.13" | grep -q 'arm64'
+          file "$app/Contents/Resources/python-runtime/bin/python3.12" | grep -q 'arm64'
           ./scripts/check-release-sidecar.sh "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           ./scripts/test-release-sidecar.sh "$app"

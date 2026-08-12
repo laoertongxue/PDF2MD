@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "parsing-core"
 version = "0.1.2"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
   "markitdown[docx]>=0.0.1",
   "jsonschema>=4.23,<5",
@@ -45,18 +45,27 @@ addopts = "-ra --strict-markers --asyncio-mode=auto"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = false
 warn_return_any = true
 warn_unused_configs = true
 check_untyped_defs = true
 exclude = ["tests/", "build/", "dist/"]
+
+[[tool.mypy.overrides]]
+module = [
+  "parsing_core.workbench.domain.*",
+  "parsing_core.workbench.application.*",
+  "parsing_core.workbench.ports.*",
+]
+strict = true
+
 [[tool.mypy.overrides]]
 module = ["litellm", "markitdown", "opencc", "pypdf", "jsonschema"]
 ignore_missing_imports = true
