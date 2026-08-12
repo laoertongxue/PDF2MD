@@ -56,6 +56,7 @@ export default function MermaidEditor({ title, initial, onSave, onDirtyChange }:
           aria-label={`${title} Mermaid 源码`}
           value={code}
           onChange={(e) => setCode(e.target.value)}
+          disabled={saving}
           spellCheck={false}
           className="h-72 w-full resize-y rounded-md border border-zinc-200 bg-white p-3 font-mono text-xs leading-5 text-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-200"
         />

@@ -453,7 +453,9 @@ describe("ChapterWorkbench", () => {
 
     await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch3"));
     expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nE-->F");
-    expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch3");
+    await waitFor(() =>
+      expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch3"),
+    );
     expect(confirm).not.toHaveBeenCalled();
   });
 
@@ -514,7 +516,9 @@ describe("ChapterWorkbench", () => {
       ),
     ).toBe(false);
     expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nE-->F");
-    expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch3");
+    await waitFor(() =>
+      expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch3"),
+    );
   });
 
   it("replaces the Mermaid editor instance after confirmed course navigation", async () => {
@@ -615,8 +619,10 @@ describe("ChapterWorkbench", () => {
         <ChapterNavigationHarness />
       </MemoryRouter>,
     );
-    const secondEditor = await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
-    await waitFor(() => expect(secondEditor).toHaveValue("flowchart LR\nE-->F"));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nE-->F"),
+    );
+    const secondEditor = screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" });
     await userEvent.type(secondEditor, "\nF-->G");
     const beforeOldSaveFinishes = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(beforeOldSaveFinishes);
@@ -630,6 +636,78 @@ describe("ChapterWorkbench", () => {
     const afterOldSaveFinishes = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(afterOldSaveFinishes);
     expect(afterOldSaveFinishes.defaultPrevented).toBe(true);
+  });
+
+  it("keeps a new A draft dirty when an old A save finishes after A to B to A navigation", async () => {
+    addSecondCourse();
+    mermaidEditorMode.holdLocalDraft = true;
+    let finishOldSave: ((value: unknown) => void) | undefined;
+    const oldSave = new Promise<unknown>((resolve) => {
+      finishOldSave = resolve;
+    });
+    actions.saveChapterBlock.mockReturnValueOnce(oldSave);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const view = render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    const originalEditor = await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+    await userEvent.type(originalEditor, "\nB-->C");
+    await userEvent.click(requireAt(screen.getAllByRole("button", { name: "保存 Mermaid" }), 0, "save button"));
+
+    state = { ...state, selectedCourseId: "c2" };
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch3"));
+
+    state = { ...state, selectedCourseId: "c1" };
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch3"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch1"));
+    const newEditor = screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+    expect(newEditor).not.toBe(originalEditor);
+    await userEvent.type(newEditor, "\nA-->D");
+
+    await act(async () => {
+      finishOldSave?.({ ...blocks[5], body: "flowchart LR\nA-->B\nB-->C" });
+      await oldSave;
+    });
+
+    const unload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+  });
+
+  it("prevents edits while the current Mermaid save is pending", async () => {
+    let finishSave: ((value: unknown) => void) | undefined;
+    const pendingSave = new Promise<unknown>((resolve) => {
+      finishSave = resolve;
+    });
+    actions.saveChapterBlock.mockReturnValueOnce(pendingSave);
+    render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterWorkbench />
+      </MemoryRouter>,
+    );
+    const editor = await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+    await userEvent.type(editor, "\nB-->C");
+    await userEvent.click(requireAt(screen.getAllByRole("button", { name: "保存 Mermaid" }), 0, "save button"));
+
+    expect(editor).toBeDisabled();
+    await userEvent.type(editor, "\nC-->D");
+    expect(editor).toHaveValue("flowchart LR\nA-->B\nB-->C");
+
+    await act(async () => {
+      finishSave?.({ ...blocks[5], body: "flowchart LR\nA-->B\nB-->C" });
+      await pendingSave;
+    });
   });
 
   it("rolls back a loaded empty course when dirty navigation is cancelled", async () => {
@@ -734,6 +812,155 @@ describe("ChapterWorkbench", () => {
 
     await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch4"));
     expect(screen.queryByText("课程 B 加载失败")).not.toBeInTheDocument();
+  });
+
+  it("does not accept cached B when its latest course load fails", async () => {
+    addSecondCourse();
+    mermaidEditorMode.holdLocalDraft = true;
+    let failSecondCourseLoad: ((reason: Error) => void) | undefined;
+    const secondCourseLoad = new Promise<unknown[]>((_, reject) => {
+      failSecondCourseLoad = reject;
+    });
+    actions.loadSources.mockImplementation(async (courseId: string) => {
+      if (courseId === "c2") return secondCourseLoad;
+      return ((state.sources as Record<string, unknown[]>)[courseId] ?? []) as unknown[];
+    });
+    actions.selectCourse.mockImplementation((courseId: string) => {
+      state = { ...state, selectedCourseId: courseId };
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const view = render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    const editor = await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+    await userEvent.type(editor, "\nB-->C");
+
+    state = { ...state, selectedCourseId: "c2" };
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(actions.loadSources).toHaveBeenCalledWith("c2"));
+    await act(async () => undefined);
+    await act(async () => {
+      failSecondCourseLoad?.(new Error("缓存课程 B 最新加载失败"));
+      try {
+        await secondCourseLoad;
+      } catch {
+        // The component owns the expected rejection.
+      }
+    });
+
+    await waitFor(() => expect(actions.selectCourse).toHaveBeenCalledWith("c1"));
+    expect(state.selectedCourseId).toBe("c1");
+    expect(screen.getByText("缓存课程 B 最新加载失败")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toBe(editor);
+    expect(editor).toHaveValue("flowchart LR\nA-->B\nB-->C");
+    expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch1");
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("requires a fresh B success after an older B request populates its cache", async () => {
+    addThirdCourse();
+    let finishOldSecondCourseLoad: ((items: unknown[]) => void) | undefined;
+    let failLatestSecondCourseLoad: ((reason: Error) => void) | undefined;
+    const oldSecondCourseLoad = new Promise<unknown[]>((resolve) => {
+      finishOldSecondCourseLoad = resolve;
+    });
+    const latestSecondCourseLoad = new Promise<unknown[]>((_, reject) => {
+      failLatestSecondCourseLoad = reject;
+    });
+    let secondCourseAttempts = 0;
+    actions.loadSources.mockImplementation(async (courseId: string) => {
+      if (courseId === "c2") {
+        secondCourseAttempts += 1;
+        return secondCourseAttempts === 1 ? oldSecondCourseLoad : latestSecondCourseLoad;
+      }
+      return ((state.sources as Record<string, unknown[]>)[courseId] ?? []) as unknown[];
+    });
+    actions.selectCourse.mockImplementation((courseId: string) => {
+      state = { ...state, selectedCourseId: courseId };
+    });
+    const view = render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+
+    state = { ...state, selectedCourseId: "c2" };
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(secondCourseAttempts).toBe(1));
+
+    state = { ...state, selectedCourseId: "c3" };
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch4"));
+
+    const secondCourseSource = {
+      id: "s2",
+      course_id: "c2",
+      title: "组织教材",
+      kind: "main",
+      file_path: "/org.pdf",
+      status: "READY",
+    };
+    await act(async () => {
+      state = {
+        ...state,
+        sources: { ...(state.sources as Record<string, unknown[]>), c2: [secondCourseSource] },
+        chapters: {
+          ...(state.chapters as Record<string, unknown[]>),
+          s2: [{ ...chapter("ch3", "组织能力"), source_id: "s2", course_id: "c2", seq: 0 }],
+        },
+        noteBlocksByChapter: {
+          ...(state.noteBlocksByChapter as Record<string, unknown[]>),
+          ch3: thirdChapterBlocks,
+        },
+        chapterRunsById: { ...(state.chapterRunsById as Record<string, unknown[]>), ch3: [] },
+      };
+      finishOldSecondCourseLoad?.([secondCourseSource]);
+      await oldSecondCourseLoad;
+    });
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch4"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+
+    state = { ...state, selectedCourseId: "c2" };
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch4"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(secondCourseAttempts).toBeGreaterThanOrEqual(2));
+    await act(async () => undefined);
+    await act(async () => {
+      failLatestSecondCourseLoad?.(new Error("课程 B 第二次加载失败"));
+      try {
+        await latestSecondCourseLoad;
+      } catch {
+        // The component owns the expected rejection.
+      }
+    });
+
+    await waitFor(() => expect(actions.selectCourse).toHaveBeenLastCalledWith("c3"));
+    expect(state.selectedCourseId).toBe("c3");
+    expect(screen.getByText("课程 B 第二次加载失败")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择章节")).toHaveValue("ch4");
+    expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nG-->H");
+    expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch4");
   });
 
   it("ignores an earlier course failure after a later course succeeds", async () => {
@@ -854,6 +1081,100 @@ describe("ChapterWorkbench", () => {
     expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nG-->H");
     expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch4");
     expect(confirm).toHaveBeenCalledOnce();
+  });
+
+  it("ignores a B chapter content failure after navigating to C", async () => {
+    addSecondCourse();
+    addThirdCourse();
+    let failSecondCourseContent: ((reason: Error) => void) | undefined;
+    const secondCourseContent = new Promise<unknown[]>((_, reject) => {
+      failSecondCourseContent = reject;
+    });
+    actions.loadChapterNoteBlocks.mockImplementation(async (chapterId: string) => {
+      if (chapterId === "ch3") return secondCourseContent;
+      if (chapterId === "ch4") return fourthChapterBlocks;
+      return blocks;
+    });
+    const view = render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+
+    state = { ...state, selectedCourseId: "c2" };
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch3"));
+    await waitFor(() => expect(actions.loadChapterNoteBlocks).toHaveBeenCalledWith("ch3"));
+
+    state = { ...state, selectedCourseId: "c3" };
+    view.rerender(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch3"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch4"));
+
+    await act(async () => {
+      failSecondCourseContent?.(new Error("迟到的课程 B 章节内容失败"));
+      try {
+        await secondCourseContent;
+      } catch {
+        // The component owns the expected rejection.
+      }
+    });
+
+    expect(screen.queryByText("迟到的课程 B 章节内容失败")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("选择章节")).toHaveValue("ch4");
+    expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nG-->H");
+    expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch4");
+  });
+
+  it("ignores a cancelled initial chapter content failure", async () => {
+    let failInitialContent: ((reason: Error) => void) | undefined;
+    const initialContent = new Promise<unknown[]>((_, reject) => {
+      failInitialContent = reject;
+    });
+    state = {
+      ...state,
+      noteBlocksByChapter: { ch1: [], ch2: [] },
+      chapterRunsById: { ch1: [], ch2: [] },
+    };
+    actions.loadChapterNoteBlocks.mockImplementation(async (chapterId: string) => {
+      if (chapterId === "ch1") return initialContent;
+      state = {
+        ...state,
+        noteBlocksByChapter: { ch1: [], ch2: secondChapterBlocks },
+      };
+      return secondChapterBlocks;
+    });
+    render(
+      <MemoryRouter initialEntries={["/workbench/chapter"]}>
+        <ChapterNavigationHarness />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(actions.loadChapterNoteBlocks).toHaveBeenCalledWith("ch1"));
+
+    await userEvent.click(screen.getByRole("button", { name: "导航到第二章" }));
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch2"));
+
+    await act(async () => {
+      failInitialContent?.(new Error("已取消的初始章节加载失败"));
+      try {
+        await initialContent;
+      } catch {
+        // The component owns the expected rejection.
+      }
+    });
+
+    expect(screen.queryByText("已取消的初始章节加载失败")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("选择章节")).toHaveValue("ch2");
+    expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nC-->D");
+    expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter?chapterId=ch2");
   });
 
   it("keeps a dirty non-first chapter active when an older chapter load finishes late", async () => {

@@ -24,6 +24,7 @@ interface AcceptedNavigation {
   courseId: string | null;
   chapterId: string | null;
   searchParams: string;
+  epoch: number;
 }
 
 interface CourseLoadState {
@@ -43,18 +44,22 @@ function searchParamsForChapter(searchParams: URLSearchParams, chapterId: string
 export default function ChapterWorkbench() {
   const store = useWorkbenchStore();
   const [error, setError] = useState<string | null>(null);
+  const [chapterLoadError, setChapterLoadError] = useState<string | null>(null);
   const [runningHybrid, setRunningHybrid] = useState(false);
-  const [dirtyKinds, setDirtyKinds] = useState<Record<string, boolean>>({});
+  const [dirtyEditors, setDirtyEditors] = useState<Record<string, number>>({});
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedChapterId = searchParams.get("chapterId");
   const [acceptedNavigation, setAcceptedNavigation] = useState<AcceptedNavigation>(() => ({
     courseId: store.selectedCourseId,
     chapterId: null,
     searchParams: searchParams.toString(),
+    epoch: 0,
   }));
   const acceptedNavigationRef = useRef(acceptedNavigation);
   const courseLoadRequestRef = useRef(0);
+  const chapterLoadRequestRef = useRef(0);
   const rollbackCourseRef = useRef<string | null>(null);
+  const rejectedChapterSearchRef = useRef<string | null>(null);
   const [courseLoadState, setCourseLoadState] = useState<CourseLoadState>({
     courseId: null,
     requestId: 0,
@@ -63,7 +68,8 @@ export default function ChapterWorkbench() {
   });
   const acceptedCourseId = acceptedNavigation.courseId;
   const activeChapterId = acceptedNavigation.chapterId;
-  const dirty = Object.values(dirtyKinds).some(Boolean);
+  const navigationEpoch = acceptedNavigation.epoch;
+  const dirty = Object.values(dirtyEditors).some((epoch) => epoch === navigationEpoch);
   const confirmLeave = useCallback(() => !dirty || window.confirm(leaveMessage), [dirty]);
   const selectCourse = store.selectCourse;
   const loadCourses = store.loadCourses;
@@ -71,6 +77,38 @@ export default function ChapterWorkbench() {
   const loadChapters = store.loadChapters;
   const loadChapterNoteBlocks = store.loadChapterNoteBlocks;
   const loadChapterRuns = store.loadChapterRuns;
+  const acceptNavigation = useCallback((courseId: string | null, chapterId: string | null, nextSearch: string) => {
+    setDirtyEditors({});
+    setAcceptedNavigation((current) => ({
+      courseId,
+      chapterId,
+      searchParams: nextSearch,
+      epoch: current.epoch + 1,
+    }));
+  }, []);
+  const loadChapterContent = useCallback(
+    (chapterId: string | null) => {
+      const requestId = ++chapterLoadRequestRef.current;
+      setChapterLoadError(null);
+      const result = (async () => {
+        if (!chapterId) return chapterLoadRequestRef.current === requestId;
+        try {
+          await Promise.all([loadChapterNoteBlocks(chapterId), loadChapterRuns(chapterId)]);
+          return chapterLoadRequestRef.current === requestId;
+        } catch (reason) {
+          if (chapterLoadRequestRef.current === requestId) {
+            setChapterLoadError(message(reason, "精读结果加载失败"));
+          }
+          return false;
+        }
+      })();
+      return { requestId, result };
+    },
+    [loadChapterNoteBlocks, loadChapterRuns],
+  );
+  const cancelChapterContentLoad = useCallback((requestId: number) => {
+    if (chapterLoadRequestRef.current === requestId) chapterLoadRequestRef.current += 1;
+  }, []);
   const chapterGroups = useMemo(
     () => createSourceChapterGroups(acceptedCourseId ? (store.sources[acceptedCourseId] ?? []) : [], store.chapters),
     [acceptedCourseId, store.chapters, store.sources],
@@ -91,6 +129,11 @@ export default function ChapterWorkbench() {
       Object.prototype.hasOwnProperty.call(store.chapters, source.id),
     );
   }, [store.chapters, store.selectedCourseId, store.sources]);
+  const requestedCourseReady =
+    courseLoadState.courseId === store.selectedCourseId &&
+    courseLoadState.requestId === courseLoadRequestRef.current &&
+    courseLoadState.status === "success" &&
+    requestedCourseDataLoaded;
   const activeChapter = courseChapters.find((chapter) => chapter.id === activeChapterId) ?? null;
   const blocks = useMemo(
     () => (activeChapterId ? (store.noteBlocksByChapter[activeChapterId] ?? []) : []),
@@ -160,39 +203,40 @@ export default function ChapterWorkbench() {
   }, [loadChapters, loadSources, selectCourse, setSearchParams, store.selectedCourseId]);
   useEffect(() => {
     if (activeChapterId !== null) return;
-    let cancelled = false;
+    let requestId: number | null = null;
     async function chooseInitial() {
       if (!initialChapterId) return;
-      await Promise.all([loadChapterNoteBlocks(initialChapterId), loadChapterRuns(initialChapterId)]);
-      if (!cancelled) {
-        const nextSearchParams = searchParamsForChapter(searchParams, initialChapterId);
-        const nextSearch = nextSearchParams.toString();
-        setAcceptedNavigation((current) =>
-          current.courseId === acceptedCourseId && current.chapterId === null
-            ? { ...current, chapterId: initialChapterId, searchParams: nextSearch }
-            : current,
-        );
-        if (nextSearch !== searchParams.toString()) setSearchParams(nextSearchParams, { replace: true });
-      }
+      const request = loadChapterContent(initialChapterId);
+      requestId = request.requestId;
+      if (!(await request.result)) return;
+      const nextSearchParams = searchParamsForChapter(searchParams, initialChapterId);
+      const nextSearch = nextSearchParams.toString();
+      acceptNavigation(acceptedCourseId, initialChapterId, nextSearch);
+      if (nextSearch !== searchParams.toString()) setSearchParams(nextSearchParams, { replace: true });
     }
-    chooseInitial().catch((reason: unknown) => setError(message(reason, "精读结果加载失败")));
+    void chooseInitial();
     return () => {
-      cancelled = true;
+      if (requestId !== null) cancelChapterContentLoad(requestId);
     };
   }, [
+    acceptNavigation,
     acceptedCourseId,
     activeChapterId,
+    cancelChapterContentLoad,
     initialChapterId,
-    loadChapterNoteBlocks,
-    loadChapterRuns,
+    loadChapterContent,
     searchParams,
     setSearchParams,
   ]);
   useEffect(() => {
     const requestedCourseId = store.selectedCourseId;
+    const requestedSearch = searchParams.toString();
+    if (rejectedChapterSearchRef.current && rejectedChapterSearchRef.current !== requestedSearch) {
+      rejectedChapterSearchRef.current = null;
+    }
     if (requestedCourseId !== acceptedCourseId) {
       const targetChapterId = requestedCourseInitialChapterId;
-      if (!requestedCourseId || !requestedCourseDataLoaded) return;
+      if (!requestedCourseId || !requestedCourseReady) return;
       if (!confirmLeave()) {
         if (acceptedCourseId) selectCourse(acceptedCourseId);
         setSearchParams(new URLSearchParams(acceptedNavigation.searchParams), { replace: true });
@@ -200,22 +244,13 @@ export default function ChapterWorkbench() {
       }
 
       const nextSearchParams = searchParamsForChapter(searchParams, targetChapterId);
-      setDirtyKinds({});
-      setAcceptedNavigation({
-        courseId: requestedCourseId,
-        chapterId: targetChapterId,
-        searchParams: nextSearchParams.toString(),
-      });
+      acceptNavigation(requestedCourseId, targetChapterId, nextSearchParams.toString());
       setSearchParams(nextSearchParams, { replace: true });
-      if (targetChapterId) {
-        Promise.all([loadChapterNoteBlocks(targetChapterId), loadChapterRuns(targetChapterId)]).catch(
-          (reason: unknown) => setError(message(reason, "精读结果加载失败")),
-        );
-      }
+      void loadChapterContent(targetChapterId).result;
       return;
     }
     if (activeChapterId === null) {
-      if (requestedCourseDataLoaded && !initialChapterId) {
+      if (requestedCourseReady && !initialChapterId) {
         const nextSearchParams = searchParamsForChapter(searchParams, null);
         const nextSearch = nextSearchParams.toString();
         if (acceptedNavigation.searchParams !== nextSearch) {
@@ -244,36 +279,31 @@ export default function ChapterWorkbench() {
       }
       return;
     }
+    if (rejectedChapterSearchRef.current === requestedSearch) return;
     if (!confirmLeave()) {
       if (requestedTarget) {
+        rejectedChapterSearchRef.current = requestedSearch;
         setSearchParams(new URLSearchParams(acceptedNavigation.searchParams), { replace: true });
       }
       return;
     }
 
-    setDirtyKinds({});
     const nextSearchParams = searchParamsForChapter(searchParams, targetChapterId);
     const nextAcceptedSearchParams = nextSearchParams.toString();
-    setAcceptedNavigation((current) => ({
-      ...current,
-      chapterId: targetChapterId,
-      searchParams: nextAcceptedSearchParams,
-    }));
+    acceptNavigation(acceptedCourseId, targetChapterId, nextAcceptedSearchParams);
     if (searchParams.toString() !== nextAcceptedSearchParams) setSearchParams(nextSearchParams, { replace: true });
-    Promise.all([loadChapterNoteBlocks(targetChapterId), loadChapterRuns(targetChapterId)]).catch((reason: unknown) =>
-      setError(message(reason, "精读结果加载失败")),
-    );
+    void loadChapterContent(targetChapterId).result;
   }, [
+    acceptNavigation,
     acceptedCourseId,
     acceptedNavigation.searchParams,
     activeChapterId,
     confirmLeave,
     courseChapters,
     initialChapterId,
-    loadChapterNoteBlocks,
-    loadChapterRuns,
-    requestedCourseDataLoaded,
+    loadChapterContent,
     requestedCourseInitialChapterId,
+    requestedCourseReady,
     requestedChapterId,
     searchParams,
     selectCourse,
@@ -293,18 +323,11 @@ export default function ChapterWorkbench() {
 
   const chooseChapter = (chapterId: string) => {
     if (!confirmLeave()) return;
-    setDirtyKinds({});
     const nextSearchParams = new URLSearchParams(searchParams);
     nextSearchParams.set("chapterId", chapterId);
-    setAcceptedNavigation((current) => ({
-      ...current,
-      chapterId,
-      searchParams: nextSearchParams.toString(),
-    }));
+    acceptNavigation(acceptedCourseId, chapterId, nextSearchParams.toString());
     setSearchParams(nextSearchParams);
-    Promise.all([store.loadChapterNoteBlocks(chapterId), store.loadChapterRuns(chapterId)]).catch((reason: unknown) =>
-      setError(message(reason, "精读结果加载失败")),
-    );
+    void loadChapterContent(chapterId).result;
   };
   const runHybrid = async () => {
     if (!activeChapterId || !confirmLeave()) return;
@@ -321,30 +344,36 @@ export default function ChapterWorkbench() {
   };
   const saveBlock = async (
     chapterId: string,
-    editorIdentity: string,
+    editorEpoch: number,
     block: NoteBlock,
     code: string,
     expected: string,
   ) => {
     await store.saveChapterBlock(chapterId, block.kind, code, expected);
-    setDirtyKinds((current) => {
-      if (!current[editorIdentity]) return current;
+    setDirtyEditors((current) => {
+      if (current[block.id] !== editorEpoch) return current;
       const next = { ...current };
-      delete next[editorIdentity];
+      delete next[block.id];
       return next;
     });
     return true;
   };
   const trackDirty = useCallback(
-    (kind: string, value: boolean) =>
-      setDirtyKinds((current) => (current[kind] === value ? current : { ...current, [kind]: value })),
+    (blockId: string, editorEpoch: number, value: boolean) =>
+      setDirtyEditors((current) => {
+        if (value) return current[blockId] === editorEpoch ? current : { ...current, [blockId]: editorEpoch };
+        if (current[blockId] !== editorEpoch) return current;
+        const next = { ...current };
+        delete next[blockId];
+        return next;
+      }),
     [],
   );
   const sourceRefs = useMemo(() => collectSources(blocks), [blocks]);
   const review = runs.find((run) => run.round_key === "review");
   const latestRun = [...runs].sort((a, b) => b.updated_at - a.updated_at)[0];
   const hasContent = blocks.length > 0;
-  const displayedError = courseLoadState.error ?? error;
+  const displayedError = courseLoadState.error ?? chapterLoadError ?? error;
 
   return (
     <div className="animate-in space-y-5">
@@ -436,14 +465,13 @@ export default function ChapterWorkbench() {
             </section>
             {(["knowledge_mermaid", "application_mermaid"] as const).map((kind) => {
               const block = blocks.find((item) => item.kind === kind);
-              const editorIdentity = activeChapterId && block ? `${activeChapterId}:${block.id}` : null;
-              return block && activeChapterId && editorIdentity ? (
-                <section key={editorIdentity} className="py-6">
+              return block && activeChapterId ? (
+                <section key={`${navigationEpoch}:${block.id}`} className="py-6">
                   <MermaidEditor
                     title={block.title}
                     initial={block.body}
-                    onSave={(code, expected) => saveBlock(activeChapterId, editorIdentity, block, code, expected)}
-                    onDirtyChange={(value) => trackDirty(editorIdentity, value)}
+                    onSave={(code, expected) => saveBlock(activeChapterId, navigationEpoch, block, code, expected)}
+                    onDirtyChange={(value) => trackDirty(block.id, navigationEpoch, value)}
                   />
                 </section>
               ) : null;
