@@ -51,9 +51,7 @@ def _validate_archive(path: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _run_with_lock(
-    lock: Path, token: str, command: list[str]
-) -> subprocess.CompletedProcess[str]:
+def _run_with_lock(lock: Path, token: str, command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["python3", str(RUNTIME_HELPER), "run-with-lock", str(lock), token, "--", *command],
         cwd=REPO,
@@ -416,9 +414,7 @@ def test_previous_owner_token_cannot_release_replacement_lock(tmp_path):
     )
     observed = tmp_path / "observed.json"
 
-    result = _run_with_lock(
-        lock, current_token, ["cp", str(lock / "owner.json"), str(observed)]
-    )
+    result = _run_with_lock(lock, current_token, ["cp", str(lock / "owner.json"), str(observed)])
 
     assert result.returncode == 0, result.stderr
     owner = json.loads(observed.read_text(encoding="utf-8"))

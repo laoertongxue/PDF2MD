@@ -637,11 +637,7 @@ def _stable_helper_version(declared: str, identity: _HelperIdentity) -> str:
 
 
 def _helper_environment(job_root: Path) -> dict[str, str]:
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key in _ALLOWED_HELPER_ENV
-    }
+    env = {key: value for key, value in os.environ.items() if key in _ALLOWED_HELPER_ENV}
     env.update(_HELPER_LOCALE_ENV)
     env["PDF2MD_VISION_OUTPUT_ROOT"] = str(job_root)
     return env

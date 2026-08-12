@@ -64,10 +64,13 @@ def _ok(response: httpx.Response):
 def _write_docx(path: Path, chapters: tuple[tuple[str, str], ...]) -> None:
     paragraphs = []
     for title, body in chapters:
-        paragraphs.extend((
-            f'<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>{title}</w:t></w:r></w:p>',
-            f"<w:p><w:r><w:t>{body}</w:t></w:r></w:p>",
-        ))
+        paragraphs.extend(
+            (
+                f'<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr>'
+                f"<w:r><w:t>{title}</w:t></w:r></w:p>",
+                f"<w:p><w:r><w:t>{body}</w:t></w:r></w:p>",
+            )
+        )
     with ZipFile(path, "w", ZIP_DEFLATED) as archive:
         archive.writestr(
             "[Content_Types].xml",
@@ -114,34 +117,49 @@ def test_real_uvicorn_multi_textbook_topic_fusion_survives_restart(tmp_path):
 
     process, client = _start_server(data_root)
     try:
-        course = _ok(client.post(
-            "/api/workbench/courses",
-            json={"title": "人力资源管理", "description": "双教材", "root_dir": str(course_root)},
-        ))
-        imported = _ok(client.post(
-            f"/api/workbench/courses/{course['id']}/sources/import",
-            json={"paths": [str(path) for path in textbook_paths], "titles": ["教材A", "教材B"]},
-        ))["items"]
+        course = _ok(
+            client.post(
+                "/api/workbench/courses",
+                json={
+                    "title": "人力资源管理",
+                    "description": "双教材",
+                    "root_dir": str(course_root),
+                },
+            )
+        )
+        imported = _ok(
+            client.post(
+                f"/api/workbench/courses/{course['id']}/sources/import",
+                json={
+                    "paths": [str(path) for path in textbook_paths],
+                    "titles": ["教材A", "教材B"],
+                },
+            )
+        )["items"]
         assert len(imported) == 2
 
         chapters_by_source = []
         for source in imported:
-            chapters = _ok(client.post(
-                f"/api/workbench/sources/{source['source_id']}/detect-chapters"
-            ))
+            chapters = _ok(
+                client.post(f"/api/workbench/sources/{source['source_id']}/detect-chapters")
+            )
             assert len(chapters) == 2
             chapters_by_source.append(chapters)
             for chapter in chapters:
-                assert _ok(client.post(
-                    f"/api/workbench/chapters/{chapter['id']}/confirm"
-                ))["status"] == "CONFIRMED"
-                assert _ok(client.post(
-                    f"/api/workbench/chapters/{chapter['id']}/run",
-                    json={"executor": "stub"},
-                ))["status"] == "COMPLETED"
-                blocks = _ok(client.get(
-                    f"/api/workbench/chapters/{chapter['id']}/note-blocks"
-                ))
+                assert (
+                    _ok(client.post(f"/api/workbench/chapters/{chapter['id']}/confirm"))["status"]
+                    == "CONFIRMED"
+                )
+                assert (
+                    _ok(
+                        client.post(
+                            f"/api/workbench/chapters/{chapter['id']}/run",
+                            json={"executor": "stub"},
+                        )
+                    )["status"]
+                    == "COMPLETED"
+                )
+                blocks = _ok(client.get(f"/api/workbench/chapters/{chapter['id']}/note-blocks"))
                 assert {block["kind"] for block in blocks} == {
                     "summary",
                     "concepts",
@@ -152,10 +170,12 @@ def test_real_uvicorn_multi_textbook_topic_fusion_survives_restart(tmp_path):
                     "reflection",
                 }
 
-        generated = _ok(client.post(
-            f"/api/workbench/courses/{course['id']}/topics/generate",
-            json={"executor": "stub"},
-        ))
+        generated = _ok(
+            client.post(
+                f"/api/workbench/courses/{course['id']}/topics/generate",
+                json={"executor": "stub"},
+            )
+        )
         assert len(generated) == 4
         shared_chapter_id = chapters_by_source[0][0]["id"]
         mappings = [
@@ -163,10 +183,12 @@ def test_real_uvicorn_multi_textbook_topic_fusion_survives_restart(tmp_path):
             [shared_chapter_id, chapters_by_source[1][1]["id"]],
         ]
         topics = [
-            _ok(client.put(
-                f"/api/workbench/topics/{topic['id']}/chapters",
-                json={"chapter_ids": chapter_ids},
-            ))
+            _ok(
+                client.put(
+                    f"/api/workbench/topics/{topic['id']}/chapters",
+                    json={"chapter_ids": chapter_ids},
+                )
+            )
             for topic, chapter_ids in zip(generated[:2], mappings, strict=True)
         ]
         for unused in generated[2:]:
@@ -176,9 +198,14 @@ def test_real_uvicorn_multi_textbook_topic_fusion_survives_restart(tmp_path):
         assert len(confirmed) == 2
         assert all(topic["confirmed"] for topic in confirmed)
         for topic in confirmed:
-            assert _ok(client.post(
-                f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"}
-            ))["status"] == "COMPLETED"
+            assert (
+                _ok(
+                    client.post(
+                        f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"}
+                    )
+                )["status"]
+                == "COMPLETED"
+            )
     finally:
         _stop_server(process, client)
 
@@ -203,21 +230,29 @@ def test_real_uvicorn_multi_textbook_topic_fusion_survives_restart(tmp_path):
             assert markdown.count("```mermaid") == 2
             snapshots[topic["id"]] = (blocks, cards, markdown)
 
-        assert _ok(client.post(
-            f"/api/workbench/chapters/{shared_chapter_id}/confirm"
-        ))["status"] == "CONFIRMED"
-        assert _ok(client.post(
-            f"/api/workbench/chapters/{shared_chapter_id}/run", json={"executor": "stub"}
-        ))["status"] == "COMPLETED"
+        assert (
+            _ok(client.post(f"/api/workbench/chapters/{shared_chapter_id}/confirm"))["status"]
+            == "CONFIRMED"
+        )
+        assert (
+            _ok(
+                client.post(
+                    f"/api/workbench/chapters/{shared_chapter_id}/run", json={"executor": "stub"}
+                )
+            )["status"]
+            == "COMPLETED"
+        )
         stale = _ok(client.get(f"/api/workbench/courses/{course['id']}/topics"))
         assert [topic["status"] for topic in stale] == ["STALE", "STALE"]
         for topic in stale:
-            assert _ok(client.get(
-                f"/api/workbench/topics/{topic['id']}/note-blocks"
-            )) == snapshots[topic["id"]][0]
-            assert _ok(client.get(
-                f"/api/workbench/topics/{topic['id']}/cards"
-            )) == snapshots[topic["id"]][1]
+            assert (
+                _ok(client.get(f"/api/workbench/topics/{topic['id']}/note-blocks"))
+                == snapshots[topic["id"]][0]
+            )
+            assert (
+                _ok(client.get(f"/api/workbench/topics/{topic['id']}/cards"))
+                == snapshots[topic["id"]][1]
+            )
             topic_dir = next((course_root / "课程主题").glob(f"{topic['seq'] + 1:02d}-*"))
             current_markdown = (topic_dir / "intensive-note.md").read_text(encoding="utf-8")
             assert current_markdown == snapshots[topic["id"]][2]

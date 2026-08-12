@@ -71,10 +71,7 @@ _MAX_LANGUAGE_LENGTH = 64
 
 
 def canonical_language_config(languages: list[str] | tuple[str, ...]) -> tuple[str, ...]:
-    if (
-        not isinstance(languages, list | tuple)
-        or len(languages) > _MAX_LANGUAGE_COUNT
-    ):
+    if not isinstance(languages, list | tuple) or len(languages) > _MAX_LANGUAGE_COUNT:
         raise PageCacheError("invalid language configuration")
     normalized = []
     for language in languages:
@@ -203,9 +200,7 @@ class PageCache:
                     _fsync_directory(self.source_snapshots_dir)
                     linked_new_target = True
                 try:
-                    snapshot = self.validate_source_snapshot(
-                        target, pdf_sha256, verify_hash=True
-                    )
+                    snapshot = self.validate_source_snapshot(target, pdf_sha256, verify_hash=True)
                 except Exception:
                     _quarantine_named_entry(self.source_snapshots_dir, target.name)
                     if linked_new_target:
@@ -720,9 +715,7 @@ def _validate_observations(value: Any) -> tuple[dict[str, Any], ...]:
             "bounding_box": bounding_box,
             "candidates": candidates,
         }
-        marker = json.dumps(
-            normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        )
+        marker = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         if marker in seen:
             raise PageCacheError("invalid helper response")
         seen.add(marker)

@@ -113,9 +113,7 @@ def _generated(base):
 
 def _accepted_base_note():
     tree, confirmation, pages = _inputs()
-    return build_intensive_reading_note(
-        tree, confirmation, pages, source_id="book-1"
-    )
+    return build_intensive_reading_note(tree, confirmation, pages, source_id="book-1")
 
 
 class FakeClient:

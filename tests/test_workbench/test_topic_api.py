@@ -940,9 +940,9 @@ def test_generate_stub_disambiguates_same_chapter_titles_from_multiple_textbooks
         f"/api/workbench/courses/{course['id']}/sources",
         json={"kind": "main", "file_path": str(second_source_path), "title": "Book B"},
     ).json()
-    second_chapter = c.post(
-        f"/api/workbench/sources/{second_source['id']}/detect-chapters"
-    ).json()[0]
+    second_chapter = c.post(f"/api/workbench/sources/{second_source['id']}/detect-chapters").json()[
+        0
+    ]
     c.post(f"/api/workbench/chapters/{second_chapter['id']}/confirm")
     for chapter in [*chapters, second_chapter]:
         c.post(f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"})

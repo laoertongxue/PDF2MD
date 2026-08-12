@@ -511,13 +511,14 @@ def test_storage_write_does_not_commit_outer_transaction(tmp_path):
 
     assert conn.in_transaction is True
     conn.rollback()
-    assert observer.execute(
-        "SELECT COUNT(*) FROM tasks WHERE id = 'outer-task'"
-    ).fetchone()[0] == 0
-    assert observer.execute(
-        "SELECT description FROM wb_courses WHERE id = ?",
-        (course.id,),
-    ).fetchone()[0] == ""
+    assert observer.execute("SELECT COUNT(*) FROM tasks WHERE id = 'outer-task'").fetchone()[0] == 0
+    assert (
+        observer.execute(
+            "SELECT description FROM wb_courses WHERE id = ?",
+            (course.id,),
+        ).fetchone()[0]
+        == ""
+    )
     observer.close()
     conn.close()
 
@@ -660,9 +661,10 @@ def test_deferred_foreign_key_commit_failure_rolls_back_before_next_write(tmp_pa
         storage.create_section(invalid)
 
     assert conn.in_transaction is False
-    assert conn.execute(
-        "SELECT COUNT(*) FROM sections WHERE id = 'invalid-section'"
-    ).fetchone()[0] == 0
+    assert (
+        conn.execute("SELECT COUNT(*) FROM sections WHERE id = 'invalid-section'").fetchone()[0]
+        == 0
+    )
     storage.create_task(make_task())
     valid = Section(
         id="valid-section",
@@ -676,9 +678,10 @@ def test_deferred_foreign_key_commit_failure_rolls_back_before_next_write(tmp_pa
     )
     storage.create_section(valid)
     observer = sqlite3.connect(db_path)
-    assert observer.execute(
-        "SELECT task_id FROM sections WHERE id = 'valid-section'"
-    ).fetchone()[0] == "t1"
+    assert (
+        observer.execute("SELECT task_id FROM sections WHERE id = 'valid-section'").fetchone()[0]
+        == "t1"
+    )
     observer.close()
     conn.close()
 

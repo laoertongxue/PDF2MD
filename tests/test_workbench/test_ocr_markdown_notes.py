@@ -97,10 +97,14 @@ def _inputs() -> tuple[dict, dict, list[dict]]:
         "chapter": chapter,
         "chapter_fingerprint": _chapter_fingerprint(chapter),
     }
-    return tree, confirmation, [
-        _page(2, "第一章 战略管理", "战略是组织的长期方向。"),
-        _page(3, "选择决定资源配置。"),
-    ]
+    return (
+        tree,
+        confirmation,
+        [
+            _page(2, "第一章 战略管理", "战略是组织的长期方向。"),
+            _page(3, "选择决定资源配置。"),
+        ],
+    )
 
 
 def test_builds_stable_note_with_citations_slots_and_previewable_mermaid():
@@ -138,8 +142,8 @@ def test_builds_stable_note_with_citations_slots_and_previewable_mermaid():
 @pytest.mark.parametrize(
     "source",
     [
-        "flowchart TD\n  A[\"开始\"] --> B[\"结束\"]",
-        "graph LR\n  A[\"概念\"] --- B[\"应用\"]",
+        'flowchart TD\n  A["开始"] --> B["结束"]',
+        'graph LR\n  A["概念"] --- B["应用"]',
         "mindmap\n  root((主题))\n    概念",
     ],
 )
@@ -151,7 +155,7 @@ def test_mermaid_whitelist_is_renderable(source):
     "source",
     [
         "sequenceDiagram\n  A->>B: hi",
-        "flowchart TD\n  A[\"<script>alert(1)</script>\"]",
+        'flowchart TD\n  A["<script>alert(1)</script>"]',
         "flowchart TD\n  A --> B\n```",
     ],
 )

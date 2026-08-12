@@ -512,9 +512,7 @@ def test_cache_hit_verifies_metadata_and_hash_then_rebuilds_corruption(
 def test_cache_publish_is_atomic_and_concurrent_same_key_calls_helper_once(
     tmp_path, fake_helper, pdf, monkeypatch
 ):
-    client, log = _client(
-        tmp_path, fake_helper, pdf, monkeypatch=monkeypatch, post_sleep=0.2
-    )
+    client, log = _client(tmp_path, fake_helper, pdf, monkeypatch=monkeypatch, post_sleep=0.2)
     results = []
     errors = []
 
@@ -656,9 +654,7 @@ def test_registered_pdf_detects_rebinding_after_nofollow_open(
 def test_cache_lock_file_is_stable_coordination_inode_after_failure(
     tmp_path, fake_helper, pdf, monkeypatch
 ):
-    client, log = _client(
-        tmp_path, fake_helper, pdf, monkeypatch=monkeypatch, mode="exit_nonzero"
-    )
+    client, log = _client(tmp_path, fake_helper, pdf, monkeypatch=monkeypatch, mode="exit_nonzero")
 
     with pytest.raises(VisionClientError):
         _recognize(client, pdf)
@@ -817,9 +813,7 @@ def test_timeout_cleans_group_when_parent_exits_but_child_holds_pipes(
     assert str(error.value) == "vision helper timed out"
     events = _events(log)
     child_pid = next(
-        event["child_pid"]
-        for event in events
-        if event["event"] == "pipe_holder_spawned"
+        event["child_pid"] for event in events if event["event"] == "pipe_holder_spawned"
     )
     try:
         assert _wait_until_gone(child_pid)
@@ -874,9 +868,7 @@ def test_helper_without_owner_execute_bit_is_rejected_at_initialization(
         _client(tmp_path, fake_helper, pdf, monkeypatch=monkeypatch)
 
 
-def test_helper_replacement_after_client_init_is_rejected(
-    tmp_path, fake_helper, pdf, monkeypatch
-):
+def test_helper_replacement_after_client_init_is_rejected(tmp_path, fake_helper, pdf, monkeypatch):
     client, log = _client(tmp_path, fake_helper, pdf, monkeypatch=monkeypatch)
     _write_fake_helper(fake_helper, label="replaced")
     _configure_helper(fake_helper, log=log, label="replaced")
@@ -887,9 +879,7 @@ def test_helper_replacement_after_client_init_is_rejected(
     assert not any(event["event"] == "command" for event in _events(log))
 
 
-def test_helper_symlink_after_client_init_is_rejected(
-    tmp_path, fake_helper, pdf, monkeypatch
-):
+def test_helper_symlink_after_client_init_is_rejected(tmp_path, fake_helper, pdf, monkeypatch):
     client, log = _client(tmp_path, fake_helper, pdf, monkeypatch=monkeypatch)
     target = _write_fake_helper(tmp_path / "replacement_helper.py", label="symlink-target")
     _configure_helper(target, log=log, label="symlink-target")
@@ -1013,9 +1003,7 @@ def test_helper_response_size_boundaries_are_rejected(
         _recognize(client, pdf)
 
 
-def test_cache_metadata_rejects_extra_fields_and_rebuilds(
-    tmp_path, fake_helper, pdf, monkeypatch
-):
+def test_cache_metadata_rejects_extra_fields_and_rebuilds(tmp_path, fake_helper, pdf, monkeypatch):
     client, log = _client(tmp_path, fake_helper, pdf, monkeypatch=monkeypatch)
     _recognize(client, pdf)
     meta_path = next((tmp_path / "cache" / "pages").rglob("meta.json"))
@@ -1048,9 +1036,7 @@ def test_cache_metadata_binds_image_name_to_expected_hash_filename(
     assert list((tmp_path / "cache").rglob("*.corrupt-*"))
 
 
-def test_cache_image_hardlink_is_rejected_and_rebuilt(
-    tmp_path, fake_helper, pdf, monkeypatch
-):
+def test_cache_image_hardlink_is_rejected_and_rebuilt(tmp_path, fake_helper, pdf, monkeypatch):
     client, log = _client(tmp_path, fake_helper, pdf, monkeypatch=monkeypatch)
     first = _recognize(client, pdf)
     linked = Path(first.image_path).with_name("linked.image")
@@ -1063,9 +1049,7 @@ def test_cache_image_hardlink_is_rejected_and_rebuilt(
 
 
 @pytest.mark.parametrize("failure", [PermissionError, ProcessLookupError])
-def test_process_group_cleanup_falls_back_when_killpg_races(
-    monkeypatch, failure
-):
+def test_process_group_cleanup_falls_back_when_killpg_races(monkeypatch, failure):
     from parsing_core.workbench.ocr import vision
 
     class StubProcess:
@@ -1154,9 +1138,7 @@ def test_source_snapshot_corrupt_existing_target_is_removed_and_rebuilt(tmp_path
     assert snapshot.path.stat().st_nlink == 1
 
 
-def test_unrepairable_source_snapshot_failure_cleans_target_and_temporary(
-    tmp_path, monkeypatch
-):
+def test_unrepairable_source_snapshot_failure_cleans_target_and_temporary(tmp_path, monkeypatch):
     from parsing_core.workbench.ocr import page_cache
 
     cache = PageCache(tmp_path / "cache")
@@ -1254,9 +1236,7 @@ def test_language_raw_length_is_checked_before_strip(tmp_path, fake_helper, pdf,
     assert not any(event["event"] == "command" for event in _events(log))
 
 
-def test_language_input_with_small_padding_is_normalized(
-    tmp_path, fake_helper, pdf, monkeypatch
-):
+def test_language_input_with_small_padding_is_normalized(tmp_path, fake_helper, pdf, monkeypatch):
     client, log = _client(tmp_path, fake_helper, pdf, monkeypatch=monkeypatch)
 
     _recognize(client, pdf, languages=[" en-US ", " zh-Hans "])
@@ -1265,9 +1245,7 @@ def test_language_input_with_small_padding_is_normalized(
     assert command["command"]["languages"] == ["en-US", "zh-Hans"]
 
 
-def test_thread_lock_map_releases_entry_after_lock_use(
-    tmp_path, fake_helper, pdf, monkeypatch
-):
+def test_thread_lock_map_releases_entry_after_lock_use(tmp_path, fake_helper, pdf, monkeypatch):
     from parsing_core.workbench.ocr import page_cache
 
     with page_cache._THREAD_LOCKS_GUARD:
@@ -1289,7 +1267,9 @@ def _bundled_swift_helper_path() -> Path | None:
     }.get(machine)
     candidates = [
         Path("parsing-core-app/src-tauri/target/debug/vision-ocr"),
-        Path("parsing-core-app/src-tauri/target/debug/bundle/macos/PDF2MD.app/Contents/MacOS/vision-ocr"),
+        Path(
+            "parsing-core-app/src-tauri/target/debug/bundle/macos/PDF2MD.app/Contents/MacOS/vision-ocr"
+        ),
     ]
     if binary_name is not None:
         candidates.insert(0, Path("parsing-core-app/src-tauri/binaries") / binary_name)

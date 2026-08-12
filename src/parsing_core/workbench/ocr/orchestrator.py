@@ -316,8 +316,13 @@ class OcrOrchestrator:
             _validate_decision(_value(current["decision"], "payload"), page, width, height)
         current["page_input_fingerprint"] = input_fingerprint
         current["evidence_fingerprint"] = _fingerprint(
-            {"vision": vision, "codex": codex, "alignment": alignment, "baidu": baidu_observation,
-             "decision": current["decision"]}
+            {
+                "vision": vision,
+                "codex": codex,
+                "alignment": alignment,
+                "baidu": baidu_observation,
+                "decision": current["decision"],
+            }
         )
         current["status"] = PageStatus.COMPLETED.value
         current.pop("error", None)
@@ -386,8 +391,9 @@ class OcrOrchestrator:
             codex_payload = _value(codex_record, "payload")
             if not isinstance(apple, dict) or not isinstance(codex_payload, dict):
                 return False
-            _validate_apple_observation(apple, page, _value(vision, "width"),
-                                        _value(vision, "height"), image_hash)
+            _validate_apple_observation(
+                apple, page, _value(vision, "width"), _value(vision, "height"), image_hash
+            )
             validate_persisted_payload(
                 codex_payload,
                 kind="transcription",
@@ -397,10 +403,12 @@ class OcrOrchestrator:
             )
             if apple.get("input_fingerprint") != image_hash:
                 return False
-            codex = _codex_observation(codex_payload, image_hash, page,
-                                       _value(vision, "width"), _value(vision, "height"))
-            page_input = _fingerprint({"batch": state["input_fingerprint"], "page": page,
-                                       "image_sha256": image_hash})
+            codex = _codex_observation(
+                codex_payload, image_hash, page, _value(vision, "width"), _value(vision, "height")
+            )
+            page_input = _fingerprint(
+                {"batch": state["input_fingerprint"], "page": page, "image_sha256": image_hash}
+            )
             expected_alignment = _alignment_payload(
                 apple,
                 codex,
@@ -436,9 +444,15 @@ class OcrOrchestrator:
                 width=_value(vision, "width"),
                 height=_value(vision, "height"),
             )
-            expected = _fingerprint({"vision": vision, "codex": codex,
-                                     "alignment": alignment, "baidu": baidu_response,
-                                     "decision": decision_record})
+            expected = _fingerprint(
+                {
+                    "vision": vision,
+                    "codex": codex,
+                    "alignment": alignment,
+                    "baidu": baidu_response,
+                    "decision": decision_record,
+                }
+            )
             return current.get("evidence_fingerprint") == expected
         except (KeyError, TypeError, ValueError, CodexVisionError):
             return False
@@ -552,10 +566,7 @@ class OcrOrchestrator:
     def _is_contiguous(pages):
         if not pages or len(set(pages)) != len(pages) or any(page < 1 for page in pages):
             return False
-        return (
-            list(pages)
-            == list(range(pages[0], pages[0] + len(pages)))
-        )
+        return list(pages) == list(range(pages[0], pages[0] + len(pages)))
 
     @staticmethod
     def _load_image(path):
@@ -697,9 +708,7 @@ def _alignment_payload(
             "page_hash": page_hash,
             "input_fingerprint": input_fingerprint,
             "status": status,
-            "baidu_required": needs_baidu(
-                page_hash, page, status, sample_rate=sample_rate
-            ),
+            "baidu_required": needs_baidu(page_hash, page, status, sample_rate=sample_rate),
             "conflicts": [asdict(conflict) for conflict in comparison.conflicts],
             "matched_blocks": comparison.matched_blocks,
         }

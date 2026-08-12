@@ -117,7 +117,7 @@ def test_baidu_client_rejects_directly_forged_authorization():
 def test_baidu_client_rejects_copied_or_unpickled_authorization(clone):
     authorization = _authorization()
     cloned = clone(pickle.dumps(authorization)) if clone is pickle.loads else clone(authorization)
-    client = BaiduOcrClient(api_key="secret-key", transport=lambda _request: (200, b'{}'))
+    client = BaiduOcrClient(api_key="secret-key", transport=lambda _request: (200, b"{}"))
 
     with pytest.raises(BaiduOcrError, match="authorization"):
         client.recognize(
@@ -132,7 +132,7 @@ def test_baidu_client_rejects_copied_or_unpickled_authorization(clone):
 
 def test_baidu_client_rejects_object_new_authorization():
     forged = object.__new__(BaiduEscalationAuthorization)
-    client = BaiduOcrClient(api_key="secret-key", transport=lambda _request: (200, b'{}'))
+    client = BaiduOcrClient(api_key="secret-key", transport=lambda _request: (200, b"{}"))
 
     with pytest.raises(BaiduOcrError, match="authorization"):
         client.recognize(
@@ -223,9 +223,7 @@ def test_baidu_authorization_is_consumed_after_matching_validation():
         "alignment_status": "conflict",
     }
 
-    assert client.recognize(b"123", authorization=authorization, **context) == {
-        "result": []
-    }
+    assert client.recognize(b"123", authorization=authorization, **context) == {"result": []}
     with pytest.raises(BaiduOcrError, match="authorization"):
         client.recognize(b"123", authorization=authorization, **context)
     assert calls == [1]

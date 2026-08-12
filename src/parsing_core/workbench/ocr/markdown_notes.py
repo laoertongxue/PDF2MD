@@ -74,15 +74,11 @@ class _BuildCredential:
         raise TypeError("build credential cannot be serialized")
 
 
-_ACCEPTED_NOTE_REFS: dict[
-    int, tuple[weakref.ReferenceType[AcceptedIntensiveReadingNote], str]
-] = {}
+_ACCEPTED_NOTE_REFS: dict[int, tuple[weakref.ReferenceType[AcceptedIntensiveReadingNote], str]] = {}
 _LIVE_BUILD_CREDENTIALS: dict[int, tuple[_BuildCredential, int]] = {}
 
 
-def _register_built_note(
-    note: AcceptedIntensiveReadingNote, credential: _BuildCredential
-) -> None:
+def _register_built_note(note: AcceptedIntensiveReadingNote, credential: _BuildCredential) -> None:
     if type(note) is not AcceptedIntensiveReadingNote or type(credential) is not _BuildCredential:
         raise MarkdownNoteError("note was not built by the accepted OCR builder")
     live = _LIVE_BUILD_CREDENTIALS.pop(id(credential), None)
@@ -195,13 +191,15 @@ def build_intensive_reading_note(
     metadata["note_fingerprint"] = _digest(
         {"metadata": metadata, "sections": sections, "mermaid": mermaid}
     )
-    note = AcceptedIntensiveReadingNote({
-        "schema_version": NOTE_SCHEMA_VERSION,
-        "metadata": metadata,
-        "sections": sections,
-        "mermaid": mermaid,
-        "markdown": _render_markdown(chapter, metadata, sections, mermaid),
-    })
+    note = AcceptedIntensiveReadingNote(
+        {
+            "schema_version": NOTE_SCHEMA_VERSION,
+            "metadata": metadata,
+            "sections": sections,
+            "mermaid": mermaid,
+            "markdown": _render_markdown(chapter, metadata, sections, mermaid),
+        }
+    )
     validate_intensive_reading_note(note)
     credential = _BuildCredential()
     _LIVE_BUILD_CREDENTIALS[id(credential)] = (credential, id(note))
@@ -407,14 +405,14 @@ def _render_markdown(chapter, metadata, sections, mermaid):
 
 def _concept_mermaid(title: str) -> str:
     label = _mermaid_label(title)
-    return f"flowchart TD\n  A[\"{label}\"] --> B[\"核心概念\"]\n  B --> C[\"案例与应用\"]"
+    return f'flowchart TD\n  A["{label}"] --> B["核心概念"]\n  B --> C["案例与应用"]'
 
 
 def _application_mermaid(title: str) -> str:
     label = _mermaid_label(title)
     return (
-        f"flowchart LR\n  A[\"识别 {label}\"] --> B[\"分析问题\"]\n"
-        "  B --> C[\"选择行动\"]\n  C --> D[\"复盘结果\"]"
+        f'flowchart LR\n  A["识别 {label}"] --> B["分析问题"]\n'
+        '  B --> C["选择行动"]\n  C --> D["复盘结果"]'
     )
 
 
@@ -448,9 +446,7 @@ def _page_number(record: Mapping[str, Any]) -> int:
 
 
 def _digest(value: Any) -> str:
-    encoded = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode()
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 

@@ -20,40 +20,43 @@ def _complete_workflow_fixture(tmp_path: Path):
     state_root = tmp_path / "ocr-state"
     final = json.loads((state_root / "batch-final.json").read_text(encoding="utf-8"))
     page = final["pages"]["1"]
-    markdown = "\n".join(
-        [
-            "# 1 战略管理",
-            f"> 输入指纹：`{final['input_fingerprint']}`",
-            "> 章节指纹：`chapter-fingerprint`",
-            f"> OCR 证据指纹：`{page['evidence_fingerprint']}`",
-            "> 精读规则版本：`mba-intensive-reading-v1`",
-            "> 模型：`deepseek-v4-pro`",
-            "> Prompt 指纹：`prompt-fingerprint`",
-            "",
-            "## 原文证据",
-            "[src:test:p1:codex-block]",
-            "## 核心概念",
-            "概念内容",
-            "## 通俗、有趣、生活化的解释",
-            "生活化解释",
-            "## 教材案例解读",
-            "案例内容",
-            "## 实际例子与问题解决",
-            "问题解决",
-            "## 实际应用",
-            "应用内容",
-            "## 知识结构图",
-            "```mermaid",
-            "flowchart TD",
-            "  A[概念] --> B[应用]",
-            "```",
-            "## 应用流程图",
-            "```mermaid",
-            "flowchart LR",
-            "  A[识别] --> B[行动]",
-            "```",
-        ]
-    ) + "\n"
+    markdown = (
+        "\n".join(
+            [
+                "# 1 战略管理",
+                f"> 输入指纹：`{final['input_fingerprint']}`",
+                "> 章节指纹：`chapter-fingerprint`",
+                f"> OCR 证据指纹：`{page['evidence_fingerprint']}`",
+                "> 精读规则版本：`mba-intensive-reading-v1`",
+                "> 模型：`deepseek-v4-pro`",
+                "> Prompt 指纹：`prompt-fingerprint`",
+                "",
+                "## 原文证据",
+                "[src:test:p1:codex-block]",
+                "## 核心概念",
+                "概念内容",
+                "## 通俗、有趣、生活化的解释",
+                "生活化解释",
+                "## 教材案例解读",
+                "案例内容",
+                "## 实际例子与问题解决",
+                "问题解决",
+                "## 实际应用",
+                "应用内容",
+                "## 知识结构图",
+                "```mermaid",
+                "flowchart TD",
+                "  A[概念] --> B[应用]",
+                "```",
+                "## 应用流程图",
+                "```mermaid",
+                "flowchart LR",
+                "  A[识别] --> B[行动]",
+                "```",
+            ]
+        )
+        + "\n"
+    )
     (state_root / "intensive-reading.md").write_text(markdown, encoding="utf-8")
     final.update(
         {

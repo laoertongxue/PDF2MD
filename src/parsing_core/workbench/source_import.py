@@ -335,9 +335,7 @@ class TextbookImportBatch:
                 return record
             except FileExistsError as exc:
                 if not self._remove_journal(record):
-                    raise CourseStorageError(
-                        "course storage could not complete import"
-                    ) from exc
+                    raise CourseStorageError("course storage could not complete import") from exc
                 self._records.remove(record)
                 index += 1
             except OSError as exc:

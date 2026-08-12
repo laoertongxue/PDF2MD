@@ -20,7 +20,9 @@ class DeepSeekError(RuntimeError):
 
 
 class DeepSeekClient:
-    def __init__(self, api_key: str, model: str, base_url: str = "https://api.deepseek.com/chat/completions"):
+    def __init__(
+        self, api_key: str, model: str, base_url: str = "https://api.deepseek.com/chat/completions"
+    ):
         if not api_key:
             raise DeepSeekError("deepseek api key missing")
         if model != MODEL_NAME:

@@ -2,9 +2,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 OcrEngine = Literal["apple_vision", "codex_vision", "baidu_pp_structure"]
-OcrDecisionStatus = Literal[
-    "direct", "automated_adjudicated", "waiting_resource", "failed"
-]
+OcrDecisionStatus = Literal["direct", "automated_adjudicated", "waiting_resource", "failed"]
 PageBlockType = Literal[
     "title", "body", "page_number", "footnote", "table", "formula", "image", "text"
 ]

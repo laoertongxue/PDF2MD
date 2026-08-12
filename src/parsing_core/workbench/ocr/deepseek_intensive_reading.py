@@ -195,8 +195,7 @@ def _finalize_generated_note(
     expected_by_key = {item[0]: item for item in SECTION_ORDER}
     expected_section_keys = [item[0] for item in SECTION_ORDER]
     actual_section_keys = [
-        section.get("key") if isinstance(section, Mapping) else None
-        for section in sections
+        section.get("key") if isinstance(section, Mapping) else None for section in sections
     ]
     if actual_section_keys != expected_section_keys:
         raise DeepSeekGenerationError("generated note sections are out of order")

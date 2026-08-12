@@ -87,9 +87,7 @@ def status_payload(
         paths.final, paths.note, source_path
     )
     public_status = (
-        WorkflowStatus.BLOCKED
-        if status is WorkflowStatus.COMPLETED and not published
-        else status
+        WorkflowStatus.BLOCKED if status is WorkflowStatus.COMPLETED and not published else status
     )
     return {
         "status": public_status.value,
@@ -102,9 +100,7 @@ def status_payload(
     }
 
 
-def _final_publication_is_valid(
-    final_path: Path, note_path: Path, source_path: str | Path
-) -> bool:
+def _final_publication_is_valid(final_path: Path, note_path: Path, source_path: str | Path) -> bool:
     try:
         final = _read_regular_json(final_path)
         if final.get("status") != BatchStatus.COMPLETED.value:
@@ -133,9 +129,7 @@ def _final_publication_is_valid(
             if not isinstance(alignment, dict):
                 return False
             sample_rate = 0.05 if alignment.get("baidu_required") else 0.0
-            if not validator._completed_evidence_is_valid(
-                final, record, page, sample_rate
-            ):
+            if not validator._completed_evidence_is_valid(final, record, page, sample_rate):
                 return False
         return _markdown_publication_is_valid(final, note_path, input_fingerprint)
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -163,9 +157,10 @@ def _markdown_publication_is_valid(
         return False
     if final.get("markdown_sha256") != hashlib.sha256(markdown.encode("utf-8")).hexdigest():
         return False
-    if final.get("model") != "deepseek-v4-pro" or final.get(
-        "ruleset"
-    ) != "mba-intensive-reading-v1":
+    if (
+        final.get("model") != "deepseek-v4-pro"
+        or final.get("ruleset") != "mba-intensive-reading-v1"
+    ):
         return False
     if final.get("note_input_fingerprint") != input_fingerprint:
         return False
@@ -227,12 +222,8 @@ def bind_published_note(
             "note_evidence_fingerprint": metadata.get("evidence_fingerprint", ""),
         }
     )
-    encoded = json.dumps(
-        final, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode()
-    fd, temp_name = tempfile.mkstemp(
-        prefix=".batch-final-note.", dir=Path(final_path).parent
-    )
+    encoded = json.dumps(final, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    fd, temp_name = tempfile.mkstemp(prefix=".batch-final-note.", dir=Path(final_path).parent)
     try:
         os.write(fd, encoded)
         os.fsync(fd)
@@ -354,18 +345,16 @@ class OcrWorkflow:
         except Exception as exc:
             with self._lock:
                 self._status = (
-                    WorkflowStatus.CANCELLED
-                    if self._cancel.is_set()
-                    else WorkflowStatus.FAILED
+                    WorkflowStatus.CANCELLED if self._cancel.is_set() else WorkflowStatus.FAILED
                 )
                 self._error = _safe_error(exc)
 
     def detect_chapters(self) -> dict[str, Any]:
         with self._lock:
             current = self._status
-        if (
-            current is WorkflowStatus.IDLE
-            and self._persisted_status() == (WorkflowStatus.COMPLETED, None)
+        if current is WorkflowStatus.IDLE and self._persisted_status() == (
+            WorkflowStatus.COMPLETED,
+            None,
         ):
             current = WorkflowStatus.COMPLETED
         if current is not WorkflowStatus.COMPLETED:

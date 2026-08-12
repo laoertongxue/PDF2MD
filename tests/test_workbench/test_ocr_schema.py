@@ -98,8 +98,7 @@ def _database_snapshot(conn: sqlite3.Connection):
         )
     ]
     rows = {
-        table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
-        for table in tables
+        table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in tables
     }
     return schema, rows
 
@@ -110,10 +109,7 @@ def test_ocr_schema_is_idempotent(tmp_path):
     apply_workbench_schema(conn)
     apply_workbench_schema(conn)
 
-    names = {
-        row[0]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-    }
+    names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert OCR_TABLES <= names
 
 
@@ -547,16 +543,16 @@ def test_ocr_schema_recovers_interrupted_partial_migration(tmp_path):
     apply_workbench_schema(conn)
 
     assert conn.execute("SELECT id FROM wb_ocr_pages").fetchone()[0] == "page-1"
-    assert conn.execute(
-        "SELECT id, engine_config_hash FROM wb_ocr_observations"
-    ).fetchone() == ("observation-1", "")
+    assert conn.execute("SELECT id, engine_config_hash FROM wb_ocr_observations").fetchone() == (
+        "observation-1",
+        "",
+    )
     assert conn.execute("SELECT page_id, decided_at FROM wb_ocr_decisions").fetchone() == (
         "page-1",
         0,
     )
     assert OCR_TABLES <= {
-        row[0]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
 
 
@@ -601,8 +597,7 @@ def test_ocr_schema_rebuild_preserves_all_populated_tables(tmp_path):
     apply_workbench_schema(conn)
 
     assert {
-        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        for table in OCR_TABLES
+        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in OCR_TABLES
     } == {
         "wb_ocr_pages": 1,
         "wb_ocr_observations": 2,
@@ -1129,9 +1124,11 @@ def test_ocr_models_construct_from_schema_rows(tmp_path):
     )
 
     page = OcrPage(**dict(conn.execute("SELECT * FROM wb_ocr_pages").fetchone()))
-    observation = OcrObservation(**dict(conn.execute(
-        "SELECT * FROM wb_ocr_observations WHERE id = 'observation-1'"
-    ).fetchone()))
+    observation = OcrObservation(
+        **dict(
+            conn.execute("SELECT * FROM wb_ocr_observations WHERE id = 'observation-1'").fetchone()
+        )
+    )
     diff = OcrDiff(**dict(conn.execute("SELECT * FROM wb_ocr_diffs").fetchone()))
     decision = OcrDecision(**dict(conn.execute("SELECT * FROM wb_ocr_decisions").fetchone()))
     block = PageBlock(**dict(conn.execute("SELECT * FROM wb_page_blocks").fetchone()))

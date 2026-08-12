@@ -651,9 +651,7 @@ def test_version_probe_timeout_kills_parent_and_child(tmp_path):
         ("exit_nonzero", "codex cli failed"),
     ],
 )
-def test_stdout_stderr_result_limits_and_errors_are_sanitized(
-    tmp_path, page_image, mode, message
-):
+def test_stdout_stderr_result_limits_and_errors_are_sanitized(tmp_path, page_image, mode, message):
     fake_codex = _write_fake_codex(tmp_path / "fake_codex.py", mode=mode)
     executor = _executor(fake_codex, tmp_path)
 
@@ -671,6 +669,7 @@ def test_stdout_stderr_result_limits_and_errors_are_sanitized(
 def test_result_json_rejects_symlink_and_fifo_without_blocking(tmp_path, page_image, mode):
     fake_codex = _write_fake_codex(tmp_path / "fake_codex.py", mode=mode)
     executor = _executor(fake_codex, tmp_path, timeout=0.5)
+
     def raise_if_blocked(_signum, _frame):
         raise AssertionError("result reader blocked")
 

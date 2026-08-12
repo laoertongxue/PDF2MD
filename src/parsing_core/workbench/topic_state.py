@@ -13,6 +13,7 @@ COMPLETED = "COMPLETED"
 STALE = "STALE"
 FAILED = "FAILED"
 
+
 @dataclass(frozen=True)
 class TopicReadiness:
     status: str
@@ -32,9 +33,7 @@ def evaluate_topic_readiness(
         return TopicReadiness(DRAFT, [])
 
     blocking_ids = [
-        chapter_id
-        for chapter_id, status, stale in reviews
-        if status != "DONE" or stale
+        chapter_id for chapter_id, status, stale in reviews if status != "DONE" or stale
     ]
     blocking_ids = list(dict.fromkeys(blocking_ids))
     if blocking_ids:

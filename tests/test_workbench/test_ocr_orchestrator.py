@@ -92,8 +92,19 @@ class FakeEngines:
             "observations": [_observation("baidu_pp_structure")],
         }
 
-    def _adjudicate(self, image_path, *, page_number, width, height, codex_observation,
-                    apple_observation, diff, baidu_observation=None, **kwargs):
+    def _adjudicate(
+        self,
+        image_path,
+        *,
+        page_number,
+        width,
+        height,
+        codex_observation,
+        apple_observation,
+        diff,
+        baidu_observation=None,
+        **kwargs,
+    ):
         self.calls.append(f"adjudicate:{page_number}")
         return SimpleNamespace(
             payload={
@@ -185,8 +196,10 @@ def test_failed_page_is_resumable_without_repeating_completed_vision(tmp_path):
 
 def test_cancel_stops_before_final_publish(tmp_path):
     engines = FakeEngines()
+
     def cancelled():
         return True
+
     result = _orchestrator(tmp_path, engines, is_cancelled=cancelled).run_batch(
         engines.pdf_path, pages=[1], dpi=300, languages=["zh-Hans"], sample_rate=0
     )
@@ -295,7 +308,7 @@ def test_same_path_with_replaced_pdf_content_does_not_reuse_page_results(tmp_pat
     second = _run(orchestrator, engines)
 
     assert second.status is BatchStatus.COMPLETED
-    assert engines.calls[len(first_calls):] == ["vision:1", "codex:1", "adjudicate:1"]
+    assert engines.calls[len(first_calls) :] == ["vision:1", "codex:1", "adjudicate:1"]
 
 
 def test_resume_rechecks_complete_evidence_and_reruns_when_decision_is_missing(tmp_path):
@@ -316,14 +329,15 @@ def test_resume_rechecks_complete_evidence_and_reruns_when_decision_is_missing(t
     assert (tmp_path / "ocr-state" / "batch-final.json").is_file()
 
 
-@pytest.mark.parametrize("evidence_key, forged", [
-    ("codex", {"record": {"forged": True}, "payload": {"forged": True}}),
-    ("alignment", {"status": "consistent"}),
-    ("decision", {"record": {}, "payload": {"status": "accepted"}}),
-])
-def test_resume_rejects_forged_evidence_and_rebuilds_page(
-    tmp_path, evidence_key, forged
-):
+@pytest.mark.parametrize(
+    "evidence_key, forged",
+    [
+        ("codex", {"record": {"forged": True}, "payload": {"forged": True}}),
+        ("alignment", {"status": "consistent"}),
+        ("decision", {"record": {}, "payload": {"status": "accepted"}}),
+    ],
+)
+def test_resume_rejects_forged_evidence_and_rebuilds_page(tmp_path, evidence_key, forged):
     engines = FakeEngines(apple_text="利润为 10%", codex_text="利润为 40%")
     orchestrator = _orchestrator(tmp_path, engines)
     assert _run(orchestrator, engines).status is BatchStatus.COMPLETED

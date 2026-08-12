@@ -206,9 +206,7 @@ def test_topic_text_field_limits(field, limit):
     topic[field] = "x" * (limit + 1)
 
     with pytest.raises(ValidationError):
-        TopicOutlineResult.model_validate(
-            {"topics": [topic], "unmapped_chapter_ids": []}
-        )
+        TopicOutlineResult.model_validate({"topics": [topic], "unmapped_chapter_ids": []})
 
 
 @pytest.mark.parametrize(
@@ -254,9 +252,7 @@ def test_prompt_snapshot_uses_one_batch_select(tmp_path):
 
     repo.conn.set_trace_callback(None)
     selects = [
-        statement
-        for statement in statements
-        if statement.lstrip().upper().startswith("SELECT")
+        statement for statement in statements if statement.lstrip().upper().startswith("SELECT")
     ]
     assert len(selects) == 1
 
@@ -300,9 +296,7 @@ def test_deepseek_rejects_200k_chinese_prompt_before_client(tmp_path):
     assert calls == []
 
 
-def test_response_byte_limit_fails_before_json_parse_and_preserves_database(
-    tmp_path, monkeypatch
-):
+def test_response_byte_limit_fails_before_json_parse_and_preserves_database(tmp_path, monkeypatch):
     repo, course, _ = prepared_course(tmp_path)
     old = repo.create_topic(course.id, 0, "旧草稿", "保留")
     monkeypatch.setattr("parsing_core.workbench.topic_outline.MAX_RESPONSE_BYTES", 10)
@@ -326,9 +320,7 @@ class MutatingExecutor(RecordingExecutor):
     "dependency",
     ["chapter", "review", "note-add", "note-modify", "note-delete", "source"],
 )
-def test_dependency_change_during_executor_rejects_stale_snapshot(
-    tmp_path, dependency
-):
+def test_dependency_change_during_executor_rejects_stale_snapshot(tmp_path, dependency):
     repo, course, chapters = prepared_course(tmp_path)
     old = repo.create_topic(course.id, 0, "旧草稿", "保留")
     chapter = chapters[0]

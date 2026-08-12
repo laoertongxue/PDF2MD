@@ -90,8 +90,7 @@ def _validate_authorization_context(context: _AuthorizationContext) -> None:
     if not isinstance(context.reason, BaiduEscalationReason):
         raise ValueError("Baidu escalation reason is invalid")
     if not all(
-        isinstance(value, str) and value
-        for value in (context.page_hash, context.input_fingerprint)
+        isinstance(value, str) and value for value in (context.page_hash, context.input_fingerprint)
     ):
         raise ValueError("Baidu escalation context is invalid")
     if context.alignment_status not in {"consistent", "conflict", "complex"}:
@@ -222,7 +221,6 @@ class BaiduOcrClient:
                 raise BaiduOcrError("Baidu OCR returned invalid JSON")
             return value
         raise BaiduOcrError("Baidu OCR request failed")
-
 
     def _send(self, request: BaiduRequest) -> tuple[int, bytes]:
         if self.transport is not None:

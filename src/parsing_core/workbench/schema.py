@@ -312,8 +312,7 @@ OCR_INDEX_SQL = {
         "CREATE INDEX idx_wb_ocr_pages_source ON wb_ocr_pages(source_id, page_number)"
     ),
     "idx_wb_ocr_observations_page": (
-        "CREATE INDEX idx_wb_ocr_observations_page "
-        "ON wb_ocr_observations(page_id, created_at)"
+        "CREATE INDEX idx_wb_ocr_observations_page ON wb_ocr_observations(page_id, created_at)"
     ),
     "idx_wb_ocr_diffs_page": (
         "CREATE INDEX idx_wb_ocr_diffs_page ON wb_ocr_diffs(page_id, created_at)"
@@ -434,9 +433,10 @@ def _ocr_tables_are_current(conn: sqlite3.Connection) -> bool:
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
         ).fetchone()
-        if row is None or "".join(row[0].split()).lower() != "".join(
-            OCR_TABLE_SQL[table].split()
-        ).lower():
+        if (
+            row is None
+            or "".join(row[0].split()).lower() != "".join(OCR_TABLE_SQL[table].split()).lower()
+        ):
             return False
     return True
 

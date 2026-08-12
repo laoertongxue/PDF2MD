@@ -91,25 +91,25 @@ def test_reserved_real_titles_force_duplicate_suffixes_to_skip_collisions(tmp_pa
     by_chapter = {item.chapter_id: item for item in package.source_chapters}
 
     assert [by_chapter[chapter.id].source_title for chapter in created] == [
-        "教材", "教材", "教材（2）", "教材（3）"
+        "教材",
+        "教材",
+        "教材（2）",
+        "教材（3）",
     ]
     assert {by_chapter[chapter.id].source_display_title for chapter in created} == {
-        "教材", "教材（2）", "教材（3）", "教材（4）"
+        "教材",
+        "教材（2）",
+        "教材（3）",
+        "教材（4）",
     }
     duplicate_displays = [
-        item.source_display_title
-        for item in package.source_chapters
-        if item.source_title == "教材"
+        item.source_display_title for item in package.source_chapters if item.source_title == "教材"
     ]
     assert duplicate_displays == ["教材", "教材（4）"]
-    label_to_chapter = {
-        item.source_label: item.chapter_id for item in package.source_chapters
-    }
+    label_to_chapter = {item.source_label: item.chapter_id for item in package.source_chapters}
     assert len(label_to_chapter) == 4
     for item in package.source_chapters:
-        assert item.source_label == (
-            f"[《{item.source_display_title}》·第 {item.seq + 1} 章]"
-        )
+        assert item.source_label == (f"[《{item.source_display_title}》·第 {item.seq + 1} 章]")
         assert label_to_chapter[item.source_label] == item.chapter_id
 
 

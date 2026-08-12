@@ -505,9 +505,7 @@ async def recognize_source_chapters(source_id: str, sch: SchedulerDep):
     workflow = _ocr_workflow(source, course)
     _final, pages = _ocr_final_pages(workflow.paths.root)
     try:
-        tree = await run_in_threadpool(
-            lambda: workflow.detect_chapters() if pages else None
-        )
+        tree = await run_in_threadpool(lambda: workflow.detect_chapters() if pages else None)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     if tree is None:
@@ -878,8 +876,16 @@ async def list_cards(course_id: str, sch: SchedulerDep):
             **{
                 key: row[key]
                 for key in (
-                    "id", "origin_type", "origin_id", "origin_title", "card_type",
-                    "title", "content", "status", "favorite", "updated_at",
+                    "id",
+                    "origin_type",
+                    "origin_id",
+                    "origin_title",
+                    "card_type",
+                    "title",
+                    "content",
+                    "status",
+                    "favorite",
+                    "updated_at",
                 )
             },
             source_refs=json.loads(row["source_refs_json"]),
@@ -897,8 +903,12 @@ def _card_response(card: dict) -> CourseCardResponse:
 async def patch_course_card(card_id: str, req: CourseCardPatchRequest, sch: SchedulerDep):
     try:
         card = _repo(sch).update_course_card(
-            card_id, title=req.title.strip(), content=req.content,
-            tags=req.tags, status=req.status, expected_updated_at=req.expected_updated_at,
+            card_id,
+            title=req.title.strip(),
+            content=req.content,
+            tags=req.tags,
+            status=req.status,
+            expected_updated_at=req.expected_updated_at,
         )
     except LookupError as exc:
         raise HTTPException(404, "card not found") from exc
@@ -909,11 +919,15 @@ async def patch_course_card(card_id: str, req: CourseCardPatchRequest, sch: Sche
 
 @router.patch("/cards/{card_id}/favorite", response_model=CourseCardResponse)
 async def patch_course_card_favorite(
-    card_id: str, req: CourseCardFavoriteRequest, sch: SchedulerDep,
+    card_id: str,
+    req: CourseCardFavoriteRequest,
+    sch: SchedulerDep,
 ):
     try:
         card = _repo(sch).set_course_card_favorite(
-            card_id, req.favorite, req.expected_updated_at,
+            card_id,
+            req.favorite,
+            req.expected_updated_at,
         )
     except LookupError as exc:
         raise HTTPException(404, "card not found") from exc
