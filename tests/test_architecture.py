@@ -2,10 +2,47 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKBENCH = ROOT / "src" / "parsing_core" / "workbench"
+WORKBENCH_RELATIVE = Path("src/parsing_core/workbench")
+LAYERS = ("domain", "application", "ports")
+INTERNAL_MODULE_NAMES = {"application", "domain", "infrastructure", "ocr", "ports"}
 FORBIDDEN = {
-    "domain": {"fastapi", "sqlite3", "requests", "httpx", "pathlib"},
-    "application": {"fastapi", "sqlite3", "requests"},
+    "domain": {
+        "fastapi",
+        "sqlite3",
+        "requests",
+        "httpx",
+        "pathlib",
+        "application",
+        "ports",
+        "infrastructure",
+        "parsing_core.workbench.application",
+        "parsing_core.workbench.ports",
+        "parsing_core.workbench.infrastructure",
+    },
+    "application": {
+        "fastapi",
+        "sqlite3",
+        "requests",
+        "httpx",
+        "infrastructure",
+        "ocr",
+        "parsing_core.workbench.infrastructure",
+        "parsing_core.workbench.ocr",
+        "parsing_core.serving",
+    },
+    "ports": {
+        "fastapi",
+        "sqlite3",
+        "requests",
+        "httpx",
+        "application",
+        "infrastructure",
+        "ocr",
+        "parsing_core.workbench.application",
+        "parsing_core.workbench.infrastructure",
+        "parsing_core.workbench.ocr",
+        "parsing_core.serving",
+    },
 }
 
 
@@ -16,22 +53,182 @@ def imported_modules(path: Path) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            modules.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            relative_prefix = "." * node.level
+            if node.module:
+                module = f"{relative_prefix}{node.module}"
+                modules.add(module)
+                for alias in node.names:
+                    if alias.name in INTERNAL_MODULE_NAMES:
+                        modules.add(f"{module}.{alias.name}")
+            else:
+                modules.update(f"{relative_prefix}{alias.name}" for alias in node.names)
 
     return modules
 
 
-def test_workbench_layer_import_boundaries() -> None:
-    violations: list[str] = []
+def _is_forbidden(module: str, forbidden: set[str]) -> bool:
+    normalized = module.lstrip(".")
+    return any(normalized == prefix or normalized.startswith(f"{prefix}.") for prefix in forbidden)
 
-    for layer, forbidden in FORBIDDEN.items():
-        layer_dir = WORKBENCH / layer
-        paths = sorted(layer_dir.rglob("*.py")) if layer_dir.is_dir() else []
-        for path in paths:
+
+def find_violations(root: Path) -> list[str]:
+    violations: list[str] = []
+    workbench = root / WORKBENCH_RELATIVE
+
+    for layer in LAYERS:
+        layer_dir = workbench / layer
+        boundary = layer_dir / "__init__.py"
+        if not boundary.is_file():
+            relative_boundary = boundary.relative_to(root)
+            violations.append(f"{relative_boundary}: required package boundary is missing")
+            continue
+
+        for path in sorted(layer_dir.rglob("*.py")):
             for module in sorted(imported_modules(path)):
-                if module.partition(".")[0] in forbidden:
-                    relative_path = path.relative_to(ROOT)
+                if _is_forbidden(module, FORBIDDEN[layer]):
+                    relative_path = path.relative_to(root)
                     violations.append(f"{relative_path}: forbidden import {module}")
 
-    assert violations == []
+    return violations
+
+
+def _create_package_boundaries(root: Path) -> None:
+    for layer in LAYERS:
+        package = root / WORKBENCH_RELATIVE / layer
+        package.mkdir(parents=True, exist_ok=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+
+
+def _write_layer_module(root: Path, layer: str, source: str) -> None:
+    path = root / WORKBENCH_RELATIVE / layer / "example.py"
+    path.write_text(source, encoding="utf-8")
+
+
+def _assert_forbidden_modules(root: Path, expected: set[str]) -> None:
+    violations = find_violations(root)
+    rendered = "\n".join(violations)
+
+    assert len(violations) == len(expected)
+    for module in expected:
+        assert f"forbidden import {module}" in rendered
+
+
+def test_repository_has_required_package_boundaries() -> None:
+    assert find_violations(ROOT) == []
+
+
+def test_find_violations_rejects_forbidden_domain_dependencies(tmp_path: Path) -> None:
+    _create_package_boundaries(tmp_path)
+    expected = {
+        "fastapi",
+        "sqlite3",
+        "requests",
+        "httpx",
+        "pathlib",
+        "parsing_core.workbench.application",
+        "parsing_core.workbench.ports",
+        "parsing_core.workbench.infrastructure",
+    }
+    _write_layer_module(
+        tmp_path,
+        "domain",
+        "\n".join(
+            (
+                "import fastapi",
+                "import sqlite3",
+                "import requests",
+                "import httpx",
+                "from pathlib import Path",
+                "from parsing_core.workbench.application import UseCase",
+                "from parsing_core.workbench.ports import Gateway",
+                "from parsing_core.workbench.infrastructure import Repository",
+            )
+        ),
+    )
+
+    _assert_forbidden_modules(tmp_path, expected)
+
+
+def test_find_violations_rejects_forbidden_application_dependencies(tmp_path: Path) -> None:
+    _create_package_boundaries(tmp_path)
+    expected = {
+        "fastapi",
+        "sqlite3",
+        "requests",
+        "httpx",
+        "parsing_core.workbench.infrastructure",
+        "parsing_core.workbench.ocr",
+        "parsing_core.serving",
+    }
+    _write_layer_module(
+        tmp_path,
+        "application",
+        "\n".join(
+            (
+                "import fastapi",
+                "import sqlite3",
+                "import requests",
+                "import httpx",
+                "from parsing_core.workbench.infrastructure import Repository",
+                "from parsing_core.workbench.ocr import OcrEngine",
+                "from parsing_core.serving import Scheduler",
+            )
+        ),
+    )
+
+    _assert_forbidden_modules(tmp_path, expected)
+
+
+def test_find_violations_rejects_forbidden_ports_dependencies(tmp_path: Path) -> None:
+    _create_package_boundaries(tmp_path)
+    expected = {
+        "fastapi",
+        "sqlite3",
+        "requests",
+        "httpx",
+        "parsing_core.workbench.application",
+        "parsing_core.workbench.infrastructure",
+        "parsing_core.workbench.ocr",
+        "parsing_core.serving",
+    }
+    _write_layer_module(
+        tmp_path,
+        "ports",
+        "\n".join(
+            (
+                "import fastapi",
+                "import sqlite3",
+                "import requests",
+                "import httpx",
+                "from parsing_core.workbench.application import UseCase",
+                "from parsing_core.workbench.infrastructure import Repository",
+                "from parsing_core.workbench.ocr import OcrEngine",
+                "from parsing_core.serving import Scheduler",
+            )
+        ),
+    )
+
+    _assert_forbidden_modules(tmp_path, expected)
+
+
+def test_find_violations_allows_intended_layer_dependencies(tmp_path: Path) -> None:
+    _create_package_boundaries(tmp_path)
+    _write_layer_module(tmp_path, "domain", "from .entities import Entity\n")
+    _write_layer_module(
+        tmp_path,
+        "application",
+        "\n".join(
+            (
+                "from parsing_core.workbench.domain import Entity",
+                "from parsing_core.workbench.ports import Repository",
+            )
+        ),
+    )
+    _write_layer_module(
+        tmp_path,
+        "ports",
+        "from parsing_core.workbench.domain import Entity\n",
+    )
+
+    assert find_violations(tmp_path) == []
