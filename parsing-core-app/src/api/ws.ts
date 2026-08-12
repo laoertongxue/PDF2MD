@@ -13,9 +13,15 @@ export function connectBatchWs(
     if (canceled) return;
     ws = new WebSocket(`${base}/ws/batch/${batchId}?since=${since}`);
     ws.onmessage = (msg) => {
-      try { onEvent(JSON.parse(msg.data)); } catch { /* ignore */ }
+      try {
+        onEvent(JSON.parse(msg.data));
+      } catch {
+        /* ignore */
+      }
     };
-    ws.onclose = () => { onClose?.(); };
+    ws.onclose = () => {
+      onClose?.();
+    };
   });
   return () => {
     canceled = true;

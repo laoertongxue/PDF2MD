@@ -7,8 +7,13 @@ import CourseList from "./CourseList";
 const loadCourses = vi.fn().mockResolvedValue(undefined);
 vi.mock("../../store/useWorkbenchStore", () => ({
   useWorkbenchStore: () => ({
-    courses: [], createCourse: vi.fn(), loadCourseCards: vi.fn(), loadCourses,
-    loadSources: vi.fn(), selectCourse: vi.fn(), selectedCourseId: null,
+    courses: [],
+    createCourse: vi.fn(),
+    loadCourseCards: vi.fn(),
+    loadCourses,
+    loadSources: vi.fn(),
+    selectCourse: vi.fn(),
+    selectedCourseId: null,
   }),
 }));
 
@@ -17,7 +22,11 @@ beforeEach(() => {
 });
 
 it("disables the desktop folder picker in a browser and explains the limitation as an alert", async () => {
-  render(<MemoryRouter><CourseList /></MemoryRouter>);
+  render(
+    <MemoryRouter>
+      <CourseList />
+    </MemoryRouter>,
+  );
   const picker = screen.getByRole("button", { name: "选择文件夹" });
   expect(picker).toBeDisabled();
   expect(screen.getByText("浏览器版不支持选择本地课程目录，请使用桌面客户端或粘贴目录路径。")).toBeInTheDocument();

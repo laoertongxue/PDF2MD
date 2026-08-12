@@ -1,6 +1,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
-import { buildSearchResults, ServiceStatusView } from "./Layout";
+import { requireAt } from "../test/requireValue";
+import { buildSearchResults } from "./layoutSearch";
+import { ServiceStatusView } from "./Layout";
 
 it("shows an actionable sidecar failure and retries", () => {
   const retry = vi.fn();
@@ -24,13 +26,86 @@ it("shows an actionable sidecar failure and retries", () => {
 });
 
 it("builds keyboard-searchable destinations for courses, textbooks, chapters and cards", () => {
-  const results = buildSearchResults({
-    courses: [{ id: "c1", title: "战略管理", description: "MBA", root_dir: "/mba" }],
-    sources: { c1: [{ id: "s1", course_id: "c1", kind: "main", file_path: "/mba/a.pdf", title: "竞争战略教材", status: "READY" }] },
-    chapters: { s1: [{ id: "ch1", source_id: "s1", course_id: "c1", seq: 0, title: "行业结构", status: "COMPLETED" }] },
-    cardsByCourse: { c1: [{ id: "card1", origin_type: "chapter", origin_id: "ch1", origin_title: "行业结构", card_type: "观点", title: "五力模型", content: "竞争分析", source_refs: [], tags: [], status: "ACTIVE", favorite: false, updated_at: 1 }] },
-  }, "战略");
+  const results = buildSearchResults(
+    {
+      courses: [{ id: "c1", title: "战略管理", description: "MBA", root_dir: "/mba" }],
+      sources: {
+        c1: [
+          { id: "s1", course_id: "c1", kind: "main", file_path: "/mba/a.pdf", title: "竞争战略教材", status: "READY" },
+        ],
+      },
+      chapters: {
+        s1: [{ id: "ch1", source_id: "s1", course_id: "c1", seq: 0, title: "行业结构", status: "COMPLETED" }],
+      },
+      cardsByCourse: {
+        c1: [
+          {
+            id: "card1",
+            origin_type: "chapter",
+            origin_id: "ch1",
+            origin_title: "行业结构",
+            card_type: "观点",
+            title: "五力模型",
+            content: "竞争分析",
+            source_refs: [],
+            tags: [],
+            status: "ACTIVE",
+            favorite: false,
+            updated_at: 1,
+          },
+        ],
+      },
+    },
+    "战略",
+  );
   expect(results.map((result) => result.label)).toEqual(["战略管理", "竞争战略教材"]);
-  expect(buildSearchResults({ courses: [], sources: {}, chapters: { s1: [{ id: "ch1", source_id: "s1", course_id: "c1", seq: 0, title: "行业结构", status: "COMPLETED" }] }, cardsByCourse: {} }, "行业")[0].to).toBe("/workbench/chapter?chapterId=ch1");
-  expect(buildSearchResults({ courses: [], sources: {}, chapters: {}, cardsByCourse: { c1: [{ id: "card1", origin_type: "chapter", origin_id: "ch1", origin_title: "行业结构", card_type: "观点", title: "五力模型", content: "竞争分析", source_refs: [], tags: [], status: "ACTIVE", favorite: false, updated_at: 1 }] } }, "五力")[0].to).toBe("/workbench/cards?cardId=card1");
+  expect(
+    requireAt(
+      buildSearchResults(
+        {
+          courses: [],
+          sources: {},
+          chapters: {
+            s1: [{ id: "ch1", source_id: "s1", course_id: "c1", seq: 0, title: "行业结构", status: "COMPLETED" }],
+          },
+          cardsByCourse: {},
+        },
+        "行业",
+      ),
+      0,
+      "chapter search result",
+    ).to,
+  ).toBe("/workbench/chapter?chapterId=ch1");
+  expect(
+    requireAt(
+      buildSearchResults(
+        {
+          courses: [],
+          sources: {},
+          chapters: {},
+          cardsByCourse: {
+            c1: [
+              {
+                id: "card1",
+                origin_type: "chapter",
+                origin_id: "ch1",
+                origin_title: "行业结构",
+                card_type: "观点",
+                title: "五力模型",
+                content: "竞争分析",
+                source_refs: [],
+                tags: [],
+                status: "ACTIVE",
+                favorite: false,
+                updated_at: 1,
+              },
+            ],
+          },
+        },
+        "五力",
+      ),
+      0,
+      "card search result",
+    ).to,
+  ).toBe("/workbench/cards?cardId=card1");
 });

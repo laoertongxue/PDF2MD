@@ -37,7 +37,11 @@ export default function Dashboard() {
 
   const stats = [
     { label: "全部", value: batches.length, icon: FileText },
-    { label: "进行中", value: batches.filter((b) => !["COMPLETED", "FAILED", "CANCELLED"].includes(b.status)).length, icon: Loader2 },
+    {
+      label: "进行中",
+      value: batches.filter((b) => !["COMPLETED", "FAILED", "CANCELLED"].includes(b.status)).length,
+      icon: Loader2,
+    },
     { label: "已完成", value: batches.filter((b) => b.status === "COMPLETED").length, icon: CheckCircle2 },
     { label: "失败", value: batches.filter((b) => b.status === "FAILED").length, icon: AlertCircle },
   ];
@@ -64,7 +68,11 @@ export default function Dashboard() {
           {stats.map((s, i) => {
             const Icon = s.icon;
             return (
-              <div key={s.label} className="rounded-lg border border-zinc-200 bg-white px-4 py-3.5 animate-in" style={{ animationDelay: `${i * 0.05}s` }}>
+              <div
+                key={s.label}
+                className="rounded-lg border border-zinc-200 bg-white px-4 py-3.5 animate-in"
+                style={{ animationDelay: `${i * 0.05}s` }}
+              >
                 <div className="flex items-center gap-2.5">
                   <Icon size={16} className="text-zinc-400" strokeWidth={1.5} />
                   <span className="text-xs text-zinc-500">{s.label}</span>
@@ -96,7 +104,13 @@ export default function Dashboard() {
         const pct = b.total_tasks ? Math.round((b.completed_tasks / b.total_tasks) * 100) : 0;
         const done = b.status === "COMPLETED";
         const fail = b.status === "FAILED";
-        const badge = done ? "bg-emerald-50 text-emerald-700" : fail ? "bg-red-50 text-red-600" : b.status === "CANCELLED" ? "bg-zinc-100 text-zinc-500" : "bg-blue-50 text-blue-600";
+        const badge = done
+          ? "bg-emerald-50 text-emerald-700"
+          : fail
+            ? "bg-red-50 text-red-600"
+            : b.status === "CANCELLED"
+              ? "bg-zinc-100 text-zinc-500"
+              : "bg-blue-50 text-blue-600";
 
         return (
           <div
@@ -114,7 +128,9 @@ export default function Dashboard() {
                 <span className="text-xs font-mono text-zinc-400 bg-zinc-50 px-2 py-0.5 rounded border border-zinc-200">
                   {b.batch_id.slice(0, 8)}
                 </span>
-                <span className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${badge}`}>
+                <span
+                  className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${badge}`}
+                >
                   {!done && !fail && b.status !== "CANCELLED" && <Loader2 size={10} className="animate-spin" />}
                   {formatStatus(b.status)}
                 </span>
@@ -129,7 +145,9 @@ export default function Dashboard() {
             {/* Progress */}
             <div className="mb-3">
               <div className="flex justify-between text-xs text-zinc-400 mb-1.5">
-                <span>{b.completed_tasks}/{b.total_tasks} 完成</span>
+                <span>
+                  {b.completed_tasks}/{b.total_tasks} 完成
+                </span>
                 <span>{pct}%</span>
               </div>
               <div className="h-1.5 w-full rounded-full bg-zinc-100 overflow-hidden">
@@ -148,11 +166,16 @@ export default function Dashboard() {
                 return (
                   <span
                     key={t.task_id}
-                    onClick={(e) => { e.stopPropagation(); if (ok) navigate(`/doc/${t.task_id}`); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (ok) navigate(`/doc/${t.task_id}`);
+                    }}
                     className={`inline-flex items-center text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
-                      ok ? "bg-zinc-50 text-zinc-600 border-zinc-200 hover:bg-zinc-100 cursor-pointer"
-                        : t.status === "FAILED" ? "bg-red-50 text-red-500 border-red-100"
-                        : "bg-zinc-50 text-zinc-400 border-zinc-100"
+                      ok
+                        ? "bg-zinc-50 text-zinc-600 border-zinc-200 hover:bg-zinc-100 cursor-pointer"
+                        : t.status === "FAILED"
+                          ? "bg-red-50 text-red-500 border-red-100"
+                          : "bg-zinc-50 text-zinc-400 border-zinc-100"
                     }`}
                   >
                     <span className="truncate max-w-[80px]">{name}</span>

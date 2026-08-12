@@ -1,11 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api/workbench";
-import type {
-  CourseTopic,
-  TopicCard,
-  TopicNoteBlock,
-  TopicRun,
-} from "../api/workbenchTypes";
+import type { CourseTopic, TopicCard, TopicNoteBlock, TopicRun } from "../api/workbenchTypes";
+import { requireAt, requireValue } from "../test/requireValue";
 import { useWorkbenchStore } from "./useWorkbenchStore";
 
 vi.mock("../api/workbench", async (importOriginal) => {
@@ -84,6 +80,21 @@ function actionKey(action: string, resourceId: string) {
   return `${action}:${resourceId}`;
 }
 
+function courseTopics(courseId: string) {
+  return requireValue(useWorkbenchStore.getState().topicsByCourse[courseId], `topics for ${courseId}`);
+}
+
+function firstTopic(courseId: string) {
+  return requireAt(courseTopics(courseId), 0, `first topic for ${courseId}`);
+}
+
+function actionState(action: string, resourceId: string) {
+  return requireValue(
+    useWorkbenchStore.getState().topicActions[actionKey(action, resourceId)],
+    `${action} state for ${resourceId}`,
+  );
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -147,7 +158,7 @@ describe("主题工作流 Store", () => {
 
     await expect(useWorkbenchStore.getState().loadTopics("course-1")).rejects.toThrow("操作失败，请稍后重试");
 
-    const error = useWorkbenchStore.getState().topicActions[actionKey("loadTopics", "course-1")].error;
+    const error = actionState("loadTopics", "course-1").error;
     expect(error).toBe("操作失败，请稍后重试");
     expect(error).not.toMatch(/Users|secret/i);
   });
@@ -176,10 +187,7 @@ describe("主题工作流 Store", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(null, { status: 204 }));
 
     await expect(actualApi.deleteTopic("topic-1")).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8000/api/workbench/topics/topic-1",
-      { method: "DELETE" },
-    );
+    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:8000/api/workbench/topics/topic-1", { method: "DELETE" });
   });
 
   it("Topic API 拒绝对象代替数组", async () => {
@@ -191,7 +199,7 @@ describe("主题工作流 Store", () => {
 
   it("Topic API 拒绝缺少 course_id 的对象", async () => {
     const actualApi = await vi.importActual<typeof import("../api/workbench")>("../api/workbench");
-    const { course_id: _courseId, ...invalidTopic } = topic();
+    const invalidTopic = { ...topic(), course_id: undefined };
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse(invalidTopic));
 
     await expect(actualApi.getTopic("topic-1")).rejects.toThrow("服务返回数据格式异常，请稍后重试");
@@ -212,9 +220,39 @@ describe("主题工作流 Store", () => {
   });
 
   it.each([
-    ["blocks", (actualApi: typeof api) => actualApi.listTopicNoteBlocks("topic-1"), { id: 1, topic_id: "topic-1", kind: "summary", content: "x", updated_at: 1 }],
-    ["cards", (actualApi: typeof api) => actualApi.listTopicCards("topic-1"), { id: "card-1", topic_id: "topic-1", card_type: "insight", title: "x", content: "x", source_refs: "chapter-1", created_at: 1 }],
-    ["runs", (actualApi: typeof api) => actualApi.listTopicRuns("topic-1"), { id: "run-1", topic_id: "topic-1", round_key: "review", status: "DONE", input_fingerprint: "x", output: "x", error: "", started_at: 1, finished_at: 2 }],
+    [
+      "blocks",
+      (actualApi: typeof api) => actualApi.listTopicNoteBlocks("topic-1"),
+      { id: 1, topic_id: "topic-1", kind: "summary", content: "x", updated_at: 1 },
+    ],
+    [
+      "cards",
+      (actualApi: typeof api) => actualApi.listTopicCards("topic-1"),
+      {
+        id: "card-1",
+        topic_id: "topic-1",
+        card_type: "insight",
+        title: "x",
+        content: "x",
+        source_refs: "chapter-1",
+        created_at: 1,
+      },
+    ],
+    [
+      "runs",
+      (actualApi: typeof api) => actualApi.listTopicRuns("topic-1"),
+      {
+        id: "run-1",
+        topic_id: "topic-1",
+        round_key: "review",
+        status: "DONE",
+        input_fingerprint: "x",
+        output: "x",
+        error: "",
+        started_at: 1,
+        finished_at: 2,
+      },
+    ],
   ] as const)("Topic %s API 拒绝核心字段类型错误", async (_name, invoke, invalidItem) => {
     const actualApi = await vi.importActual<typeof import("../api/workbench")>("../api/workbench");
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse([invalidItem]));
@@ -244,9 +282,7 @@ describe("主题工作流 Store", () => {
 
   it("API 网络错误不泄露中文路径或密钥", async () => {
     const actualApi = await vi.importActual<typeof import("../api/workbench")>("../api/workbench");
-    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
-      new TypeError("无法读取 /Users/张三/课程，密钥 sk-secret"),
-    );
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("无法读取 /Users/张三/课程，密钥 sk-secret"));
 
     await expect(actualApi.listTopics("course-1")).rejects.toThrow("无法连接本地服务，请确认服务已启动");
   });
@@ -269,7 +305,7 @@ describe("主题工作流 Store", () => {
     await useWorkbenchStore.getState().generateTopics("course-1", "hybrid");
 
     expect(mocked.generateTopics).toHaveBeenCalledWith("course-1", "hybrid");
-    expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].status).toBe("DRAFT");
+    expect(firstTopic("course-1").status).toBe("DRAFT");
   });
 
   it("更新主题章节映射并更新所属课程中的主题", async () => {
@@ -277,7 +313,7 @@ describe("主题工作流 Store", () => {
 
     await useWorkbenchStore.getState().updateTopicMapping("topic-1", ["chapter-2"]);
 
-    expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].chapter_ids).toEqual(["chapter-2"]);
+    expect(firstTopic("course-1").chapter_ids).toEqual(["chapter-2"]);
   });
 
   it("原子合并后 tombstone 旧主题并保存新主题", async () => {
@@ -294,11 +330,13 @@ describe("主题工作流 Store", () => {
     mocked.mergeTopics.mockReturnValueOnce(merging.promise);
     mocked.listTopics.mockResolvedValueOnce([topic({ course_id: "course-2", title: "Course 2 fresh" })]);
     useWorkbenchStore.setState({ topicsByCourse: { "course-1": [topic(), topic({ id: "topic-2" })] } });
-    const pending = useWorkbenchStore.getState().mergeTopics("course-1", { topic_ids: ["topic-1", "topic-2"], title: "Merged" });
+    const pending = useWorkbenchStore
+      .getState()
+      .mergeTopics("course-1", { topic_ids: ["topic-1", "topic-2"], title: "Merged" });
     await useWorkbenchStore.getState().loadTopics("course-2");
     merging.resolve(topic({ id: "merged", course_id: "course-2", title: "Late" }));
     await pending;
-    expect(useWorkbenchStore.getState().topicsByCourse["course-2"][0].title).toBe("Course 2 fresh");
+    expect(firstTopic("course-2").title).toBe("Course 2 fresh");
     expect(useWorkbenchStore.getState().deletedTopics["topic-1"]).toBeUndefined();
   });
 
@@ -306,7 +344,9 @@ describe("主题工作流 Store", () => {
     const original = topic({ chapter_ids: ["chapter-1"] });
     const created = topic({ id: "topic-2", chapter_ids: ["chapter-2"] });
     mocked.splitTopic.mockResolvedValue([original, created]);
-    useWorkbenchStore.setState({ topicsByCourse: { "course-1": [topic({ chapter_ids: ["chapter-1", "chapter-2"] })] } });
+    useWorkbenchStore.setState({
+      topicsByCourse: { "course-1": [topic({ chapter_ids: ["chapter-1", "chapter-2"] })] },
+    });
     await useWorkbenchStore.getState().splitTopic("topic-1", { title: "New", new_chapter_ids: ["chapter-2"] });
     expect(useWorkbenchStore.getState().topicsByCourse["course-1"]).toEqual([original, created]);
   });
@@ -316,7 +356,7 @@ describe("主题工作流 Store", () => {
 
     await useWorkbenchStore.getState().confirmTopics("course-1");
 
-    expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].confirmed).toBe(true);
+    expect(firstTopic("course-1").confirmed).toBe(true);
   });
 
   it("重排课程主题并保存后端返回顺序", async () => {
@@ -340,7 +380,9 @@ describe("主题工作流 Store", () => {
     await useWorkbenchStore.getState().deleteTopic("course-1", "topic-1");
 
     const state = useWorkbenchStore.getState();
-    expect(state.topicsByCourse["course-1"].map((item) => item.id)).toEqual(["topic-2"]);
+    expect(requireValue(state.topicsByCourse["course-1"], "remaining course topics").map((item) => item.id)).toEqual([
+      "topic-2",
+    ]);
     expect(state.topicBlocksById["topic-1"]).toBeUndefined();
     expect(state.topicCardsById["topic-1"]).toBeUndefined();
     expect(state.topicRunsById["topic-1"]).toBeUndefined();
@@ -348,13 +390,18 @@ describe("主题工作流 Store", () => {
 
   it.each([
     ["普通融合", "runTopic", () => useWorkbenchStore.getState().runTopic("topic-1"), mocked.runTopic],
-    ["hybrid 融合", "runTopicHybrid", () => useWorkbenchStore.getState().runTopicHybrid("topic-1"), mocked.runTopicHybrid],
+    [
+      "hybrid 融合",
+      "runTopicHybrid",
+      () => useWorkbenchStore.getState().runTopicHybrid("topic-1"),
+      mocked.runTopicHybrid,
+    ],
   ] as const)("运行%s后更新主题", async (_label, _action, invoke, mock) => {
     mock.mockResolvedValue(topic({ status: "COMPLETED" }));
 
     await invoke();
 
-    expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].status).toBe("COMPLETED");
+    expect(firstTopic("course-1").status).toBe("COMPLETED");
   });
 
   it("分别加载主题 blocks、cards 和 runs", async () => {
@@ -382,31 +429,67 @@ describe("主题工作流 Store", () => {
 
     await invoke();
 
-    expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].sync_status).toBe("SYNCED");
+    expect(firstTopic("course-1").sync_status).toBe("SYNCED");
   });
 
   it.each([
     ["loadTopics", "course-1", () => useWorkbenchStore.getState().loadTopics("course-1"), mocked.listTopics],
-    ["generateTopics", "course-1", () => useWorkbenchStore.getState().generateTopics("course-1"), mocked.generateTopics],
-    ["mergeTopics", "course-1", () => useWorkbenchStore.getState().mergeTopics("course-1", { topic_ids: ["topic-1", "topic-2"], title: "Merged" }), mocked.mergeTopics],
-    ["splitTopic", "topic-1", () => useWorkbenchStore.getState().splitTopic("topic-1", { title: "New", new_chapter_ids: ["chapter-1"] }), mocked.splitTopic],
-    ["updateTopicMapping", "topic-1", () => useWorkbenchStore.getState().updateTopicMapping("topic-1", ["chapter-1"]), mocked.updateTopicMapping],
+    [
+      "generateTopics",
+      "course-1",
+      () => useWorkbenchStore.getState().generateTopics("course-1"),
+      mocked.generateTopics,
+    ],
+    [
+      "mergeTopics",
+      "course-1",
+      () =>
+        useWorkbenchStore.getState().mergeTopics("course-1", { topic_ids: ["topic-1", "topic-2"], title: "Merged" }),
+      mocked.mergeTopics,
+    ],
+    [
+      "splitTopic",
+      "topic-1",
+      () => useWorkbenchStore.getState().splitTopic("topic-1", { title: "New", new_chapter_ids: ["chapter-1"] }),
+      mocked.splitTopic,
+    ],
+    [
+      "updateTopicMapping",
+      "topic-1",
+      () => useWorkbenchStore.getState().updateTopicMapping("topic-1", ["chapter-1"]),
+      mocked.updateTopicMapping,
+    ],
     ["confirmTopics", "course-1", () => useWorkbenchStore.getState().confirmTopics("course-1"), mocked.confirmTopics],
-    ["reorderTopics", "course-1", () => useWorkbenchStore.getState().reorderTopics("course-1", ["topic-1"]), mocked.reorderTopics],
+    [
+      "reorderTopics",
+      "course-1",
+      () => useWorkbenchStore.getState().reorderTopics("course-1", ["topic-1"]),
+      mocked.reorderTopics,
+    ],
     ["runTopic", "topic-1", () => useWorkbenchStore.getState().runTopic("topic-1"), mocked.runTopic],
     ["runTopicHybrid", "topic-1", () => useWorkbenchStore.getState().runTopicHybrid("topic-1"), mocked.runTopicHybrid],
-    ["loadTopicBlocks", "topic-1", () => useWorkbenchStore.getState().loadTopicBlocks("topic-1"), mocked.listTopicNoteBlocks],
+    [
+      "loadTopicBlocks",
+      "topic-1",
+      () => useWorkbenchStore.getState().loadTopicBlocks("topic-1"),
+      mocked.listTopicNoteBlocks,
+    ],
     ["loadTopicCards", "topic-1", () => useWorkbenchStore.getState().loadTopicCards("topic-1"), mocked.listTopicCards],
     ["loadTopicRuns", "topic-1", () => useWorkbenchStore.getState().loadTopicRuns("topic-1"), mocked.listTopicRuns],
     ["retryTopicSync", "topic-1", () => useWorkbenchStore.getState().retryTopicSync("topic-1"), mocked.retryTopicSync],
     ["recoverTopic", "topic-1", () => useWorkbenchStore.getState().recoverTopic("topic-1"), mocked.recoverTopic],
-    ["deleteTopic", "topic-1", () => useWorkbenchStore.getState().deleteTopic("course-1", "topic-1"), mocked.deleteTopic],
+    [
+      "deleteTopic",
+      "topic-1",
+      () => useWorkbenchStore.getState().deleteTopic("course-1", "topic-1"),
+      mocked.deleteTopic,
+    ],
   ] as const)("%s 失败时清除自己的 loading 并保存中文错误", async (action, resourceId, invoke, mock) => {
     mock.mockRejectedValue(new Error("HTTP 500 /Users/me/private sk-secret"));
 
     await expect(invoke()).rejects.toThrow("操作失败，请稍后重试");
 
-    const status = useWorkbenchStore.getState().topicActions[actionKey(action, resourceId)];
+    const status = actionState(action, resourceId);
     expect(status.loading).toBe(false);
     expect(status.error).toBe("操作失败，请稍后重试");
     expect(status.error).not.toMatch(/HTTP|Users|secret/i);
@@ -423,13 +506,13 @@ describe("主题工作流 Store", () => {
     await oldLoad;
 
     expect(useWorkbenchStore.getState().topicsByCourse["course-1"]).toBeUndefined();
-    expect(useWorkbenchStore.getState().topicActions[actionKey("loadTopics", "course-1")].loading).toBe(true);
+    expect(actionState("loadTopics", "course-1").loading).toBe(true);
 
     newRequest.resolve([topic({ title: "新主题" })]);
     await newLoad;
 
-    expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].title).toBe("新主题");
-    expect(useWorkbenchStore.getState().topicActions[actionKey("loadTopics", "course-1")].loading).toBe(false);
+    expect(firstTopic("course-1").title).toBe("新主题");
+    expect(actionState("loadTopics", "course-1").loading).toBe(false);
   });
 
   it("旧 loadTopics 晚于 generateTopics 返回时不能覆盖生成结果", async () => {
@@ -442,7 +525,7 @@ describe("主题工作流 Store", () => {
     oldLoad.resolve([topic({ title: "旧加载主题" })]);
     await loading;
 
-    expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].title).toBe("新生成主题");
+    expect(firstTopic("course-1").title).toBe("新生成主题");
   });
 
   it("旧 runTopic 晚于 updateTopicMapping 返回时不能覆盖新主题", async () => {
@@ -455,7 +538,7 @@ describe("主题工作流 Store", () => {
     oldRun.resolve(topic({ chapter_ids: ["chapter-1"], status: "COMPLETED" }));
     await running;
 
-    expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].chapter_ids).toEqual(["chapter-2"]);
+    expect(firstTopic("course-1").chapter_ids).toEqual(["chapter-2"]);
   });
 
   it("旧 loadTopics 晚于 updateTopicMapping 返回时不能覆盖新映射", async () => {
@@ -469,7 +552,7 @@ describe("主题工作流 Store", () => {
     oldLoad.resolve([topic({ chapter_ids: ["chapter-1"] })]);
     await loading;
 
-    expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].chapter_ids).toEqual(["chapter-2"]);
+    expect(firstTopic("course-1").chapter_ids).toEqual(["chapter-2"]);
   });
 
   it("缓存中无主题时 recoverTopic 响应仍阻止旧课程列表随后覆盖", async () => {
@@ -482,7 +565,7 @@ describe("主题工作流 Store", () => {
     oldLoad.resolve([topic({ status: "RUNNING" })]);
     await loading;
 
-    expect(useWorkbenchStore.getState().topicsByCourse["course-1"][0].status).toBe("FAILED");
+    expect(firstTopic("course-1").status).toBe("FAILED");
   });
 
   it("无缓存的旧 recoverTopic 不得在较新 loadTopics 完成后抢占课程列表", async () => {
@@ -511,7 +594,9 @@ describe("主题工作流 Store", () => {
     await expect(running).rejects.toThrow("操作失败，请稍后重试");
 
     const state = useWorkbenchStore.getState();
-    expect(state.topicsByCourse["course-1"][0].title).toBe("新加载主题");
+    expect(
+      requireAt(requireValue(state.topicsByCourse["course-1"], "course topics"), 0, "first course topic").title,
+    ).toBe("新加载主题");
     expect(state.topicActions[actionKey("loadTopics", "course-1")]).toEqual({ loading: false, error: null });
   });
 
@@ -527,7 +612,9 @@ describe("主题工作流 Store", () => {
     await expect(loading).rejects.toThrow("操作失败，请稍后重试");
 
     const state = useWorkbenchStore.getState();
-    expect(state.topicsByCourse["course-1"][0].chapter_ids).toEqual(["chapter-2"]);
+    expect(
+      requireAt(requireValue(state.topicsByCourse["course-1"], "course topics"), 0, "first course topic").chapter_ids,
+    ).toEqual(["chapter-2"]);
     expect(state.topicActions[actionKey("updateTopicMapping", "topic-1")]).toEqual({
       loading: false,
       error: null,

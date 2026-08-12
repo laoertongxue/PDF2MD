@@ -17,10 +17,8 @@ export default function TaskCard({ item }: { item: TaskItem }) {
   const chipColors = () => {
     if (item.status === "COMPLETED")
       return "bg-green-50 text-green-700 border-green-200 hover:bg-green-100 hover:border-green-300";
-    if (item.status === "FAILED")
-      return "bg-red-50 text-red-400 border-red-100 cursor-default";
-    if (item.status === "CANCELLED")
-      return "bg-gray-50 text-gray-400 border-gray-100 cursor-default";
+    if (item.status === "FAILED") return "bg-red-50 text-red-400 border-red-100 cursor-default";
+    if (item.status === "CANCELLED") return "bg-gray-50 text-gray-400 border-gray-100 cursor-default";
     return "bg-blue-50 text-blue-600 border-blue-100 cursor-default";
   };
 

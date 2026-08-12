@@ -101,8 +101,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
     const actionVersion = (actionVersions.get(actionKey) ?? 0) + 1;
     actionVersions.set(actionKey, actionVersion);
     const leases = new Map(resourceKeys.map((key) => [key, claimResource(key, startedAt)]));
-    const ownsResources = () =>
-      [...leases].every(([resourceKey, epoch]) => resourceEpochs.get(resourceKey) === epoch);
+    const ownsResources = () => [...leases].every(([resourceKey, epoch]) => resourceEpochs.get(resourceKey) === epoch);
     set((state) => ({
       topicActions: { ...state.topicActions, [actionKey]: { loading: true, error: null } },
     }));
@@ -132,7 +131,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
         set((state) => ({
           topicActions: {
             ...state.topicActions,
-            [actionKey]: { ...state.topicActions[actionKey], loading: false },
+            [actionKey]: { loading: false, error: state.topicActions[actionKey]?.error ?? null },
           },
         }));
       }
@@ -170,7 +169,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
       `topicBlocks:${topicId}`,
       `topicCards:${topicId}`,
       `topicRuns:${topicId}`,
-    ]) resourceEpochs.set(resourceKey, finalizedAt);
+    ])
+      resourceEpochs.set(resourceKey, finalizedAt);
     set((state) => {
       const topicBlocksById = { ...state.topicBlocksById };
       const topicCardsById = { ...state.topicCardsById };
@@ -191,11 +191,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
     });
   };
 
-  const runTopicAction = (
-    action: string,
-    topicId: string,
-    operation: () => Promise<CourseTopic>,
-  ) => {
+  const runTopicAction = (action: string, topicId: string, operation: () => Promise<CourseTopic>) => {
     const courseId = findTopicCourseId(topicId);
     return runAction(
       `${action}:${topicId}`,
@@ -213,7 +209,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
       return {
         chapters: {
           ...state.chapters,
-          [chapter.source_id]: exists ? chapters.map((item) => (item.id === chapter.id ? chapter : item)) : [...chapters, chapter],
+          [chapter.source_id]: exists
+            ? chapters.map((item) => (item.id === chapter.id ? chapter : item))
+            : [...chapters, chapter],
         },
       };
     });
@@ -291,7 +289,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
       set((state) => ({
         noteBlocksByChapter: {
           ...state.noteBlocksByChapter,
-          [chapterId]: (state.noteBlocksByChapter[chapterId] ?? []).map((item) => item.id === block.id || item.kind === block.kind ? block : item),
+          [chapterId]: (state.noteBlocksByChapter[chapterId] ?? []).map((item) =>
+            item.id === block.id || item.kind === block.kind ? block : item,
+          ),
         },
       }));
       return block;
@@ -353,8 +353,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
         saveTopic,
       ),
 
-    patchTopic: (topicId, body) =>
-      runTopicAction("patchTopic", topicId, () => api.patchTopic(topicId, body)),
+    patchTopic: (topicId, body) => runTopicAction("patchTopic", topicId, () => api.patchTopic(topicId, body)),
 
     mergeTopics: (courseId, body) =>
       runAction(
@@ -380,11 +379,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
     },
 
     updateTopicMapping: (topicId, chapterIds) =>
-      runTopicAction(
-        "updateTopicMapping",
-        topicId,
-        () => api.updateTopicMapping(topicId, chapterIds),
-      ),
+      runTopicAction("updateTopicMapping", topicId, () => api.updateTopicMapping(topicId, chapterIds)),
 
     confirmTopics: (courseId) =>
       runAction(
@@ -414,23 +409,26 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
         } catch (error) {
           const message = api.getSafeApiErrorMessage(error) ?? "操作失败，请稍后重试";
           if (actionVersions.get(actionKey) === actionVersion) {
-            set((state) => ({ topicActions: { ...state.topicActions, [actionKey]: { loading: false, error: message } } }));
+            set((state) => ({
+              topicActions: { ...state.topicActions, [actionKey]: { loading: false, error: message } },
+            }));
           }
           throw new Error(message);
         } finally {
           if (actionVersions.get(actionKey) === actionVersion) {
             set((state) => ({
-              topicActions: { ...state.topicActions, [actionKey]: { ...state.topicActions[actionKey], loading: false } },
+              topicActions: {
+                ...state.topicActions,
+                [actionKey]: { loading: false, error: state.topicActions[actionKey]?.error ?? null },
+              },
             }));
           }
         }
       })(),
 
-    runTopic: (topicId) =>
-      runTopicAction("runTopic", topicId, () => api.runTopic(topicId)),
+    runTopic: (topicId) => runTopicAction("runTopic", topicId, () => api.runTopic(topicId)),
 
-    runTopicHybrid: (topicId) =>
-      runTopicAction("runTopicHybrid", topicId, () => api.runTopicHybrid(topicId)),
+    runTopicHybrid: (topicId) => runTopicAction("runTopicHybrid", topicId, () => api.runTopicHybrid(topicId)),
 
     loadTopicBlocks: (topicId) =>
       runAction(
@@ -456,23 +454,22 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
         (runs) => set((state) => ({ topicRunsById: { ...state.topicRunsById, [topicId]: runs } })),
       ),
 
-    retryTopicSync: (topicId) =>
-      runTopicAction("retryTopicSync", topicId, () => api.retryTopicSync(topicId)),
+    retryTopicSync: (topicId) => runTopicAction("retryTopicSync", topicId, () => api.retryTopicSync(topicId)),
 
-    recoverTopic: (topicId) =>
-      runTopicAction("recoverTopic", topicId, () => api.recoverTopic(topicId)),
+    recoverTopic: (topicId) => runTopicAction("recoverTopic", topicId, () => api.recoverTopic(topicId)),
 
     saveTopicBlock: (topicId, kind, content, expectedContent) =>
       runAction(
         `saveTopicBlock:${topicId}:${kind}`,
         [`topicBlocks:${topicId}`],
         () => api.saveTopicBlock(topicId, kind, content, expectedContent),
-        (block) => set((state) => ({
-          topicBlocksById: {
-            ...state.topicBlocksById,
-            [topicId]: (state.topicBlocksById[topicId] ?? []).map((item) => item.kind === kind ? block : item),
-          },
-        })),
+        (block) =>
+          set((state) => ({
+            topicBlocksById: {
+              ...state.topicBlocksById,
+              [topicId]: (state.topicBlocksById[topicId] ?? []).map((item) => (item.kind === kind ? block : item)),
+            },
+          })),
       ),
   };
 });

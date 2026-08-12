@@ -97,7 +97,8 @@ function parseImportedSource(value: unknown): ImportedSource {
     typeof value.source_id !== "string" ||
     typeof value.title !== "string" ||
     typeof value.stored_path !== "string"
-  ) throw protocolError();
+  )
+    throw protocolError();
   return value as unknown as ImportedSource;
 }
 
@@ -126,99 +127,178 @@ function parseTopic(value: unknown): CourseTopic {
     typeof syncStatus !== "string" ||
     !TOPIC_SYNC_STATUSES.has(syncStatus as TopicSyncStatus) ||
     typeof value.sync_error !== "string"
-  ) throw protocolError();
+  )
+    throw protocolError();
   return value as unknown as CourseTopic;
 }
 
 function parseTopicBlock(value: unknown): TopicNoteBlock {
-  if (!isRecord(value) || typeof value.id !== "string" || typeof value.topic_id !== "string" ||
-    typeof value.kind !== "string" || typeof value.content !== "string" || typeof value.updated_at !== "number") {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.topic_id !== "string" ||
+    typeof value.kind !== "string" ||
+    typeof value.content !== "string" ||
+    typeof value.updated_at !== "number"
+  ) {
     throw protocolError();
   }
   return value as unknown as TopicNoteBlock;
 }
 
 function parseTopicCard(value: unknown): TopicCard {
-  if (!isRecord(value) || typeof value.id !== "string" || typeof value.topic_id !== "string" ||
-    typeof value.card_type !== "string" || typeof value.title !== "string" || typeof value.content !== "string" ||
-    !isStringArray(value.source_refs) || typeof value.created_at !== "number") {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.topic_id !== "string" ||
+    typeof value.card_type !== "string" ||
+    typeof value.title !== "string" ||
+    typeof value.content !== "string" ||
+    !isStringArray(value.source_refs) ||
+    typeof value.created_at !== "number"
+  ) {
     throw protocolError();
   }
   return value as unknown as TopicCard;
 }
 
 function parseTopicRun(value: unknown): TopicRun {
-  if (!isRecord(value) || typeof value.id !== "string" || typeof value.topic_id !== "string" ||
-    typeof value.round_key !== "string" || typeof value.status !== "string" ||
-    !TOPIC_RUN_STATUSES.has(value.status as TopicRunStatus) || typeof value.input_fingerprint !== "string" ||
-    typeof value.output !== "string" || typeof value.error !== "string" || typeof value.started_at !== "number" ||
-    (value.finished_at !== null && typeof value.finished_at !== "number")) {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.topic_id !== "string" ||
+    typeof value.round_key !== "string" ||
+    typeof value.status !== "string" ||
+    !TOPIC_RUN_STATUSES.has(value.status as TopicRunStatus) ||
+    typeof value.input_fingerprint !== "string" ||
+    typeof value.output !== "string" ||
+    typeof value.error !== "string" ||
+    typeof value.started_at !== "number" ||
+    (value.finished_at !== null && typeof value.finished_at !== "number")
+  ) {
     throw protocolError();
   }
   return value as unknown as TopicRun;
 }
 
 function parseCourseCard(value: unknown): Card {
-  if (!isRecord(value) || typeof value.id !== "string" ||
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
     (value.origin_type !== "chapter" && value.origin_type !== "topic") ||
-    typeof value.origin_id !== "string" || typeof value.origin_title !== "string" ||
-    typeof value.card_type !== "string" || typeof value.title !== "string" ||
-    typeof value.content !== "string" || !isStringArray(value.source_refs) || !isStringArray(value.tags) ||
-    (value.status !== "ACTIVE" && value.status !== "ARCHIVED") || typeof value.favorite !== "boolean" ||
-    typeof value.updated_at !== "number") throw protocolError();
+    typeof value.origin_id !== "string" ||
+    typeof value.origin_title !== "string" ||
+    typeof value.card_type !== "string" ||
+    typeof value.title !== "string" ||
+    typeof value.content !== "string" ||
+    !isStringArray(value.source_refs) ||
+    !isStringArray(value.tags) ||
+    (value.status !== "ACTIVE" && value.status !== "ARCHIVED") ||
+    typeof value.favorite !== "boolean" ||
+    typeof value.updated_at !== "number"
+  )
+    throw protocolError();
   return value as unknown as Card;
 }
 
 function parseNoteBlock(value: unknown): NoteBlock {
-  if (!isRecord(value) || typeof value.id !== "string" || typeof value.chapter_id !== "string" ||
-    typeof value.kind !== "string" || typeof value.title !== "string" || typeof value.body !== "string" ||
-    typeof value.seq !== "number" || (value.updated_at !== undefined && typeof value.updated_at !== "number")) throw protocolError();
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.chapter_id !== "string" ||
+    typeof value.kind !== "string" ||
+    typeof value.title !== "string" ||
+    typeof value.body !== "string" ||
+    typeof value.seq !== "number" ||
+    (value.updated_at !== undefined && typeof value.updated_at !== "number")
+  )
+    throw protocolError();
   return value as unknown as NoteBlock;
 }
 
 function parseChapterRun(value: unknown): ChapterRun {
-  if (!isRecord(value) || typeof value.id !== "string" || typeof value.chapter_id !== "string" ||
-    typeof value.round_key !== "string" || typeof value.executor !== "string" || typeof value.status !== "string" ||
-    !CHAPTER_RUN_STATUSES.has(value.status) || typeof value.output !== "string" || typeof value.error !== "string" ||
-    typeof value.stale !== "boolean" || typeof value.created_at !== "number" || typeof value.updated_at !== "number") throw protocolError();
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.chapter_id !== "string" ||
+    typeof value.round_key !== "string" ||
+    typeof value.executor !== "string" ||
+    typeof value.status !== "string" ||
+    !CHAPTER_RUN_STATUSES.has(value.status) ||
+    typeof value.output !== "string" ||
+    typeof value.error !== "string" ||
+    typeof value.stale !== "boolean" ||
+    typeof value.created_at !== "number" ||
+    typeof value.updated_at !== "number"
+  )
+    throw protocolError();
   return value as unknown as ChapterRun;
 }
 
 function parseChapterDraftState(value: unknown): ChapterDraftState {
-  if (!isRecord(value) || typeof value.fingerprint !== "string" || !Array.isArray(value.chapters)) throw protocolError();
+  if (!isRecord(value) || typeof value.fingerprint !== "string" || !Array.isArray(value.chapters))
+    throw protocolError();
   const chapters = value.chapters.map((chapter) => {
-    if (!isRecord(chapter) || typeof chapter.id !== "string" || typeof chapter.source_id !== "string" ||
-      typeof chapter.course_id !== "string" || typeof chapter.seq !== "number" || typeof chapter.title !== "string" ||
-      typeof chapter.status !== "string" || typeof chapter.start !== "number" || typeof chapter.end !== "number" ||
-      chapter.start < 0 || chapter.end <= chapter.start) throw protocolError();
+    if (
+      !isRecord(chapter) ||
+      typeof chapter.id !== "string" ||
+      typeof chapter.source_id !== "string" ||
+      typeof chapter.course_id !== "string" ||
+      typeof chapter.seq !== "number" ||
+      typeof chapter.title !== "string" ||
+      typeof chapter.status !== "string" ||
+      typeof chapter.start !== "number" ||
+      typeof chapter.end !== "number" ||
+      chapter.start < 0 ||
+      chapter.end <= chapter.start
+    )
+      throw protocolError();
     return chapter as unknown as ChapterDraftState["chapters"][number];
   });
   return { chapters, fingerprint: value.fingerprint };
 }
 
 function parseOcrStatus(value: unknown): OcrStatus {
-  if (!isRecord(value) || typeof value.status !== "string" || !OCR_STATUSES.has(value.status) ||
-    typeof value.source_path !== "string" || typeof value.state_path !== "string" ||
-    (value.error !== null && typeof value.error !== "string") || typeof value.publishable !== "boolean" ||
+  if (
+    !isRecord(value) ||
+    typeof value.status !== "string" ||
+    !OCR_STATUSES.has(value.status) ||
+    typeof value.source_path !== "string" ||
+    typeof value.state_path !== "string" ||
+    (value.error !== null && typeof value.error !== "string") ||
+    typeof value.publishable !== "boolean" ||
     (value.markdown_path !== null && typeof value.markdown_path !== "string") ||
-    (value.chapter_tree_path !== null && typeof value.chapter_tree_path !== "string")) throw protocolError();
-  const status = value.status === "completed" && value.publishable === false
-    ? "blocked"
-    : value.status;
+    (value.chapter_tree_path !== null && typeof value.chapter_tree_path !== "string")
+  )
+    throw protocolError();
+  const status = value.status === "completed" && value.publishable === false ? "blocked" : value.status;
   return { ...value, status } as unknown as OcrStatus;
 }
 
 function parseOcrTree(value: unknown): OcrChapterTree {
-  if (!isRecord(value) || typeof value.input_fingerprint !== "string" ||
-    typeof value.evidence_fingerprint !== "string" || typeof value.proposal_fingerprint !== "string" ||
-    typeof value.needs_confirmation !== "boolean" || !isStringArray(value.warnings) || !Array.isArray(value.chapters)) throw protocolError();
+  if (
+    !isRecord(value) ||
+    typeof value.input_fingerprint !== "string" ||
+    typeof value.evidence_fingerprint !== "string" ||
+    typeof value.proposal_fingerprint !== "string" ||
+    typeof value.needs_confirmation !== "boolean" ||
+    !isStringArray(value.warnings) ||
+    !Array.isArray(value.chapters)
+  )
+    throw protocolError();
   return value as unknown as OcrChapterTree;
 }
 
 function parseOcrNote(value: unknown): OcrNoteResult {
-  if (!isRecord(value) || value.status !== "completed" || value.publishable !== true ||
-    typeof value.markdown_path !== "string" || typeof value.markdown !== "string" ||
-    typeof value.input_fingerprint !== "string") throw protocolError();
+  if (
+    !isRecord(value) ||
+    value.status !== "completed" ||
+    value.publishable !== true ||
+    typeof value.markdown_path !== "string" ||
+    typeof value.markdown !== "string" ||
+    typeof value.input_fingerprint !== "string"
+  )
+    throw protocolError();
   return value as unknown as OcrNoteResult;
 }
 
@@ -268,11 +348,15 @@ async function request<T>(
 }
 
 function post<T>(path: string, body?: unknown, parse?: (value: unknown) => T): Promise<T> {
-  return request<T>(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  }, parse);
+  return request<T>(
+    path,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    },
+    parse,
+  );
 }
 
 export function listCourses(): Promise<Course[]> {
@@ -317,7 +401,11 @@ export function confirmSourceChapter(sourceId: string, chapterId: string): Promi
 }
 
 export function generateSourceNote(sourceId: string, chapterId: string): Promise<OcrNoteResult> {
-  return post<OcrNoteResult>(`/api/workbench/sources/${sourceId}/ocr/generate`, { chapter_id: chapterId }, parseOcrNote);
+  return post<OcrNoteResult>(
+    `/api/workbench/sources/${sourceId}/ocr/generate`,
+    { chapter_id: chapterId },
+    parseOcrNote,
+  );
 }
 
 export function detectChapters(sourceId: string): Promise<Chapter[]> {
@@ -329,17 +417,35 @@ export function listChapters(sourceId: string): Promise<Chapter[]> {
 }
 
 export function getChapterDrafts(sourceId: string): Promise<ChapterDraftState> {
-  return request<ChapterDraftState>(`/api/workbench/sources/${sourceId}/chapter-drafts`, undefined, parseChapterDraftState);
+  return request<ChapterDraftState>(
+    `/api/workbench/sources/${sourceId}/chapter-drafts`,
+    undefined,
+    parseChapterDraftState,
+  );
 }
 
-export function replaceChapterDrafts(sourceId: string, expected_fingerprint: string, chapters: ChapterDraftSpec[]): Promise<ChapterDraftState> {
-  return request<ChapterDraftState>(`/api/workbench/sources/${sourceId}/chapter-drafts`, {
-    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_fingerprint, chapters }),
-  }, parseChapterDraftState);
+export function replaceChapterDrafts(
+  sourceId: string,
+  expected_fingerprint: string,
+  chapters: ChapterDraftSpec[],
+): Promise<ChapterDraftState> {
+  return request<ChapterDraftState>(
+    `/api/workbench/sources/${sourceId}/chapter-drafts`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_fingerprint, chapters }),
+    },
+    parseChapterDraftState,
+  );
 }
 
 export function confirmChapterDrafts(sourceId: string, expected_fingerprint: string): Promise<ChapterDraftState> {
-  return post<ChapterDraftState>(`/api/workbench/sources/${sourceId}/chapter-drafts/confirm`, { expected_fingerprint }, parseChapterDraftState);
+  return post<ChapterDraftState>(
+    `/api/workbench/sources/${sourceId}/chapter-drafts/confirm`,
+    { expected_fingerprint },
+    parseChapterDraftState,
+  );
 }
 
 export function getChapter(chapterId: string): Promise<Chapter> {
@@ -375,38 +481,70 @@ export function runHybridChapter(chapterId: string): Promise<Chapter> {
 }
 
 export function listCourseCards(courseId: string): Promise<Card[]> {
-  return request<Card[]>(`/api/workbench/courses/${courseId}/cards`, undefined, (value) => parseArray(value, parseCourseCard));
+  return request<Card[]>(`/api/workbench/courses/${courseId}/cards`, undefined, (value) =>
+    parseArray(value, parseCourseCard),
+  );
 }
 
 export function updateCourseCard(cardId: string, body: CourseCardPatch): Promise<Card> {
-  return request<Card>(`/api/workbench/cards/${cardId}`, {
-    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  }, parseCourseCard);
+  return request<Card>(
+    `/api/workbench/cards/${cardId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    parseCourseCard,
+  );
 }
 
 export function setCourseCardFavorite(cardId: string, favorite: boolean, expectedUpdatedAt: number): Promise<Card> {
-  return request<Card>(`/api/workbench/cards/${cardId}/favorite`, {
-    method: "PATCH", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ favorite, expected_updated_at: expectedUpdatedAt }),
-  }, parseCourseCard);
+  return request<Card>(
+    `/api/workbench/cards/${cardId}/favorite`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ favorite, expected_updated_at: expectedUpdatedAt }),
+    },
+    parseCourseCard,
+  );
 }
 
 export function listChapterNoteBlocks(chapterId: string): Promise<NoteBlock[]> {
-  return request<NoteBlock[]>(`/api/workbench/chapters/${chapterId}/note-blocks`, undefined, (value) => parseArray(value, parseNoteBlock));
+  return request<NoteBlock[]>(`/api/workbench/chapters/${chapterId}/note-blocks`, undefined, (value) =>
+    parseArray(value, parseNoteBlock),
+  );
 }
 
 export function listChapterRuns(chapterId: string): Promise<ChapterRun[]> {
-  return request<ChapterRun[]>(`/api/workbench/chapters/${chapterId}/runs`, undefined, (value) => parseArray(value, parseChapterRun));
+  return request<ChapterRun[]>(`/api/workbench/chapters/${chapterId}/runs`, undefined, (value) =>
+    parseArray(value, parseChapterRun),
+  );
 }
 
-export function saveChapterBlock(chapterId: string, kind: string, body: string, expectedBody: string): Promise<NoteBlock> {
-  return request<NoteBlock>(`/api/workbench/chapters/${chapterId}/note-blocks/${kind}`, {
-    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body, expected_body: expectedBody }),
-  }, parseNoteBlock, false, { 507: "edit_saved_sync_failed" });
+export function saveChapterBlock(
+  chapterId: string,
+  kind: string,
+  body: string,
+  expectedBody: string,
+): Promise<NoteBlock> {
+  return request<NoteBlock>(
+    `/api/workbench/chapters/${chapterId}/note-blocks/${kind}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body, expected_body: expectedBody }),
+    },
+    parseNoteBlock,
+    false,
+    { 507: "edit_saved_sync_failed" },
+  );
 }
 
 export function listTopics(courseId: string): Promise<CourseTopic[]> {
-  return request<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics`, undefined, (value) => parseArray(value, parseTopic));
+  return request<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics`, undefined, (value) =>
+    parseArray(value, parseTopic),
+  );
 }
 
 export function createTopic(courseId: string, body: TopicCreateRequest): Promise<CourseTopic> {
@@ -414,15 +552,21 @@ export function createTopic(courseId: string, body: TopicCreateRequest): Promise
 }
 
 export function generateTopics(courseId: string, executor: TopicOutlineExecutor = "stub"): Promise<CourseTopic[]> {
-  return post<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics/generate`, { executor }, (value) => parseArray(value, parseTopic));
+  return post<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics/generate`, { executor }, (value) =>
+    parseArray(value, parseTopic),
+  );
 }
 
 export function reorderTopics(courseId: string, topic_ids: string[]): Promise<CourseTopic[]> {
-  return request<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics/reorder`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topic_ids }),
-  }, (value) => parseArray(value, parseTopic));
+  return request<CourseTopic[]>(
+    `/api/workbench/courses/${courseId}/topics/reorder`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic_ids }),
+    },
+    (value) => parseArray(value, parseTopic),
+  );
 }
 
 export function mergeTopics(courseId: string, body: TopicMergeRequest): Promise<CourseTopic> {
@@ -434,7 +578,9 @@ export function splitTopic(topicId: string, body: TopicSplitRequest): Promise<Co
 }
 
 export function confirmTopics(courseId: string): Promise<CourseTopic[]> {
-  return post<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics/confirm`, undefined, (value) => parseArray(value, parseTopic));
+  return post<CourseTopic[]>(`/api/workbench/courses/${courseId}/topics/confirm`, undefined, (value) =>
+    parseArray(value, parseTopic),
+  );
 }
 
 export function getTopic(topicId: string): Promise<CourseTopic> {
@@ -442,11 +588,15 @@ export function getTopic(topicId: string): Promise<CourseTopic> {
 }
 
 export function patchTopic(topicId: string, body: TopicPatchRequest): Promise<CourseTopic> {
-  return request<CourseTopic>(`/api/workbench/topics/${topicId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  }, parseTopic);
+  return request<CourseTopic>(
+    `/api/workbench/topics/${topicId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    parseTopic,
+  );
 }
 
 export function deleteTopic(topicId: string): Promise<void> {
@@ -454,11 +604,15 @@ export function deleteTopic(topicId: string): Promise<void> {
 }
 
 export function updateTopicMapping(topicId: string, chapter_ids: string[]): Promise<CourseTopic> {
-  return request<CourseTopic>(`/api/workbench/topics/${topicId}/chapters`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chapter_ids }),
-  }, parseTopic);
+  return request<CourseTopic>(
+    `/api/workbench/topics/${topicId}/chapters`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chapter_ids }),
+    },
+    parseTopic,
+  );
 }
 
 export function runTopic(topicId: string): Promise<CourseTopic> {
@@ -470,9 +624,15 @@ export function runTopicHybrid(topicId: string): Promise<CourseTopic> {
 }
 
 export function recoverTopic(topicId: string): Promise<CourseTopic> {
-  return request<CourseTopic>(`/api/workbench/topics/${topicId}/recover`, {
-    method: "POST",
-  }, parseTopic, false, { 409: "task_running" });
+  return request<CourseTopic>(
+    `/api/workbench/topics/${topicId}/recover`,
+    {
+      method: "POST",
+    },
+    parseTopic,
+    false,
+    { 409: "task_running" },
+  );
 }
 
 export function retryTopicSync(topicId: string): Promise<CourseTopic> {
@@ -480,19 +640,38 @@ export function retryTopicSync(topicId: string): Promise<CourseTopic> {
 }
 
 export function listTopicNoteBlocks(topicId: string): Promise<TopicNoteBlock[]> {
-  return request<TopicNoteBlock[]>(`/api/workbench/topics/${topicId}/note-blocks`, undefined, (value) => parseArray(value, parseTopicBlock));
+  return request<TopicNoteBlock[]>(`/api/workbench/topics/${topicId}/note-blocks`, undefined, (value) =>
+    parseArray(value, parseTopicBlock),
+  );
 }
 
 export function listTopicCards(topicId: string): Promise<TopicCard[]> {
-  return request<TopicCard[]>(`/api/workbench/topics/${topicId}/cards`, undefined, (value) => parseArray(value, parseTopicCard));
+  return request<TopicCard[]>(`/api/workbench/topics/${topicId}/cards`, undefined, (value) =>
+    parseArray(value, parseTopicCard),
+  );
 }
 
 export function listTopicRuns(topicId: string): Promise<TopicRun[]> {
-  return request<TopicRun[]>(`/api/workbench/topics/${topicId}/runs`, undefined, (value) => parseArray(value, parseTopicRun));
+  return request<TopicRun[]>(`/api/workbench/topics/${topicId}/runs`, undefined, (value) =>
+    parseArray(value, parseTopicRun),
+  );
 }
 
-export function saveTopicBlock(topicId: string, kind: string, content: string, expectedContent: string): Promise<TopicNoteBlock> {
-  return request<TopicNoteBlock>(`/api/workbench/topics/${topicId}/note-blocks/${kind}`, {
-    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content, expected_content: expectedContent }),
-  }, parseTopicBlock, false, { 507: "edit_saved_sync_failed" });
+export function saveTopicBlock(
+  topicId: string,
+  kind: string,
+  content: string,
+  expectedContent: string,
+): Promise<TopicNoteBlock> {
+  return request<TopicNoteBlock>(
+    `/api/workbench/topics/${topicId}/note-blocks/${kind}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, expected_content: expectedContent }),
+    },
+    parseTopicBlock,
+    false,
+    { 507: "edit_saved_sync_failed" },
+  );
 }

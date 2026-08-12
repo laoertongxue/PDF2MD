@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import MermaidBlock, { sanitizeMermaidSvg } from "../components/MermaidBlock";
+import MermaidBlock from "../components/MermaidBlock";
+import { sanitizeMermaidSvg } from "../components/mermaidSanitizer";
 import "../index.css";
 
 const maliciousSvg = `<svg xmlns="http://www.w3.org/2000/svg" onload="alert('svg-xss')">
@@ -11,7 +12,7 @@ const maliciousSvg = `<svg xmlns="http://www.w3.org/2000/svg" onload="alert('svg
   <text x="10" y="24">安全中文标签</text>
 </svg>`;
 
-function AcceptanceFixture() {
+export function AcceptanceFixture() {
   const sanitized = sanitizeMermaidSvg(maliciousSvg);
   return (
     <main className="mx-auto min-h-[1100px] max-w-5xl space-y-8 bg-white p-8 text-zinc-900">

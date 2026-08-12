@@ -20,15 +20,21 @@ export default function MermaidEditor({ title, initial, onSave, onDirtyChange }:
   useEffect(() => {
     generation.current += 1;
     setCode(initial);
-    setSaving(false); setSaved(false); setError("");
+    setSaving(false);
+    setSaved(false);
+    setError("");
   }, [initial]);
 
-  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const save = async () => {
     if (saving || !dirty || !code.trim()) return;
     const current = ++generation.current;
-    setSaving(true); setSaved(false); setError("");
+    setSaving(true);
+    setSaved(false);
+    setError("");
     try {
       const ok = await onSave(code, initial);
       if (generation.current === current) setSaved(ok);
@@ -58,13 +64,28 @@ export default function MermaidEditor({ title, initial, onSave, onDirtyChange }:
         </div>
       </div>
       <div className="flex min-h-9 flex-wrap items-center gap-3">
-        <button type="button" onClick={save} disabled={saving || !dirty || !code.trim()} className="inline-flex items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium disabled:opacity-40">
-          {saving ? <Loader2 size={15} className="animate-spin" /> : error ? <RefreshCw size={15} /> : <Save size={15} />}
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving || !dirty || !code.trim()}
+          className="inline-flex items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium disabled:opacity-40"
+        >
+          {saving ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : error ? (
+            <RefreshCw size={15} />
+          ) : (
+            <Save size={15} />
+          )}
           {error ? "重试保存" : "保存 Mermaid"}
         </button>
         {saving && <span className="text-xs text-zinc-500">正在保存…</span>}
         {saved && <span className="text-xs text-emerald-700">已保存并同步 Markdown</span>}
-        {error && <span role="alert" className="text-xs text-red-700">{error}</span>}
+        {error && (
+          <span role="alert" className="text-xs text-red-700">
+            {error}
+          </span>
+        )}
       </div>
     </div>
   );

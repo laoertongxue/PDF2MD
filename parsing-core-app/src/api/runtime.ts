@@ -33,7 +33,7 @@ export async function getServiceStatus(): Promise<ServiceStatus> {
         signal: AbortSignal.timeout(1500),
       });
       if (!response.ok) throw new Error(`health returned HTTP ${response.status}`);
-      const payload = await response.json() as { status?: unknown };
+      const payload = (await response.json()) as { status?: unknown };
       if (payload.status !== "ok") throw new Error("health response was not ok");
       return { state: "running", port };
     } catch (error) {

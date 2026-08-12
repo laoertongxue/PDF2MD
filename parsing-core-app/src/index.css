@@ -1,6 +1,8 @@
 @import "tailwindcss";
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+}
 
 :root {
   --accent: 99 102 241;
@@ -15,25 +17,61 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-::selection { background: rgb(var(--accent) / 0.2); }
+::selection {
+  background: rgb(var(--accent) / 0.2);
+}
 
-::-webkit-scrollbar { width: 4px; height: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 99px; }
-::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
+}
 
-@keyframes in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-.animate-in { animation: in 0.3s ease-out both; }
-.animate-in-1 { animation-delay: 0.04s; }
-.animate-in-2 { animation-delay: 0.08s; }
-.animate-in-3 { animation-delay: 0.12s; }
+@keyframes in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-in {
+  animation: in 0.3s ease-out both;
+}
+.animate-in-1 {
+  animation-delay: 0.04s;
+}
+.animate-in-2 {
+  animation-delay: 0.08s;
+}
+.animate-in-3 {
+  animation-delay: 0.12s;
+}
 
 .shimmer {
   background: linear-gradient(90deg, #f4f4f5 25%, #e4e4e7 50%, #f4f4f5 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite linear;
 }
-@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
 
 .mermaid-preview > svg {
   display: block;

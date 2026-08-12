@@ -1,4 +1,4 @@
-import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, FileText, Loader2, RefreshCw, Upload } from "lucide-react";
 import type { Chapter, ImportedSource, Source } from "../../api/workbenchTypes";
 import { SafeApiError } from "../../api/workbench";
@@ -14,9 +14,9 @@ interface QueueItem {
   path: string | null;
   status: QueueStatus;
   phase: QueuePhase;
-  sourceId?: string;
-  storedPath?: string;
-  error?: string;
+  sourceId?: string | undefined;
+  storedPath?: string | undefined;
+  error?: string | undefined;
 }
 
 interface Props {
@@ -51,7 +51,13 @@ function canRetryImport(error: unknown) {
   return error instanceof SafeApiError && !["network", "protocol", "canceled"].includes(error.category);
 }
 
-export default function ImportTextbooks({ courseId, currentSources, importSources, detectChapters, loadSources }: Props) {
+export default function ImportTextbooks({
+  courseId,
+  currentSources,
+  importSources,
+  detectChapters,
+  loadSources,
+}: Props) {
   const desktop = isTauriRuntime();
   const [items, setItems] = useState<QueueItem[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
@@ -68,7 +74,7 @@ export default function ImportTextbooks({ courseId, currentSources, importSource
     setDragActive(false);
   }, [courseId]);
 
-  const enqueue = (candidates: Array<{ name: string; path: string | null }>) => {
+  const enqueue = useCallback((candidates: Array<{ name: string; path: string | null }>) => {
     const nextErrors = candidates
       .filter(({ name }) => !supportedExtension.test(name))
       .map(({ name }) => `${name}：不支持此文件类型`);
@@ -79,59 +85,74 @@ export default function ImportTextbooks({ courseId, currentSources, importSource
         const key = path ?? `browser:${name}`;
         if (keys.has(key)) return [];
         keys.add(key);
-        return [{
-          key,
-          name,
-          title: titleFromName(name),
-          path,
-          status: path ? "等待" as const : "失败" as const,
-          phase: "import" as const,
-          error: path ? undefined : "无法读取本地文件路径",
-        }];
+        return [
+          {
+            key,
+            name,
+            title: titleFromName(name),
+            path,
+            status: path ? ("等待" as const) : ("失败" as const),
+            phase: "import" as const,
+            error: path ? undefined : "无法读取本地文件路径",
+          },
+        ];
       });
       return [...current, ...additions];
     });
     if (nextErrors.length) setErrors((current) => [...current, ...nextErrors]);
-  };
+  }, []);
 
-  const enqueuePaths = (paths: string[]) => enqueue(paths.map((path) => ({
-    name: safeName(path),
-    path: isAbsolutePath(path) ? path : null,
-  })));
+  const enqueuePaths = useCallback(
+    (paths: string[]) =>
+      enqueue(
+        paths.map((path) => ({
+          name: safeName(path),
+          path: isAbsolutePath(path) ? path : null,
+        })),
+      ),
+    [enqueue],
+  );
 
-  const enqueueNativeDrop = async (paths: string[]) => {
-    const dropGeneration = generation.current;
-    const supported = paths.filter((path) => supportedExtension.test(safeName(path)));
-    const unsupported = paths.filter((path) => !supportedExtension.test(safeName(path)));
-    if (unsupported.length) enqueuePaths(unsupported);
-    if (!supported.length) return;
-    const { invoke } = await import("@tauri-apps/api/core");
-    const checks = await Promise.all(supported.map(async (path) => ({
-      path,
-      isFile: await invoke<boolean>("textbook_path_is_file", { path }),
-    })));
-    if (generation.current !== dropGeneration) return;
-    const directories = checks.filter((item) => !item.isFile);
-    if (directories.length) {
-      setErrors((current) => [...current, ...directories.map(({ path }) => `${safeName(path)}：不支持导入文件夹`)]);
-    }
-    enqueuePaths(checks.filter((item) => item.isFile).map((item) => item.path));
-  };
+  const enqueueNativeDrop = useCallback(
+    async (paths: string[]) => {
+      const dropGeneration = generation.current;
+      const supported = paths.filter((path) => supportedExtension.test(safeName(path)));
+      const unsupported = paths.filter((path) => !supportedExtension.test(safeName(path)));
+      if (unsupported.length) enqueuePaths(unsupported);
+      if (!supported.length) return;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const checks = await Promise.all(
+        supported.map(async (path) => ({
+          path,
+          isFile: await invoke<boolean>("textbook_path_is_file", { path }),
+        })),
+      );
+      if (generation.current !== dropGeneration) return;
+      const directories = checks.filter((item) => !item.isFile);
+      if (directories.length) {
+        setErrors((current) => [...current, ...directories.map(({ path }) => `${safeName(path)}：不支持导入文件夹`)]);
+      }
+      enqueuePaths(checks.filter((item) => item.isFile).map((item) => item.path));
+    },
+    [enqueuePaths],
+  );
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in globalThis)) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     import("@tauri-apps/api/webview")
-      .then(({ getCurrentWebview }) => getCurrentWebview().onDragDropEvent((event) => {
-        const payload = event.payload;
-        if (payload.type === "enter" || payload.type === "over") setDragActive(true);
-        if (payload.type === "leave") setDragActive(false);
-        if (payload.type === "drop") {
-          setDragActive(false);
-          enqueueNativeDrop(payload.paths).catch(() => setErrors((current) => [...current, "无法读取拖放文件"]));
-        }
-      }))
+      .then(({ getCurrentWebview }) =>
+        getCurrentWebview().onDragDropEvent((event) => {
+          const payload = event.payload;
+          if (payload.type === "enter" || payload.type === "over") setDragActive(true);
+          if (payload.type === "leave") setDragActive(false);
+          if (payload.type === "drop") {
+            setDragActive(false);
+            enqueueNativeDrop(payload.paths).catch(() => setErrors((current) => [...current, "无法读取拖放文件"]));
+          }
+        }),
+      )
       .then((stop) => {
         if (disposed) stop();
         else unlisten = stop;
@@ -141,7 +162,7 @@ export default function ImportTextbooks({ courseId, currentSources, importSource
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [enqueueNativeDrop]);
 
   const chooseFiles = async () => {
     if (!desktop) return;
@@ -173,7 +194,9 @@ export default function ImportTextbooks({ courseId, currentSources, importSource
         else candidates.push({ name: file.name, path: filePath(file) });
       }
     } else {
-      candidates.push(...Array.from(event.dataTransfer.files).map((file) => ({ name: file.name, path: filePath(file) })));
+      candidates.push(
+        ...Array.from(event.dataTransfer.files).map((file) => ({ name: file.name, path: filePath(file) })),
+      );
     }
     if (droppedErrors.length) setErrors((current) => [...current, ...droppedErrors]);
     enqueue(candidates);
@@ -213,10 +236,12 @@ export default function ImportTextbooks({ courseId, currentSources, importSource
               return source.title === title || safeName(source.file_path) === item.name;
             });
             if (candidates.length === 1) {
+              const candidate = candidates[0];
+              if (!candidate) throw new Error("服务返回数据格式异常，请稍后重试");
               imported = {
-                source_id: candidates[0].id,
-                title: candidates[0].title,
-                stored_path: candidates[0].file_path,
+                source_id: candidate.id,
+                title: candidate.title,
+                stored_path: candidate.file_path,
               };
             }
           }
@@ -281,26 +306,79 @@ export default function ImportTextbooks({ courseId, currentSources, importSource
 
   return (
     <div className="space-y-4">
-      <div data-testid="textbook-drop-zone" data-drag-active={dragActive} onDragEnter={() => setDragActive(true)} onDragLeave={() => setDragActive(false)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { setDragActive(false); dropped(event); }} className={`flex min-h-40 flex-col items-center justify-center border-2 border-dashed px-6 py-8 text-center transition-colors ${dragActive ? "border-emerald-500 bg-emerald-50" : "border-zinc-300 hover:border-zinc-400"}`}>
+      <div
+        data-testid="textbook-drop-zone"
+        data-drag-active={dragActive}
+        onDragEnter={() => setDragActive(true)}
+        onDragLeave={() => setDragActive(false)}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          setDragActive(false);
+          dropped(event);
+        }}
+        className={`flex min-h-40 flex-col items-center justify-center border-2 border-dashed px-6 py-8 text-center transition-colors ${dragActive ? "border-emerald-500 bg-emerald-50" : "border-zinc-300 hover:border-zinc-400"}`}
+      >
         <Upload size={28} className="mb-3 text-zinc-400" aria-hidden="true" />
         <p className="text-sm font-medium text-zinc-800">拖放或选择课程教材</p>
         <p className="mt-1 text-xs text-zinc-500">支持 PDF、Word、PPT、Excel 与常见图片，可一次选择多本</p>
-        <button type="button" onClick={chooseFiles} disabled={!desktop} title={desktop ? "选择多本教材" : "请使用桌面客户端导入"} className="mt-4 inline-flex h-9 items-center gap-2 rounded-md bg-zinc-900 px-4 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"><FileText size={15} aria-hidden="true" />选择教材</button>
-        <input ref={inputRef} type="file" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff,.webp" onChange={webFiles} className="sr-only" aria-label="选择教材文件" />
+        <button
+          type="button"
+          onClick={chooseFiles}
+          disabled={!desktop}
+          title={desktop ? "选择多本教材" : "请使用桌面客户端导入"}
+          className="mt-4 inline-flex h-9 items-center gap-2 rounded-md bg-zinc-900 px-4 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+        >
+          <FileText size={15} aria-hidden="true" />
+          选择教材
+        </button>
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff,.webp"
+          onChange={webFiles}
+          className="sr-only"
+          aria-label="选择教材文件"
+        />
       </div>
-      {!desktop && <div role="alert" className="border-l-2 border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-800">浏览器版无法读取教材的本地路径，请使用桌面客户端导入。</div>}
-      {errors.length > 0 && <div role="alert" className="space-y-1 text-sm text-red-600">{errors.map((error, index) => <p key={`${error}-${index}`}>{error}</p>)}</div>}
+      {!desktop && (
+        <div role="alert" className="border-l-2 border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          浏览器版无法读取教材的本地路径，请使用桌面客户端导入。
+        </div>
+      )}
+      {errors.length > 0 && (
+        <div role="alert" className="space-y-1 text-sm text-red-600">
+          {errors.map((error, index) => (
+            <p key={`${error}-${index}`}>{error}</p>
+          ))}
+        </div>
+      )}
       {items.length > 0 && (
         <div className="border-y border-zinc-200">
           <div className="flex h-12 items-center justify-between border-b border-zinc-100 px-1">
             <span className="text-sm font-medium text-zinc-700">导入队列 · {items.length} 本</span>
-            {hasPending && <button type="button" onClick={importAll} title="导入队列中的教材" className="inline-flex h-8 items-center gap-2 rounded-md bg-emerald-600 px-3 text-xs font-medium text-white hover:bg-emerald-700"><Upload size={14} aria-hidden="true" />导入全部</button>}
+            {hasPending && (
+              <button
+                type="button"
+                onClick={importAll}
+                title="导入队列中的教材"
+                className="inline-flex h-8 items-center gap-2 rounded-md bg-emerald-600 px-3 text-xs font-medium text-white hover:bg-emerald-700"
+              >
+                <Upload size={14} aria-hidden="true" />
+                导入全部
+              </button>
+            )}
           </div>
           <ul className="divide-y divide-zinc-100">
             {items.map((item) => (
-              <li key={item.key} className="grid min-h-14 grid-cols-[minmax(0,1fr)_96px_36px] items-center gap-3 px-1 py-2">
+              <li
+                key={item.key}
+                className="grid min-h-14 grid-cols-[minmax(0,1fr)_96px_36px] items-center gap-3 px-1 py-2"
+              >
                 <div className="min-w-0 py-1">
-                  <p className="mb-1 truncate text-xs text-zinc-400" title={item.name}>{item.name}</p>
+                  <p className="mb-1 truncate text-xs text-zinc-400" title={item.name}>
+                    {item.name}
+                  </p>
                   <label className="block">
                     <span className="mb-1 block text-xs text-zinc-500">教材名称</span>
                     <input
@@ -308,15 +386,42 @@ export default function ImportTextbooks({ courseId, currentSources, importSource
                       aria-label="教材名称"
                       maxLength={120}
                       value={item.title}
-                      disabled={!item.path || !(item.status === "等待" || (item.status === "失败" && item.phase === "import"))}
+                      disabled={
+                        !item.path || !(item.status === "等待" || (item.status === "失败" && item.phase === "import"))
+                      }
                       onChange={(event) => setItem(item.key, { title: event.target.value, error: undefined })}
                       className="h-8 w-full rounded-md border border-zinc-200 px-2 text-sm text-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-200 disabled:bg-zinc-50 disabled:text-zinc-500"
                     />
                   </label>
-                  {item.error && <p className="mt-1 text-xs text-red-600" title={item.error}>{item.error}</p>}
+                  {item.error && (
+                    <p className="mt-1 text-xs text-red-600" title={item.error}>
+                      {item.error}
+                    </p>
+                  )}
                 </div>
-                <span className="inline-flex h-7 items-center gap-1.5 text-xs text-zinc-500" aria-live="polite">{item.status === "成功" ? <CheckCircle2 size={14} className="text-emerald-600" /> : item.status === "失败" || item.status === "结果待确认" ? <AlertCircle size={14} className="text-red-600" /> : item.status !== "等待" ? <Loader2 size={14} className="animate-spin" /> : null}{item.status}</span>
-                {item.status === "失败" && item.path ? <button type="button" onClick={() => retry(item)} aria-label={`重试 ${item.name}`} title={`重试 ${item.name}`} className="flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100"><RefreshCw size={15} aria-hidden="true" /></button> : <span className="h-8 w-8" />}
+                <span className="inline-flex h-7 items-center gap-1.5 text-xs text-zinc-500" aria-live="polite">
+                  {item.status === "成功" ? (
+                    <CheckCircle2 size={14} className="text-emerald-600" />
+                  ) : item.status === "失败" || item.status === "结果待确认" ? (
+                    <AlertCircle size={14} className="text-red-600" />
+                  ) : item.status !== "等待" ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : null}
+                  {item.status}
+                </span>
+                {item.status === "失败" && item.path ? (
+                  <button
+                    type="button"
+                    onClick={() => retry(item)}
+                    aria-label={`重试 ${item.name}`}
+                    title={`重试 ${item.name}`}
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100"
+                  >
+                    <RefreshCw size={15} aria-hidden="true" />
+                  </button>
+                ) : (
+                  <span className="h-8 w-8" />
+                )}
               </li>
             ))}
           </ul>

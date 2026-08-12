@@ -1,6 +1,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import mermaid from "mermaid";
 import { afterEach, describe, expect, it } from "vitest";
+import { requireAt } from "../test/requireValue";
 import MermaidBlock from "./MermaidBlock";
 
 if (!("CSSStyleSheet" in globalThis)) {
@@ -63,12 +64,10 @@ describe("Mermaid 11 runtime contract", () => {
   });
 
   it("renders a generated diagram without leaked Mermaid error output", async () => {
-    const view = render(<MermaidBlock code={GENERATED_TOPIC_DIAGRAMS[0]} />);
+    const view = render(<MermaidBlock code={requireAt(GENERATED_TOPIC_DIAGRAMS, 0, "generated diagram")} />);
 
     await waitFor(() => {
-      const labels = Array.from(view.container.querySelectorAll("svg text")).map(
-        (node) => node.textContent,
-      );
+      const labels = Array.from(view.container.querySelectorAll("svg text")).map((node) => node.textContent);
       expect(labels).toEqual(expect.arrayContaining(["核心概念", "融合框架"]));
     });
     expect(view.container.textContent).not.toContain("Syntax error in text");

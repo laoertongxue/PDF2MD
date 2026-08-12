@@ -73,7 +73,12 @@ describe("MermaidBlock", () => {
       return { svg: "<svg><text>rendered</text></svg>" };
     });
 
-    render(<><MermaidBlock code="graph TD\nA-->B" /><MermaidBlock code="graph TD\nC-->D" /></>);
+    render(
+      <>
+        <MermaidBlock code="graph TD\nA-->B" />
+        <MermaidBlock code="graph TD\nC-->D" />
+      </>,
+    );
 
     await screen.findAllByText("rendered");
     expect(maxActive).toBe(1);

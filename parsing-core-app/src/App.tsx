@@ -17,7 +17,9 @@ import { useWorkbenchStore } from "./store/useWorkbenchStore";
 function CourseTopicRoute() {
   const { courseId, topicId } = useParams();
   const selectCourse = useWorkbenchStore((state) => state.selectCourse);
-  useEffect(() => { if (courseId) selectCourse(courseId); }, [courseId, selectCourse]);
+  useEffect(() => {
+    if (courseId) selectCourse(courseId);
+  }, [courseId, selectCourse]);
   return topicId ? <TopicMap initialTopicId={topicId} oldResult /> : <TopicMap />;
 }
 
@@ -25,7 +27,7 @@ function CourseFusionRoute() {
   const { courseId, topicId } = useParams();
   const selectCourse = useWorkbenchStore((state) => state.selectCourse);
   const loadTopics = useWorkbenchStore((state) => state.loadTopics);
-  const topics = useWorkbenchStore((state) => courseId ? (state.topicsByCourse[courseId] ?? []) : []);
+  const topics = useWorkbenchStore((state) => (courseId ? (state.topicsByCourse[courseId] ?? []) : []));
   useEffect(() => {
     if (!courseId) return;
     selectCourse(courseId);
@@ -33,7 +35,11 @@ function CourseFusionRoute() {
   }, [courseId, loadTopics, selectCourse]);
   if (!courseId) return <Navigate to="/workbench" replace />;
   if (!topicId && topics[0]) return <Navigate to={`/workbench/courses/${courseId}/fusion/${topics[0].id}`} replace />;
-  return topicId ? <TopicFusion courseId={courseId} topicId={topicId} /> : <div className="py-16 text-center text-sm text-zinc-500">请先在课程主题中创建并确认主题</div>;
+  return topicId ? (
+    <TopicFusion courseId={courseId} topicId={topicId} />
+  ) : (
+    <div className="py-16 text-center text-sm text-zinc-500">请先在课程主题中创建并确认主题</div>
+  );
 }
 
 export default function App() {

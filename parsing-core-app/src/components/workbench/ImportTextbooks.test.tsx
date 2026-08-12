@@ -77,24 +77,44 @@ describe("ImportTextbooks", () => {
 
   it("calls the import endpoint with paths and rejects malformed responses safely", async () => {
     delete (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
-    const fetchMock = vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [{ source_id: "source-a", title: "战略管理", stored_path: "/course/战略管理.pdf" }] }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [{ source_id: 1, title: "bad", stored_path: "/bad.pdf" }] }), { status: 200 }));
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            items: [{ source_id: "source-a", title: "战略管理", stored_path: "/course/战略管理.pdf" }],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ items: [{ source_id: 1, title: "bad", stored_path: "/bad.pdf" }] }), {
+          status: 200,
+        }),
+      );
 
-    await expect(workbenchApi.importSources("course-1", ["/books/战略管理.pdf"], ["战略管理（第 5 版）"])).resolves.toEqual([
-      { source_id: "source-a", title: "战略管理", stored_path: "/course/战略管理.pdf" },
-    ]);
-    expect(fetchMock).toHaveBeenNthCalledWith(1, "http://127.0.0.1:8000/api/workbench/courses/course-1/sources/import", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths: ["/books/战略管理.pdf"], titles: ["战略管理（第 5 版）"] }),
-    });
-    await expect(workbenchApi.importSources("course-1", ["/books/bad.pdf"])).rejects.toThrow("服务返回数据格式异常，请稍后重试");
+    await expect(
+      workbenchApi.importSources("course-1", ["/books/战略管理.pdf"], ["战略管理（第 5 版）"]),
+    ).resolves.toEqual([{ source_id: "source-a", title: "战略管理", stored_path: "/course/战略管理.pdf" }]);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8000/api/workbench/courses/course-1/sources/import",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: ["/books/战略管理.pdf"], titles: ["战略管理（第 5 版）"] }),
+      },
+    );
+    await expect(workbenchApi.importSources("course-1", ["/books/bad.pdf"])).rejects.toThrow(
+      "服务返回数据格式异常，请稍后重试",
+    );
   });
 
   it("prefills an editable textbook title and sends the edited title with its path", async () => {
     invoke.mockResolvedValue(["/books/战略管理.pdf"]);
-    importSources.mockResolvedValue([{ source_id: "source-a", title: "战略管理（MBA版）", stored_path: "/course/战略管理.pdf" }]);
+    importSources.mockResolvedValue([
+      { source_id: "source-a", title: "战略管理（MBA版）", stored_path: "/course/战略管理.pdf" },
+    ]);
     renderImporter();
     await userEvent.click(screen.getByRole("button", { name: "选择教材" }));
     const titleInput = screen.getByRole("textbox", { name: "教材名称" });
@@ -103,11 +123,9 @@ describe("ImportTextbooks", () => {
     await userEvent.type(titleInput, "  战略管理（MBA版）  ");
     await userEvent.click(screen.getByRole("button", { name: "导入全部" }));
 
-    await waitFor(() => expect(importSources).toHaveBeenCalledWith(
-      "course-1",
-      ["/books/战略管理.pdf"],
-      ["战略管理（MBA版）"],
-    ));
+    await waitFor(() =>
+      expect(importSources).toHaveBeenCalledWith("course-1", ["/books/战略管理.pdf"], ["战略管理（MBA版）"]),
+    );
     expect(titleInput).toBeDisabled();
   });
 
@@ -183,7 +201,9 @@ describe("ImportTextbooks", () => {
 
   it("accepts a compatible File carrying an absolute path and uses the import API", async () => {
     invoke.mockRejectedValue(new Error("not running in Tauri"));
-    importSources.mockResolvedValue([{ source_id: "source-webview", title: "营销管理", stored_path: "/course/营销管理.pdf" }]);
+    importSources.mockResolvedValue([
+      { source_id: "source-webview", title: "营销管理", stored_path: "/course/营销管理.pdf" },
+    ]);
     const { container } = renderImporter();
     await userEvent.click(screen.getByRole("button", { name: "选择教材" }));
     const file = new File(["book"], "营销管理.pdf", { type: "application/pdf" }) as File & { path: string };
@@ -198,14 +218,21 @@ describe("ImportTextbooks", () => {
   it("accepts dropped documents and rejects unsupported files and directories item by item", () => {
     renderImporter();
     const zone = screen.getByTestId("textbook-drop-zone");
-    const pdf = Object.assign(new File(["pdf"], "财务管理.pdf", { type: "application/pdf" }), { path: "/books/财务管理.pdf" });
+    const pdf = Object.assign(new File(["pdf"], "财务管理.pdf", { type: "application/pdf" }), {
+      path: "/books/财务管理.pdf",
+    });
     const txt = Object.assign(new File(["txt"], "说明.txt", { type: "text/plain" }), { path: "/books/说明.txt" });
     const directory = new File([], "课程目录", { type: "" });
-    fireEvent.drop(zone, { dataTransfer: { files: [pdf, txt, directory], items: [
-      { kind: "file", getAsFile: () => pdf, webkitGetAsEntry: () => ({ isDirectory: false }) },
-      { kind: "file", getAsFile: () => txt, webkitGetAsEntry: () => ({ isDirectory: false }) },
-      { kind: "file", getAsFile: () => directory, webkitGetAsEntry: () => ({ isDirectory: true }) },
-    ] } });
+    fireEvent.drop(zone, {
+      dataTransfer: {
+        files: [pdf, txt, directory],
+        items: [
+          { kind: "file", getAsFile: () => pdf, webkitGetAsEntry: () => ({ isDirectory: false }) },
+          { kind: "file", getAsFile: () => txt, webkitGetAsEntry: () => ({ isDirectory: false }) },
+          { kind: "file", getAsFile: () => directory, webkitGetAsEntry: () => ({ isDirectory: true }) },
+        ],
+      },
+    });
     expect(screen.getByText("财务管理.pdf")).toBeInTheDocument();
     expect(screen.getByText("说明.txt：不支持此文件类型")).toBeInTheDocument();
     expect(screen.getByText("课程目录：不支持导入文件夹")).toBeInTheDocument();
@@ -231,12 +258,23 @@ describe("ImportTextbooks", () => {
   it("isolates pending work when courseId changes and ignores the old response", async () => {
     let resolveImport!: (items: Array<{ source_id: string; title: string; stored_path: string }>) => void;
     invoke.mockResolvedValue(["/books/A.pdf"]);
-    importSources.mockImplementation(() => new Promise((resolve) => { resolveImport = resolve; }));
+    importSources.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveImport = resolve;
+        }),
+    );
     const view = renderImporter("course-old");
     await userEvent.click(screen.getByRole("button", { name: "选择教材" }));
     await userEvent.click(screen.getByRole("button", { name: "导入全部" }));
     view.rerender(
-      <ImportTextbooks courseId="course-new" currentSources={[]} importSources={importSources} detectChapters={detectChapters} loadSources={loadSources} />,
+      <ImportTextbooks
+        courseId="course-new"
+        currentSources={[]}
+        importSources={importSources}
+        detectChapters={detectChapters}
+        loadSources={loadSources}
+      />,
     );
     expect(screen.queryByText("A.pdf")).not.toBeInTheDocument();
 
@@ -249,7 +287,14 @@ describe("ImportTextbooks", () => {
   });
 
   it("reconciles an uncertain committed import and continues detection without importing twice", async () => {
-    const source = { id: "source-a", course_id: "course-1", kind: "main", file_path: "/course/A.pdf", title: "A", status: "IMPORTED" };
+    const source = {
+      id: "source-a",
+      course_id: "course-1",
+      kind: "main",
+      file_path: "/course/A.pdf",
+      title: "A",
+      status: "IMPORTED",
+    };
     invoke.mockResolvedValue(["/books/A.pdf"]);
     loadSources.mockResolvedValueOnce([]).mockResolvedValueOnce([source]);
     importSources.mockRejectedValueOnce(new workbenchApi.SafeApiError("network"));
@@ -263,7 +308,14 @@ describe("ImportTextbooks", () => {
   });
 
   it("locks an ambiguous uncertain result and does not offer blind retry", async () => {
-    const source = (id: string) => ({ id, course_id: "course-1", kind: "main", file_path: `/course/${id}/A.pdf`, title: "A", status: "IMPORTED" });
+    const source = (id: string) => ({
+      id,
+      course_id: "course-1",
+      kind: "main",
+      file_path: `/course/${id}/A.pdf`,
+      title: "A",
+      status: "IMPORTED",
+    });
     invoke.mockResolvedValue(["/books/A.pdf"]);
     loadSources.mockResolvedValueOnce([]).mockResolvedValueOnce([source("source-a"), source("source-b")]);
     importSources.mockRejectedValueOnce(new workbenchApi.SafeApiError("protocol"));

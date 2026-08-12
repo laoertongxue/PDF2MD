@@ -25,7 +25,8 @@ describe("runtime API endpoint", () => {
 
   it("refreshes the Tauri endpoint after a failed startup is retried", async () => {
     (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
-    const invoke = vi.fn()
+    const invoke = vi
+      .fn()
       .mockResolvedValueOnce({ apiBase: "http://127.0.0.1:43127", port: 43127 })
       .mockResolvedValueOnce({ apiBase: "http://127.0.0.1:43128", port: 43128 });
     vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
@@ -36,17 +37,23 @@ describe("runtime API endpoint", () => {
   });
 
   it("reports the browser service as running only after a healthy response", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({ status: "ok" }),
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ status: "ok" }),
+      }),
+    );
     const { getServiceStatus } = await import("./runtime");
 
     await expect(getServiceStatus()).resolves.toMatchObject({ state: "running", port: 8000 });
-    expect(fetch).toHaveBeenCalledWith("http://127.0.0.1:8000/health", expect.objectContaining({
-      headers: { Accept: "application/json" },
-    }));
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/health",
+      expect.objectContaining({
+        headers: { Accept: "application/json" },
+      }),
+    );
   });
 
   it("reports the browser service offline when health cannot be reached", async () => {
@@ -79,17 +86,23 @@ describe("runtime API endpoint", () => {
   });
 
   it("reports the browser service as running only after a healthy response", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({ status: "ok" }),
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ status: "ok" }),
+      }),
+    );
     const { getServiceStatus } = await import("./runtime");
 
     await expect(getServiceStatus()).resolves.toMatchObject({ state: "running", port: 8000 });
-    expect(fetch).toHaveBeenCalledWith("http://127.0.0.1:8000/health", expect.objectContaining({
-      headers: { Accept: "application/json" },
-    }));
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/health",
+      expect.objectContaining({
+        headers: { Accept: "application/json" },
+      }),
+    );
   });
 
   it("reports the browser service offline when health cannot be reached", async () => {

@@ -22,12 +22,12 @@ export default function DocViewer() {
       try {
         await loadTask(taskId);
         await loadMerged(taskId);
-      } catch (e: any) {
-        setError(e.message || "加载失败");
+      } catch (error: unknown) {
+        setError(error instanceof Error ? error.message : "加载失败");
       }
       setLoading(false);
     })();
-  }, [taskId]);
+  }, [loadMerged, loadTask, taskId]);
 
   if (loading) {
     return (
@@ -48,7 +48,8 @@ export default function DocViewer() {
           onClick={() => navigate(-1)}
           className="inline-flex items-center gap-2 rounded-xl border border-gray-200 px-4 py-2 text-[13px] font-medium text-gray-700 hover:bg-gray-50 transition-colors"
         >
-          <ArrowLeft size={14} />返回
+          <ArrowLeft size={14} />
+          返回
         </button>
       </div>
     );
@@ -70,9 +71,11 @@ export default function DocViewer() {
           </div>
         </div>
         {task && (
-          <span className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ${
-            task.status === "COMPLETED" ? "bg-emerald-50 text-emerald-700" : "bg-blue-50 text-blue-700"
-          }`}>
+          <span
+            className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ${
+              task.status === "COMPLETED" ? "bg-emerald-50 text-emerald-700" : "bg-blue-50 text-blue-700"
+            }`}
+          >
             {formatStatus(task.status)}
           </span>
         )}

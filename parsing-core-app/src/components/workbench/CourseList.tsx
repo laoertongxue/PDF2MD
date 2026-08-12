@@ -5,7 +5,8 @@ import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 import { isTauriRuntime } from "../../api/runtime";
 
 export default function CourseList() {
-  const { courses, createCourse, loadCourseCards, loadCourses, loadSources, selectCourse, selectedCourseId } = useWorkbenchStore();
+  const { courses, createCourse, loadCourseCards, loadCourses, loadSources, selectCourse, selectedCourseId } =
+    useWorkbenchStore();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [rootDir, setRootDir] = useState("");
@@ -15,7 +16,9 @@ export default function CourseList() {
   const desktop = isTauriRuntime();
 
   useEffect(() => {
-    loadCourses().catch((e: unknown) => setError(e instanceof Error ? e.message : "加载失败")).finally(() => setLoading(false));
+    loadCourses()
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "加载失败"))
+      .finally(() => setLoading(false));
   }, [loadCourses]);
 
   useEffect(() => {
@@ -65,12 +68,17 @@ export default function CourseList() {
         <Link
           to="/workbench/source"
           className={`rounded-md px-3 py-2 text-sm font-medium ${
-            selectedCourseId ? "bg-zinc-900 text-white hover:bg-zinc-800" : "pointer-events-none bg-zinc-100 text-zinc-400"
+            selectedCourseId
+              ? "bg-zinc-900 text-white hover:bg-zinc-800"
+              : "pointer-events-none bg-zinc-100 text-zinc-400"
           }`}
         >
           导入资料
         </Link>
-        <Link to="/workbench/cards" className="rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:border-zinc-300">
+        <Link
+          to="/workbench/cards"
+          className="rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:border-zinc-300"
+        >
           卡片池
         </Link>
       </div>
@@ -116,8 +124,16 @@ export default function CourseList() {
             </button>
           </div>
         </label>
-        {!desktop && <p role="alert" className="text-sm text-amber-700">浏览器版不支持选择本地课程目录，请使用桌面客户端或粘贴目录路径。</p>}
-        {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
+        {!desktop && (
+          <p role="alert" className="text-sm text-amber-700">
+            浏览器版不支持选择本地课程目录，请使用桌面客户端或粘贴目录路径。
+          </p>
+        )}
+        {error && (
+          <p role="alert" className="text-sm text-red-500">
+            {error}
+          </p>
+        )}
         <button
           type="submit"
           disabled={saving || !title.trim() || !rootDir.trim()}
@@ -168,7 +184,11 @@ export default function CourseList() {
                   {course.description && <p className="text-sm text-zinc-500 mt-1">{course.description}</p>}
                   <p className="text-xs font-mono text-zinc-400 mt-2 truncate">{course.root_dir}</p>
                 </div>
-                {selected && <span className="shrink-0 rounded-full bg-zinc-900 px-2 py-0.5 text-xs font-medium text-white">已选择</span>}
+                {selected && (
+                  <span className="shrink-0 rounded-full bg-zinc-900 px-2 py-0.5 text-xs font-medium text-white">
+                    已选择
+                  </span>
+                )}
               </div>
             </button>
           );

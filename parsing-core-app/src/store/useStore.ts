@@ -8,7 +8,7 @@ interface AppState {
   tasks: Record<string, TaskStatus>;
   mergedDocs: Record<string, string>;
   wsDisconnectors: Record<string, () => void>;
-  
+
   loadBatches: () => Promise<void>;
   submitBatch: (files: string[], concurrency: number) => Promise<string>;
   loadBatch: (id: string) => Promise<void>;
@@ -44,7 +44,9 @@ export const useStore = create<AppState>((set, get) => ({
   cancelBatchAction: async (id) => {
     await cancelBatch(id);
     const disco = get().wsDisconnectors[id];
-    if (disco) { disco(); }
+    if (disco) {
+      disco();
+    }
   },
 
   loadTask: async (taskId) => {
@@ -66,7 +68,13 @@ export const useStore = create<AppState>((set, get) => ({
   handleWsEvent: (e) => {
     if (e.event === "TASK_STATE" && e.task_id) {
       set((s) => {
-        const existing = s.tasks[e.task_id!] || { task_id: e.task_id!, batch_id: e.batch_id, status: "", sections: 0, completed: 0 };
+        const existing = s.tasks[e.task_id!] || {
+          task_id: e.task_id!,
+          batch_id: e.batch_id,
+          status: "",
+          sections: 0,
+          completed: 0,
+        };
         return { tasks: { ...s.tasks, [e.task_id!]: { ...existing, status: e.payload.status as string } } };
       });
     }
