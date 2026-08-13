@@ -49,6 +49,19 @@ class WorkflowStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+def restored_workflow_status(
+    payload: dict[str, object],
+) -> tuple[WorkflowStatus, str | None]:
+    raw = payload.get("status")
+    try:
+        status = WorkflowStatus(str(raw))
+    except ValueError:
+        return WorkflowStatus.BLOCKED, "ocr_state_invalid"
+    error = payload.get("error")
+    safe_error = error if isinstance(error, str) and 0 < len(error) <= 240 else None
+    return status, safe_error
+
+
 class WorkflowBlockedError(RuntimeError):
     """A required local or remote engine is not configured."""
 
@@ -350,20 +363,14 @@ class OcrWorkflow:
                 self._error = _safe_error(exc)
 
     def detect_chapters(self) -> dict[str, Any]:
-        with self._lock:
-            current = self._status
-        if current is WorkflowStatus.IDLE and self._persisted_status() == (
-            WorkflowStatus.COMPLETED,
-            None,
-        ):
-            current = WorkflowStatus.COMPLETED
-        if current is not WorkflowStatus.COMPLETED:
+        if self.status()["status"] != WorkflowStatus.COMPLETED.value:
             raise ValueError("OCR 尚未完成，不能识别章节")
         final = _load_json(self.paths.final)
         fingerprint = _input_fingerprint(final)
         pages = []
         for key in sorted(final["pages"], key=int):
             record = dict(final["pages"][key])
+            record["page"] = int(key)
             record["page_input_fingerprint"] = fingerprint
             pages.append(record)
         tree = detect_chapter_tree(pages, input_fingerprint=fingerprint)
@@ -377,17 +384,11 @@ class OcrWorkflow:
             try:
                 value = _load_json(path)
             except ValueError:
-                return WorkflowStatus.BLOCKED, "OCR 状态文件无法验证，请重试"
-            raw = value.get("status")
-            if raw == WorkflowStatus.COMPLETED.value and path == self.paths.final:
-                return WorkflowStatus.COMPLETED, None
-            if (
-                raw in {item.value for item in WorkflowStatus}
-                and raw != WorkflowStatus.RUNNING.value
-            ):
-                return WorkflowStatus(raw), value.get("error")
-            if raw == WorkflowStatus.RUNNING.value:
-                return WorkflowStatus.BLOCKED, "上次 OCR 未完成，请重试"
+                return WorkflowStatus.BLOCKED, "ocr_state_invalid"
+            status, error = restored_workflow_status(value)
+            if status is WorkflowStatus.RUNNING:
+                return WorkflowStatus.BLOCKED, "ocr_state_interrupted"
+            return status, error
         return None
 
     def confirm_chapter(self, chapter_id: str) -> dict[str, Any]:
