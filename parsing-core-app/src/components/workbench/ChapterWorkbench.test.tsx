@@ -163,6 +163,17 @@ function addEmptySecondCourse() {
   };
 }
 
+function addRunnableSecondChapter() {
+  state = {
+    ...state,
+    chapters: {
+      s1: [chapter("ch1", "竞争战略"), { ...chapter("ch2", "增长战略"), status: "FAILED" }],
+    },
+    noteBlocksByChapter: { ch1: blocks, ch2: secondChapterBlocks },
+    chapterRunsById: { ch1: runs, ch2: [] },
+  };
+}
+
 function addThirdCourse() {
   state = {
     ...state,
@@ -278,6 +289,81 @@ describe("ChapterWorkbench", () => {
     expect(within(history).getByText("失败")).toBeInTheDocument();
     await userEvent.click(within(history).getByRole("button", { name: "从审核轮重跑" }));
     expect(actions.runHybridChapter).toHaveBeenCalledWith("ch1");
+  });
+
+  it("ignores an old hybrid failure after navigating to another chapter", async () => {
+    addRunnableSecondChapter();
+    let rejectFirstRun: ((reason: Error) => void) | undefined;
+    const firstRun = new Promise<unknown>((_resolve, reject) => {
+      rejectFirstRun = reject;
+    });
+    actions.runHybridChapter.mockImplementation((chapterId: string) =>
+      chapterId === "ch1" ? firstRun : Promise.resolve(),
+    );
+    render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterWorkbench />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+
+    await userEvent.click(screen.getByRole("button", { name: "从审核轮重跑" }));
+    expect(actions.runHybridChapter).toHaveBeenCalledWith("ch1");
+
+    fireEvent.change(screen.getByLabelText("选择章节"), { target: { value: "ch2" } });
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch2"));
+
+    await act(async () => {
+      rejectFirstRun?.(new Error("A 混合精读失败"));
+      await firstRun.catch(() => undefined);
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "混合精读" })).toBeEnabled());
+    expect(screen.queryByText("A 混合精读失败")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "知识结构图 Mermaid 源码" })).toHaveValue("flowchart LR\nC-->D");
+  });
+
+  it("keeps a new hybrid run active when an old run completes", async () => {
+    addRunnableSecondChapter();
+    let resolveFirstRun: (() => void) | undefined;
+    let resolveSecondRun: (() => void) | undefined;
+    const firstRun = new Promise<void>((resolve) => {
+      resolveFirstRun = resolve;
+    });
+    const secondRun = new Promise<void>((resolve) => {
+      resolveSecondRun = resolve;
+    });
+    actions.runHybridChapter.mockImplementation((chapterId: string) => (chapterId === "ch1" ? firstRun : secondRun));
+    render(
+      <MemoryRouter initialEntries={["/workbench/chapter?chapterId=ch1"]}>
+        <ChapterWorkbench />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("textbox", { name: "知识结构图 Mermaid 源码" });
+
+    await userEvent.click(screen.getByRole("button", { name: "从审核轮重跑" }));
+    expect(screen.getByRole("button", { name: "从审核轮重跑" })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("选择章节"), { target: { value: "ch2" } });
+    await waitFor(() => expect(screen.getByLabelText("选择章节")).toHaveValue("ch2"));
+    const secondRunButton = screen.getByRole("button", { name: "混合精读" });
+    expect(secondRunButton).toBeEnabled();
+
+    await userEvent.click(secondRunButton);
+    expect(actions.runHybridChapter).toHaveBeenCalledWith("ch2");
+    expect(secondRunButton).toBeDisabled();
+
+    await act(async () => {
+      resolveFirstRun?.();
+      await firstRun;
+    });
+    expect(secondRunButton).toBeDisabled();
+
+    await act(async () => {
+      resolveSecondRun?.();
+      await secondRun;
+    });
+    await waitFor(() => expect(secondRunButton).toBeEnabled());
   });
 
   it("saves a real chapter block, reports failure and retries without losing the draft", async () => {

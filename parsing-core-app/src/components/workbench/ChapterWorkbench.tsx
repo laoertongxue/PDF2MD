@@ -58,6 +58,7 @@ export default function ChapterWorkbench() {
   const acceptedNavigationRef = useRef(acceptedNavigation);
   const courseLoadRequestRef = useRef(0);
   const chapterLoadRequestRef = useRef(0);
+  const hybridRunRequestRef = useRef(0);
   const rollbackCourseRef = useRef<string | null>(null);
   const rejectedChapterSearchRef = useRef<string | null>(null);
   const [courseLoadState, setCourseLoadState] = useState<CourseLoadState>({
@@ -77,15 +78,23 @@ export default function ChapterWorkbench() {
   const loadChapters = store.loadChapters;
   const loadChapterNoteBlocks = store.loadChapterNoteBlocks;
   const loadChapterRuns = store.loadChapterRuns;
-  const acceptNavigation = useCallback((courseId: string | null, chapterId: string | null, nextSearch: string) => {
-    setDirtyEditors({});
-    setAcceptedNavigation((current) => ({
-      courseId,
-      chapterId,
-      searchParams: nextSearch,
-      epoch: current.epoch + 1,
-    }));
+  const invalidateHybridRun = useCallback(() => {
+    hybridRunRequestRef.current += 1;
+    setRunningHybrid(false);
   }, []);
+  const acceptNavigation = useCallback(
+    (courseId: string | null, chapterId: string | null, nextSearch: string) => {
+      invalidateHybridRun();
+      setDirtyEditors({});
+      setAcceptedNavigation((current) => ({
+        courseId,
+        chapterId,
+        searchParams: nextSearch,
+        epoch: current.epoch + 1,
+      }));
+    },
+    [invalidateHybridRun],
+  );
   const loadChapterContent = useCallback(
     (chapterId: string | null) => {
       const requestId = ++chapterLoadRequestRef.current;
@@ -158,6 +167,12 @@ export default function ChapterWorkbench() {
   useEffect(() => {
     acceptedNavigationRef.current = acceptedNavigation;
   }, [acceptedNavigation]);
+  useEffect(
+    () => () => {
+      hybridRunRequestRef.current += 1;
+    },
+    [],
+  );
   useEffect(() => {
     loadCourses().catch((reason: unknown) => setError(message(reason, "课程加载失败")));
   }, [loadCourses]);
@@ -330,16 +345,26 @@ export default function ChapterWorkbench() {
     void loadChapterContent(chapterId).result;
   };
   const runHybrid = async () => {
-    if (!activeChapterId || !confirmLeave()) return;
+    const chapterId = activeChapterId;
+    const editorEpoch = navigationEpoch;
+    if (!chapterId || !confirmLeave()) return;
+    const requestId = ++hybridRunRequestRef.current;
+    const isCurrentRun = () => {
+      const accepted = acceptedNavigationRef.current;
+      return (
+        hybridRunRequestRef.current === requestId && accepted.chapterId === chapterId && accepted.epoch === editorEpoch
+      );
+    };
     setRunningHybrid(true);
     setError(null);
     try {
-      await store.runHybridChapter(activeChapterId);
-      await store.loadChapterRuns(activeChapterId);
+      await store.runHybridChapter(chapterId);
+      if (!isCurrentRun()) return;
+      await store.loadChapterRuns(chapterId);
     } catch (reason) {
-      setError(message(reason, "混合精读启动失败"));
+      if (isCurrentRun()) setError(message(reason, "混合精读启动失败"));
     } finally {
-      setRunningHybrid(false);
+      if (isCurrentRun()) setRunningHybrid(false);
     }
   };
   const saveBlock = async (
