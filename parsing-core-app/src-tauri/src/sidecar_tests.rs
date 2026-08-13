@@ -1,10 +1,10 @@
 use super::{
     build_health_client, child_exited, copy_redacted, health_failure_requires_restart,
     instance_is_healthy, make_socket_inheritable, open_rotating_log, parse_ready_line,
-    prepare_retry, read_ready_line, reserve_loopback_port, reserve_loopback_port_excluding,
-    restart_sidecar_core, sidecar_command, start_sidecar_core, stop_sidecar, terminate_child,
-    SidecarRuntime, SidecarStartError, StartupGuard, StopReason, MAX_HEALTH_RESPONSE_BYTES,
-    MAX_READY_LINE_BYTES,
+    prepare_private_log_directory, prepare_retry, read_ready_line, reserve_loopback_port,
+    reserve_loopback_port_excluding, restart_sidecar_core, run_prepared_sidecar, sidecar_command,
+    start_sidecar_core, stop_sidecar, terminate_child, SidecarAction, SidecarRuntime,
+    SidecarStartError, StartupGuard, StopReason, MAX_HEALTH_RESPONSE_BYTES, MAX_READY_LINE_BYTES,
 };
 use crate::state::{ready_api_config, AppState};
 use std::collections::VecDeque;
@@ -13,6 +13,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -22,6 +24,20 @@ use std::sync::{Arc, Mutex};
 
 struct ChunkReader {
     chunks: VecDeque<Vec<u8>>,
+}
+
+struct FailingLogWriter {
+    message: String,
+}
+
+impl Write for FailingLogWriter {
+    fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other(self.message.clone()))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl ChunkReader {
@@ -78,6 +94,7 @@ fn write_lifecycle_fixture(control: Option<&Path>) -> (FixtureDirectory, Sidecar
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -110,6 +127,19 @@ if control:
 print(json.dumps({"schema": "pdf2md.sidecar.ready.v1", "host": host, "port": port}, separators=(",", ":")), flush=True)
 print("fixture stdout context " + token, flush=True)
 print("fixture stderr context " + token, file=sys.stderr, flush=True)
+
+descendant_pid_path = os.environ.get("PDF2MD_FIXTURE_DESCENDANT_PID")
+if descendant_pid_path:
+    descendant = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM, signal.SIG_IGN); Path(os.environ['PDF2MD_FIXTURE_DESCENDANT_PID']).write_text(str(os.getpid())); time.sleep(30)",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
 
 if os.environ.get("PDF2MD_FIXTURE_HANG_HEALTH") == "1":
     connection, _ = listener.accept()
@@ -182,6 +212,25 @@ async fn wait_for_path(path: &Path) {
     }
 }
 
+#[cfg(unix)]
+fn kill_process_for_test_cleanup(pid: i32) {
+    if pid > 1 {
+        let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+}
+
+#[cfg(unix)]
+fn wait_until_process_is_gone(pid: i32) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if !process_exists(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    false
+}
+
 fn process_exists(pid: i32) -> bool {
     let result = unsafe { libc::kill(pid, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
@@ -248,6 +297,46 @@ fn redacts_stdout_and_stderr_across_reads_in_a_real_log_file() {
     fs::remove_file(log_path).unwrap();
 }
 
+#[test]
+fn output_log_write_failure_is_visible_and_never_exposes_the_session() {
+    let secret = "log-session-secret-0123456789abcdef0123456789abcdef";
+    let state = Arc::new(Mutex::new(AppState {
+        generation: 12,
+        session_token: secret.into(),
+        running: true,
+        service_state: "running".into(),
+        ..Default::default()
+    }));
+    let mut reader = std::io::Cursor::new(b"sidecar output".to_vec());
+    let mut writer = FailingLogWriter {
+        message: format!("disk full while writing {secret}"),
+    };
+
+    let error = super::copy_output_to_log(
+        &mut reader,
+        &mut writer,
+        secret.as_bytes(),
+        &state,
+        12,
+        super::OutputStream::Stderr,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("disk full"));
+    let state = state.lock().unwrap();
+    assert!(
+        state.running,
+        "logging failure must not orphan an untracked child"
+    );
+    assert_eq!(state.service_state, "failed");
+    let error = state.error.as_ref().expect("structured logging error");
+    assert_eq!(error.category, "logging");
+    assert_eq!(error.message, "sidecar stderr logging failed");
+    assert_eq!(state.session_token, secret);
+    assert!(!state.logs.join("\n").contains(secret));
+    assert!(state.logs.join("\n").contains("[REDACTED]"));
+}
+
 #[tokio::test]
 async fn rust_startup_core_rotates_live_authenticated_sidecars_and_reaps_children() {
     let (_fixture, runtime) = write_lifecycle_fixture(None);
@@ -310,6 +399,80 @@ async fn rust_startup_core_rotates_live_authenticated_sidecars_and_reaps_childre
     assert!(!logged.contains(&second.session_token));
     assert!(logged.contains("fixture stdout context [REDACTED]"));
     assert!(logged.contains("fixture stderr context [REDACTED]"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_terminates_pipe_holding_descendant_without_blocking() {
+    let (_fixture, mut runtime) = write_lifecycle_fixture(None);
+    let descendant_pid_path = runtime.log_path.with_extension("descendant.pid");
+    runtime.extra_env.push((
+        "PDF2MD_FIXTURE_DESCENDANT_PID".into(),
+        descendant_pid_path.to_string_lossy().into_owned(),
+    ));
+    let (listener, port) = reserve_loopback_port().unwrap();
+    let state = Arc::new(Mutex::new(AppState {
+        port,
+        desired_running: true,
+        reserved_listener: Some(listener),
+        ..Default::default()
+    }));
+    let _cleanup = SidecarCleanup(state.clone());
+
+    start_sidecar_core(state.clone(), runtime, true)
+        .await
+        .expect("start fixture with descendant");
+    wait_for_path(&descendant_pid_path).await;
+    let descendant_pid: i32 = fs::read_to_string(&descendant_pid_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let leader_pid = state
+        .lock()
+        .unwrap()
+        .sidecar_child
+        .as_ref()
+        .expect("sidecar leader")
+        .id() as i32;
+    let process_group_id = state
+        .lock()
+        .unwrap()
+        .sidecar_process_group
+        .expect("isolated sidecar process group");
+    assert_eq!(process_group_id, leader_pid);
+    assert_ne!(process_group_id, unsafe { libc::getpgrp() });
+    assert!(process_exists(leader_pid));
+    assert!(process_exists(descendant_pid));
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let stop_state = state.clone();
+    let stop_thread = std::thread::spawn(move || {
+        let result = stop_sidecar(stop_state, StopReason::Exit);
+        let _ = done_tx.send(result);
+    });
+    let stop_result = match done_rx.recv_timeout(std::time::Duration::from_secs(4)) {
+        Ok(result) => result,
+        Err(error) => {
+            kill_process_for_test_cleanup(descendant_pid);
+            let _ = done_rx.recv_timeout(std::time::Duration::from_secs(3));
+            let _ = stop_thread.join();
+            panic!("stop blocked while descendant held output pipes: {error}");
+        }
+    };
+    stop_thread.join().unwrap();
+    stop_result.expect("stop sidecar process group");
+
+    assert!(wait_until_process_is_gone(leader_pid));
+    assert!(wait_until_process_is_gone(descendant_pid));
+}
+
+#[cfg(unix)]
+#[test]
+fn process_group_safety_rejects_invalid_and_current_groups() {
+    assert!(super::validate_process_group_id(0).is_err());
+    assert!(super::validate_process_group_id(1).is_err());
+    assert!(super::validate_process_group_id(unsafe { libc::getpgrp() }).is_err());
 }
 
 #[tokio::test]
@@ -481,6 +644,105 @@ fn rotating_log_enforces_a_hard_current_and_backup_size_limit() {
     assert!(fs::metadata(&backup_path).unwrap().len() <= 64);
     fs::remove_file(log_path).unwrap();
     fs::remove_file(backup_path).unwrap();
+}
+
+#[test]
+fn opening_preexisting_oversized_logs_enforces_both_hard_limits() {
+    let root = std::env::temp_dir().join(format!(
+        "pdf2md-preexisting-log-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let log_path = root.join("sidecar.log");
+    let backup_path = root.join("sidecar.log.1");
+    fs::write(&log_path, [b'a'; 150]).unwrap();
+    fs::write(&backup_path, [b'b'; 150]).unwrap();
+
+    drop(open_rotating_log(&log_path, 64).unwrap());
+
+    assert!(fs::metadata(&log_path).unwrap().len() <= 64);
+    assert!(fs::metadata(&backup_path).unwrap().len() <= 64);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_log_target_is_rejected_without_touching_its_destination() {
+    let root = std::env::temp_dir().join(format!(
+        "pdf2md-symlink-log-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let destination = root.join("outside.log");
+    let log_path = root.join("sidecar.log");
+    fs::write(&destination, b"do-not-touch").unwrap();
+    symlink(&destination, &log_path).unwrap();
+
+    let error = match open_rotating_log(&log_path, 64) {
+        Ok(_) => panic!("symlink log target must fail closed"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(fs::read(&destination).unwrap(), b"do-not-touch");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn log_directory_and_files_are_restricted_to_the_current_user() {
+    let root = std::env::temp_dir().join(format!(
+        "pdf2md-private-log-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let log_dir = root.join("logs");
+    fs::create_dir_all(&log_dir).unwrap();
+    fs::set_permissions(&log_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let log_path = log_dir.join("sidecar.log");
+    let backup_path = log_dir.join("sidecar.log.1");
+    fs::write(&log_path, b"current").unwrap();
+    fs::write(&backup_path, b"backup").unwrap();
+    fs::set_permissions(&log_path, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+    prepare_private_log_directory(&log_dir).unwrap();
+    drop(open_rotating_log(&log_path, 64).unwrap());
+
+    assert_eq!(
+        fs::metadata(&log_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&log_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(&backup_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_log_directory_is_rejected() {
+    let root = std::env::temp_dir().join(format!(
+        "pdf2md-symlink-log-dir-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let destination = root.join("destination");
+    let log_dir = root.join("logs");
+    fs::create_dir_all(&destination).unwrap();
+    symlink(&destination, &log_dir).unwrap();
+
+    let error = prepare_private_log_directory(&log_dir).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    fs::remove_dir_all(root).unwrap();
 }
 
 fn spawn_health_server(
@@ -714,6 +976,132 @@ fn records_a_structured_failure_for_status_consumers() {
     assert_eq!(error.message, "runtime missing [REDACTED]");
     assert!(!state.logs.join("\n").contains(secret));
     assert!(state.session_token.is_empty());
+}
+
+#[test]
+fn startup_failure_with_empty_session_preserves_the_actionable_message() {
+    let state = Arc::new(Mutex::new(AppState {
+        generation: 4,
+        starting: true,
+        service_state: "starting".into(),
+        ..Default::default()
+    }));
+    let error = SidecarStartError::Failed {
+        message: "failed to prepare private sidecar log directory".into(),
+        generation: 4,
+    };
+
+    super::record_start_failure(&state, &error);
+
+    let state = state.lock().unwrap();
+    assert_eq!(state.service_state, "failed");
+    assert_eq!(
+        state.error.as_ref().map(|error| error.message.as_str()),
+        Some("failed to prepare private sidecar log directory")
+    );
+    assert_eq!(
+        state.logs.last().map(String::as_str),
+        Some("[sidecar] configuration failure: failed to prepare private sidecar log directory")
+    );
+}
+
+#[tokio::test]
+async fn start_runtime_preparation_failure_sets_a_stable_failed_state() {
+    let state = Arc::new(Mutex::new(AppState {
+        generation: 5,
+        starting: true,
+        desired_running: true,
+        service_state: "starting".into(),
+        ..Default::default()
+    }));
+
+    let result = run_prepared_sidecar(
+        state.clone(),
+        Err("application support directory is unavailable".into()),
+        SidecarAction::Start,
+    )
+    .await;
+
+    assert_eq!(
+        result.unwrap_err(),
+        "application support directory is unavailable"
+    );
+    let state = state.lock().unwrap();
+    assert!(!state.starting);
+    assert!(!state.running);
+    assert_eq!(state.service_state, "failed");
+    let error = state.error.as_ref().expect("structured preparation error");
+    assert_eq!(error.category, "configuration");
+    assert_eq!(
+        error.message,
+        "application support directory is unavailable"
+    );
+}
+
+#[tokio::test]
+async fn restart_runtime_preparation_failure_stops_old_owner_and_redacts_its_session() {
+    let secret = "restart-session-secret-0123456789abcdef0123456789abcdef";
+    let state = Arc::new(Mutex::new(AppState {
+        generation: 8,
+        session_token: secret.into(),
+        running: true,
+        desired_running: true,
+        service_state: "restarting".into(),
+        ..Default::default()
+    }));
+
+    let result = run_prepared_sidecar(
+        state.clone(),
+        Err(format!("cannot prepare runtime for {secret}")),
+        SidecarAction::Restart,
+    )
+    .await;
+
+    let returned = result.unwrap_err();
+    assert!(!returned.contains(secret));
+    assert_eq!(returned, "cannot prepare runtime for [REDACTED]");
+    let state = state.lock().unwrap();
+    assert!(!state.starting);
+    assert!(!state.running);
+    assert!(state.session_token.is_empty());
+    assert_eq!(state.service_state, "failed");
+    let error = state.error.as_ref().expect("structured preparation error");
+    assert_eq!(error.category, "configuration");
+    assert_eq!(error.message, "cannot prepare runtime for [REDACTED]");
+    assert!(!state.logs.join("\n").contains(secret));
+}
+
+#[tokio::test]
+async fn restart_preserves_bounded_shutdown_failure_over_preparation_error() {
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let blocked_reader = std::thread::spawn(move || {
+        let _ = release_rx.recv();
+    });
+    let state = Arc::new(Mutex::new(AppState {
+        generation: 15,
+        session_token: "restart-secret-0123456789abcdef0123456789abcdef".into(),
+        running: true,
+        desired_running: true,
+        service_state: "restarting".into(),
+        sidecar_log_threads: vec![blocked_reader],
+        ..Default::default()
+    }));
+
+    let result = run_prepared_sidecar(
+        state.clone(),
+        Err("replacement runtime is unavailable".into()),
+        SidecarAction::Restart,
+    )
+    .await;
+    let _ = release_tx.send(());
+
+    let returned = result.unwrap_err();
+    assert!(returned.contains("log reader"));
+    assert!(!returned.contains("replacement runtime"));
+    let state = state.lock().unwrap();
+    let error = state.error.as_ref().expect("structured shutdown error");
+    assert_eq!(error.category, "shutdown");
+    assert!(error.message.contains("log reader"));
 }
 
 #[test]

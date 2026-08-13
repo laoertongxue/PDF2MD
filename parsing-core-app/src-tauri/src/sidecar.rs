@@ -1,7 +1,12 @@
+#[cfg(test)]
+use crate::sidecar_log::MAX_READY_LINE_BYTES;
+use crate::sidecar_log::{
+    copy_redacted, open_rotating_log, prepare_private_log_directory, read_ready_line, SharedLog,
+    MAX_LOG_BYTES,
+};
 use crate::state::{generate_session_token, AppState};
 use serde::Deserialize;
-use std::fs::{create_dir_all, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -13,16 +18,13 @@ const HEALTH_INTERVAL_SECS: u64 = 3;
 const HEALTH_STARTUP_GRACE_SECS: u64 = 60;
 const MAX_HEALTH_FAILURES: u8 = 3;
 const TERMINATION_TIMEOUT_MS: u64 = 2_000;
+const LOG_THREAD_JOIN_TIMEOUT_MS: u64 = 1_000;
 const SESSION_HEADER: &str = "X-PDF2MD-Session";
 const SESSION_ENV: &str = "PDF2MD_SESSION_TOKEN";
 const READY_SCHEMA: &str = "pdf2md.sidecar.ready.v1";
-const LOG_READ_BUFFER_BYTES: usize = 4096;
-const MAX_READY_LINE_BYTES: usize = 4096;
 const MAX_HEALTH_RESPONSE_BYTES: usize = 4096;
-const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 const HEALTH_CONNECT_TIMEOUT_MS: u64 = 250;
 const HEALTH_REQUEST_TIMEOUT_MS: u64 = 750;
-const REDACTED_SECRET: &[u8] = b"[REDACTED]";
 
 #[derive(Clone)]
 struct SidecarRuntime {
@@ -30,203 +32,6 @@ struct SidecarRuntime {
     log_path: PathBuf,
     extra_env: Vec<(String, String)>,
     startup_timeout: std::time::Duration,
-}
-
-#[derive(Clone)]
-struct SharedLog(Arc<Mutex<RotatingLog>>);
-
-impl SharedLog {
-    fn new(log: RotatingLog) -> Self {
-        Self(Arc::new(Mutex::new(log)))
-    }
-}
-
-struct RotatingLog {
-    path: PathBuf,
-    file: File,
-    size: u64,
-    max_bytes: u64,
-}
-
-impl RotatingLog {
-    fn rotate(&mut self) -> std::io::Result<()> {
-        self.file.flush()?;
-        let backup = PathBuf::from(format!("{}.1", self.path.display()));
-        match std::fs::remove_file(&backup) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        std::fs::rename(&self.path, &backup)?;
-        self.file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.path)?;
-        self.size = 0;
-        Ok(())
-    }
-}
-
-impl Write for RotatingLog {
-    fn write(&mut self, mut buffer: &[u8]) -> std::io::Result<usize> {
-        let total = buffer.len();
-        while !buffer.is_empty() {
-            if self.size >= self.max_bytes {
-                self.rotate()?;
-            }
-            let available = usize::try_from(self.max_bytes - self.size)
-                .unwrap_or(usize::MAX)
-                .min(buffer.len());
-            self.file.write_all(&buffer[..available])?;
-            self.size += u64::try_from(available).unwrap_or(u64::MAX);
-            buffer = &buffer[available..];
-        }
-        Ok(total)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
-fn open_rotating_log(path: &Path, max_bytes: u64) -> std::io::Result<RotatingLog> {
-    if max_bytes == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "log size limit must be positive",
-        ));
-    }
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
-    let mut log = RotatingLog {
-        path: path.to_path_buf(),
-        size: file.metadata()?.len(),
-        file,
-        max_bytes,
-    };
-    if log.size >= log.max_bytes {
-        log.rotate()?;
-    }
-    Ok(log)
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| std::io::Error::other("sidecar log lock poisoned"))?
-            .write(buffer)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.0
-            .lock()
-            .map_err(|_| std::io::Error::other("sidecar log lock poisoned"))?
-            .flush()
-    }
-}
-
-struct StreamingRedactor<'a, W: Write> {
-    writer: &'a mut W,
-    secret: &'a [u8],
-    pending: Vec<u8>,
-}
-
-impl<'a, W: Write> StreamingRedactor<'a, W> {
-    fn new(writer: &'a mut W, secret: &'a [u8]) -> Self {
-        Self {
-            writer,
-            secret,
-            pending: Vec::with_capacity(LOG_READ_BUFFER_BYTES + secret.len()),
-        }
-    }
-
-    fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
-        self.pending.extend_from_slice(chunk);
-        self.flush_pending(false)
-    }
-
-    fn finish(mut self) -> std::io::Result<()> {
-        self.flush_pending(true)?;
-        self.writer.flush()
-    }
-
-    fn flush_pending(&mut self, finish: bool) -> std::io::Result<()> {
-        if self.secret.is_empty() {
-            self.writer.write_all(&self.pending)?;
-            self.pending.clear();
-            return Ok(());
-        }
-
-        let mut output = Vec::with_capacity(self.pending.len());
-        let mut consumed = 0;
-        while let Some(offset) = find_bytes(&self.pending[consumed..], self.secret) {
-            let match_start = consumed + offset;
-            output.extend_from_slice(&self.pending[consumed..match_start]);
-            output.extend_from_slice(REDACTED_SECRET);
-            consumed = match_start + self.secret.len();
-        }
-
-        let remaining = &self.pending[consumed..];
-        let retained = if finish {
-            0
-        } else {
-            matching_secret_prefix_suffix(remaining, self.secret)
-        };
-        let emit_length = remaining.len() - retained;
-        output.extend_from_slice(&remaining[..emit_length]);
-        self.writer.write_all(&output)?;
-
-        let retained_bytes = remaining[emit_length..].to_vec();
-        self.pending.clear();
-        self.pending.extend_from_slice(&retained_bytes);
-        Ok(())
-    }
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|candidate| candidate == needle)
-}
-
-fn matching_secret_prefix_suffix(buffer: &[u8], secret: &[u8]) -> usize {
-    let maximum = buffer.len().min(secret.len().saturating_sub(1));
-    (1..=maximum)
-        .rev()
-        .find(|length| buffer.ends_with(&secret[..*length]))
-        .unwrap_or(0)
-}
-
-fn copy_redacted<R: Read, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
-    secret: &[u8],
-) -> std::io::Result<()> {
-    let mut redactor = StreamingRedactor::new(writer, secret);
-    let mut buffer = [0_u8; LOG_READ_BUFFER_BYTES];
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            return redactor.finish();
-        }
-        redactor.write_chunk(&buffer[..read])?;
-    }
-}
-
-fn read_ready_line<R: BufRead>(reader: &mut R) -> Result<String, String> {
-    let mut bytes = Vec::with_capacity(256);
-    let result = reader
-        .take((MAX_READY_LINE_BYTES + 1) as u64)
-        .read_until(b'\n', &mut bytes);
-    match result {
-        Ok(0) => Err("sidecar exited before ready".to_string()),
-        Ok(_) if bytes.len() > MAX_READY_LINE_BYTES || !bytes.ends_with(b"\n") => {
-            Err("invalid sidecar ready message".to_string())
-        }
-        Ok(_) => String::from_utf8(bytes).map_err(|_| "invalid sidecar ready message".to_string()),
-        Err(_) => Err("failed to read sidecar ready message".to_string()),
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +65,27 @@ enum SidecarStartError {
     Failed { message: String, generation: u64 },
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SidecarAction {
+    Start,
+    Restart,
+}
+
+#[derive(Clone, Copy)]
+enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+impl OutputStream {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
+
 impl std::fmt::Display for SidecarStartError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -270,21 +96,21 @@ impl std::fmt::Display for SidecarStartError {
     }
 }
 
-fn record_start_failure(state: &Arc<Mutex<AppState>>, error: &SidecarStartError) {
+fn record_start_failure(state: &Arc<Mutex<AppState>>, error: &SidecarStartError) -> String {
     let SidecarStartError::Failed {
         message,
         generation,
     } = error
     else {
-        return;
+        return error.to_string();
     };
     let Ok(mut state) = state.lock() else {
-        return;
+        return "sidecar startup failed".into();
     };
+    let sanitized = sanitize_message(message, &state.session_token);
     if state.generation != *generation {
-        return;
+        return sanitized;
     }
-    let sanitized = message.replace(&state.session_token, "[REDACTED]");
     let category = classify_startup_error(&sanitized);
     state.starting = false;
     state.running = false;
@@ -293,10 +119,46 @@ fn record_start_failure(state: &Arc<Mutex<AppState>>, error: &SidecarStartError)
         category: category.into(),
         message: sanitized.clone(),
     });
-    state
-        .logs
-        .push(format!("[sidecar] {category} failure: {sanitized}"));
+    state.push_log(format!("[sidecar] {category} failure: {sanitized}"));
     state.session_token.clear();
+    sanitized
+}
+
+fn sanitize_message(message: &str, session_token: &str) -> String {
+    if session_token.is_empty() {
+        message.to_owned()
+    } else {
+        message.replace(session_token, "[REDACTED]")
+    }
+}
+
+fn copy_output_to_log<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    secret: &[u8],
+    state: &Arc<Mutex<AppState>>,
+    generation: u64,
+    stream: OutputStream,
+) -> std::io::Result<()> {
+    let result = copy_redacted(reader, writer, secret);
+    if let Err(error) = &result {
+        if let Ok(mut state) = state.lock() {
+            if state.generation == generation {
+                let detail = sanitize_message(&error.to_string(), &state.session_token);
+                let message = format!("sidecar {} logging failed", stream.label());
+                state.service_state = "failed".into();
+                state.error = Some(crate::state::ServiceError {
+                    category: "logging".into(),
+                    message,
+                });
+                state.push_log(format!(
+                    "[sidecar] logging failure ({}): {detail}",
+                    stream.label()
+                ));
+            }
+        }
+    }
+    result
 }
 
 pub fn record_failure(
@@ -309,11 +171,7 @@ pub fn record_failure(
         if s.generation != generation {
             return;
         }
-        let message = if s.session_token.is_empty() {
-            message
-        } else {
-            message.replace(&s.session_token, "[REDACTED]")
-        };
+        let message = sanitize_message(&message, &s.session_token);
         s.starting = false;
         s.running = false;
         s.service_state = "failed".into();
@@ -321,8 +179,7 @@ pub fn record_failure(
             category: category.into(),
             message: message.clone(),
         });
-        s.logs
-            .push(format!("[sidecar] {category} failure: {message}"));
+        s.push_log(format!("[sidecar] {category} failure: {message}"));
         s.session_token.clear();
     }
 }
@@ -382,7 +239,16 @@ fn sidecar_command(
         &socket_fd.to_string(),
     ]);
     command.env(SESSION_ENV, session_token);
+    configure_sidecar_process_group(&mut command);
     command
+}
+
+fn configure_sidecar_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
 }
 
 pub struct StartupGuard {
@@ -420,15 +286,24 @@ impl Drop for StartupGuard {
 
 struct ChildGuard {
     child: Option<std::process::Child>,
+    process_group_id: Option<i32>,
     log_threads: Vec<JoinHandle<()>>,
 }
 
 impl ChildGuard {
-    fn new(child: std::process::Child) -> Self {
-        Self {
+    fn new(mut child: std::process::Child) -> std::io::Result<Self> {
+        let process_group_id = match sidecar_process_group_id(&child) {
+            Ok(process_group_id) => process_group_id,
+            Err(error) => {
+                let _ = terminate_child(&mut child);
+                return Err(error);
+            }
+        };
+        Ok(Self {
             child: Some(child),
+            process_group_id,
             log_threads: Vec::new(),
-        }
+        })
     }
 
     fn child_mut(&mut self) -> &mut std::process::Child {
@@ -439,9 +314,10 @@ impl ChildGuard {
         self.log_threads.push(thread);
     }
 
-    fn take(mut self) -> (std::process::Child, Vec<JoinHandle<()>>) {
+    fn take(mut self) -> (std::process::Child, Option<i32>, Vec<JoinHandle<()>>) {
         (
             self.child.take().expect("child guard must contain child"),
+            self.process_group_id.take(),
             std::mem::take(&mut self.log_threads),
         )
     }
@@ -450,12 +326,32 @@ impl ChildGuard {
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         if let Some(child) = self.child.as_mut() {
-            let _ = terminate_child(child);
+            let _ = terminate_managed_child(child, self.process_group_id);
         }
-        for thread in self.log_threads.drain(..) {
-            let _ = thread.join();
-        }
+        let _ = join_log_threads_bounded(std::mem::take(&mut self.log_threads));
     }
+}
+
+#[cfg(unix)]
+fn sidecar_process_group_id(child: &std::process::Child) -> std::io::Result<Option<i32>> {
+    let pid = i32::try_from(child.id())
+        .map_err(|_| std::io::Error::other("sidecar process id is out of range"))?;
+    let process_group_id = unsafe { libc::getpgid(pid) };
+    if process_group_id == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let current_process_group = unsafe { libc::getpgrp() };
+    if pid <= 1 || process_group_id != pid || process_group_id == current_process_group {
+        return Err(std::io::Error::other(
+            "sidecar did not start in an isolated process group",
+        ));
+    }
+    Ok(Some(process_group_id))
+}
+
+#[cfg(not(unix))]
+fn sidecar_process_group_id(_child: &std::process::Child) -> std::io::Result<Option<i32>> {
+    Ok(None)
 }
 
 pub fn child_exited(child: &mut std::process::Child) -> std::io::Result<bool> {
@@ -479,6 +375,125 @@ pub fn terminate_child(child: &mut std::process::Child) -> std::io::Result<()> {
         child.wait()?;
     }
     Ok(())
+}
+
+fn terminate_managed_child(
+    child: &mut std::process::Child,
+    process_group_id: Option<i32>,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(process_group_id) = process_group_id {
+        return terminate_process_group(child, process_group_id);
+    }
+    terminate_child(child)
+}
+
+#[cfg(unix)]
+fn terminate_process_group(
+    child: &mut std::process::Child,
+    process_group_id: i32,
+) -> std::io::Result<()> {
+    validate_process_group_id(process_group_id)?;
+    signal_process_group(process_group_id, libc::SIGTERM)?;
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(TERMINATION_TIMEOUT_MS);
+    while std::time::Instant::now() < deadline {
+        let leader_exited = child_exited(child)?;
+        if leader_exited && !process_group_exists(process_group_id)? {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
+    signal_process_group(process_group_id, libc::SIGKILL)?;
+    let kill_deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(TERMINATION_TIMEOUT_MS);
+    while std::time::Instant::now() < kill_deadline {
+        let leader_exited = child_exited(child)?;
+        if leader_exited && !process_group_exists(process_group_id)? {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
+    if !child_exited(child)? {
+        child.kill()?;
+        child.wait()?;
+    }
+    if process_group_exists(process_group_id)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "sidecar process group did not terminate",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_process_group_id(process_group_id: i32) -> std::io::Result<()> {
+    if process_group_id <= 1 || process_group_id == unsafe { libc::getpgrp() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to signal an unsafe sidecar process group",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn signal_process_group(process_group_id: i32, signal: i32) -> std::io::Result<()> {
+    validate_process_group_id(process_group_id)?;
+    if unsafe { libc::kill(-process_group_id, signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(unix)]
+fn process_group_exists(process_group_id: i32) -> std::io::Result<bool> {
+    validate_process_group_id(process_group_id)?;
+    if unsafe { libc::kill(-process_group_id, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error),
+    }
+}
+
+fn join_log_threads_bounded(threads: Vec<JoinHandle<()>>) -> Result<(), String> {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(LOG_THREAD_JOIN_TIMEOUT_MS);
+    while std::time::Instant::now() < deadline && threads.iter().any(|thread| !thread.is_finished())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let mut unfinished = 0;
+    let mut panicked = false;
+    for thread in threads {
+        if thread.is_finished() {
+            panicked |= thread.join().is_err();
+        } else {
+            unfinished += 1;
+        }
+    }
+    if unfinished > 0 {
+        Err(format!(
+            "{unfinished} sidecar log reader(s) did not stop before timeout"
+        ))
+    } else if panicked {
+        Err("sidecar log reader stopped unexpectedly".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn build_health_client() -> Result<reqwest::Client, reqwest::Error> {
@@ -547,7 +562,7 @@ fn bundled_sidecar_runtime() -> Result<SidecarRuntime, String> {
         .ok_or_else(|| "missing application support directory".to_string())?
         .join("PDF2MD")
         .join("logs");
-    create_dir_all(&log_dir)
+    prepare_private_log_directory(&log_dir)
         .map_err(|error| format!("failed to create log dir {}: {error}", log_dir.display()))?;
     Ok(SidecarRuntime {
         script,
@@ -670,7 +685,13 @@ async fn start_sidecar_core(
             ));
         }
     };
-    let mut child_guard = ChildGuard::new(child);
+    let mut child_guard = ChildGuard::new(child).map_err(|error| {
+        failed_or_superseded(
+            &state,
+            generation,
+            format!("failed to isolate sidecar process: {error}"),
+        )
+    })?;
 
     let child_stdout =
         child_guard.child_mut().stdout.take().ok_or_else(|| {
@@ -683,13 +704,21 @@ async fn start_sidecar_core(
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let mut stdout_log = shared_log.clone();
     let stdout_secret = session_token.clone();
+    let stdout_state = state.clone();
     let stdout_thread = std::thread::Builder::new()
         .name("sidecar-stdout".into())
         .spawn(move || {
             let mut reader = BufReader::new(child_stdout);
             let ready = read_ready_line(&mut reader);
             let _ = ready_tx.send(ready);
-            let _ = copy_redacted(&mut reader, &mut stdout_log, stdout_secret.as_bytes());
+            let _ = copy_output_to_log(
+                &mut reader,
+                &mut stdout_log,
+                stdout_secret.as_bytes(),
+                &stdout_state,
+                generation,
+                OutputStream::Stdout,
+            );
         })
         .map_err(|_| {
             failed_or_superseded(&state, generation, "failed to start sidecar output reader")
@@ -697,11 +726,19 @@ async fn start_sidecar_core(
     child_guard.add_log_thread(stdout_thread);
     let mut stderr_log = shared_log;
     let stderr_secret = session_token.clone();
+    let stderr_state = state.clone();
     let stderr_thread = std::thread::Builder::new()
         .name("sidecar-stderr".into())
         .spawn(move || {
             let mut reader = BufReader::new(child_stderr);
-            let _ = copy_redacted(&mut reader, &mut stderr_log, stderr_secret.as_bytes());
+            let _ = copy_output_to_log(
+                &mut reader,
+                &mut stderr_log,
+                stderr_secret.as_bytes(),
+                &stderr_state,
+                generation,
+                OutputStream::Stderr,
+            );
         })
         .map_err(|_| {
             failed_or_superseded(&state, generation, "failed to start sidecar error reader")
@@ -797,14 +834,15 @@ async fn start_sidecar_core(
         if s.generation != generation || !s.desired_running || s.manual_stopped {
             return Err(SidecarStartError::Superseded);
         }
-        let (child, log_threads) = child_guard.take();
+        let (child, process_group_id, log_threads) = child_guard.take();
         s.sidecar_child = Some(child);
+        s.sidecar_process_group = process_group_id;
         s.sidecar_log_threads = log_threads;
         s.port = ready.port;
         s.starting = false;
         s.running = true;
         s.service_state = "running".into();
-        s.logs.push(format!(
+        s.push_log(format!(
             "[sidecar] started on port {}, log {}",
             ready.port,
             runtime.log_path.display()
@@ -815,18 +853,45 @@ async fn start_sidecar_core(
     Ok(())
 }
 
+async fn run_prepared_sidecar(
+    state: Arc<Mutex<AppState>>,
+    runtime: Result<SidecarRuntime, String>,
+    action: SidecarAction,
+) -> Result<(), String> {
+    let runtime = match runtime {
+        Ok(runtime) => runtime,
+        Err(message) => {
+            let sanitized = state
+                .lock()
+                .map(|state| sanitize_message(&message, &state.session_token))
+                .unwrap_or_else(|_| "failed to prepare sidecar runtime".into());
+            if action == SidecarAction::Restart {
+                stop_sidecar(state.clone(), StopReason::Restart)?;
+            }
+            let generation = state.lock().map(|state| state.generation).unwrap_or(0);
+            let error = SidecarStartError::Failed {
+                message: sanitized,
+                generation,
+            };
+            return Err(record_start_failure(&state, &error));
+        }
+    };
+
+    let result = match action {
+        SidecarAction::Start => start_sidecar_core(state.clone(), runtime, true).await,
+        SidecarAction::Restart => restart_sidecar_core(state.clone(), runtime).await,
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(record_start_failure(&state, &error)),
+    }
+}
+
 pub async fn start_sidecar(
     _app: &tauri::AppHandle,
     state: Arc<Mutex<AppState>>,
 ) -> Result<(), String> {
-    let runtime = bundled_sidecar_runtime()?;
-    match start_sidecar_core(state.clone(), runtime, true).await {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            record_start_failure(&state, &error);
-            Err(error.to_string())
-        }
-    }
+    run_prepared_sidecar(state, bundled_sidecar_runtime(), SidecarAction::Start).await
 }
 
 pub fn prepare_retry(state: &mut AppState) {
@@ -847,20 +912,19 @@ pub fn health_failure_requires_restart(state: &mut AppState) -> bool {
         return false;
     }
     state.service_state = "restarting".into();
-    state
-        .logs
-        .push("[health] 3 failures, restarting sidecar...".into());
+    state.push_log("[health] 3 failures, restarting sidecar...");
     true
 }
 
 pub fn stop_sidecar(state: Arc<Mutex<AppState>>, reason: StopReason) -> Result<(), String> {
-    let (mut child, log_threads) = {
+    let (mut child, process_group_id, log_threads) = {
         let mut s = state.lock().map_err(|error| error.to_string())?;
         s.generation = s.generation.wrapping_add(1).max(1);
         let child = s.sidecar_child.take();
+        let process_group_id = s.sidecar_process_group.take();
         let log_threads = std::mem::take(&mut s.sidecar_log_threads);
         if child.is_some() {
-            s.logs.push("[sidecar] stopped".into());
+            s.push_log("[sidecar] stopped");
         }
         s.running = false;
         s.starting = false;
@@ -879,22 +943,32 @@ pub fn stop_sidecar(state: Arc<Mutex<AppState>>, reason: StopReason) -> Result<(
             StopReason::Exit => {
                 s.desired_running = false;
                 s.manual_stopped = false;
-                s.logs.push("[sidecar] application exit".into());
+                s.push_log("[sidecar] application exit");
             }
             StopReason::Restart => {
                 s.service_state = "restarting".into();
             }
         }
-        (child, log_threads)
+        (child, process_group_id, log_threads)
     };
     let termination = match child.as_mut() {
-        Some(child) => terminate_child(child).map_err(|error| error.to_string()),
+        Some(child) => terminate_managed_child(child, process_group_id)
+            .map_err(|error| format!("failed to stop sidecar process group: {error}")),
         None => Ok(()),
     };
-    for thread in log_threads {
-        let _ = thread.join();
+    let readers = join_log_threads_bounded(log_threads);
+    let cleanup = termination.and(readers);
+    if let Err(message) = cleanup {
+        if let Ok(mut state) = state.lock() {
+            state.service_state = "failed".into();
+            state.error = Some(crate::state::ServiceError {
+                category: "shutdown".into(),
+                message: message.clone(),
+            });
+            state.push_log(format!("[sidecar] shutdown failure: {message}"));
+        }
+        return Err(message);
     }
-    termination?;
     Ok(())
 }
 
@@ -916,12 +990,7 @@ pub async fn restart_sidecar(
     _app: &tauri::AppHandle,
     state: Arc<Mutex<AppState>>,
 ) -> Result<(), String> {
-    let runtime = bundled_sidecar_runtime()?;
-    if let Err(error) = restart_sidecar_core(state.clone(), runtime).await {
-        record_start_failure(&state, &error);
-        return Err(error.to_string());
-    }
-    Ok(())
+    run_prepared_sidecar(state, bundled_sidecar_runtime(), SidecarAction::Restart).await
 }
 
 pub async fn retry_sidecar(

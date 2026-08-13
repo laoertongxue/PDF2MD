@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+pub const MAX_STATUS_LOGS: usize = 200;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceError {
@@ -22,8 +24,19 @@ pub struct AppState {
     pub health_failures: u8,
     pub generation: u64,
     pub sidecar_child: Option<std::process::Child>,
+    pub sidecar_process_group: Option<i32>,
     pub sidecar_log_threads: Vec<std::thread::JoinHandle<()>>,
     pub reserved_listener: Option<std::net::TcpListener>,
+}
+
+impl AppState {
+    pub fn push_log(&mut self, message: impl Into<String>) {
+        if self.logs.len() >= MAX_STATUS_LOGS {
+            let remove = self.logs.len() + 1 - MAX_STATUS_LOGS;
+            self.logs.drain(..remove);
+        }
+        self.logs.push(message.into());
+    }
 }
 
 #[derive(Serialize)]
@@ -66,7 +79,7 @@ pub fn ready_api_config(state: &AppState) -> Result<ApiConfig, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_session_token, ready_api_config, AppState};
+    use super::{generate_session_token, ready_api_config, AppState, MAX_STATUS_LOGS};
 
     #[test]
     fn session_tokens_are_strong_and_unique() {
@@ -105,5 +118,21 @@ mod tests {
         let config = ready_api_config(&state).unwrap();
         assert_eq!(config.api_base, "http://127.0.0.1:43127");
         assert_eq!(config.session_token, state.session_token);
+    }
+
+    #[test]
+    fn status_logs_keep_only_the_newest_bounded_entries() {
+        let mut state = AppState::default();
+
+        for index in 0..(MAX_STATUS_LOGS + 17) {
+            state.push_log(format!("entry-{index}"));
+        }
+
+        assert_eq!(state.logs.len(), MAX_STATUS_LOGS);
+        assert_eq!(state.logs.first().map(String::as_str), Some("entry-17"));
+        assert_eq!(
+            state.logs.last().map(String::as_str),
+            Some(format!("entry-{}", MAX_STATUS_LOGS + 16).as_str())
+        );
     }
 }

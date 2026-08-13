@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod sidecar;
+mod sidecar_log;
 mod state;
 
 use state::{ready_api_config, ApiConfig, AppState, StatusPayload};
@@ -137,6 +138,7 @@ fn main() {
                 health_failures: 0,
                 generation: 0,
                 sidecar_child: None,
+                sidecar_process_group: None,
                 sidecar_log_threads: Vec::new(),
                 reserved_listener: Some(port_guard),
             }));
