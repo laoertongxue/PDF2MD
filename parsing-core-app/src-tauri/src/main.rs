@@ -135,7 +135,9 @@ fn main() {
                 log_path: None,
                 logs: vec![format!("[init] starting local service on 127.0.0.1:{port}")],
                 health_failures: 0,
+                generation: 0,
                 sidecar_child: None,
+                sidecar_log_threads: Vec::new(),
                 reserved_listener: Some(port_guard),
             }));
             app.manage(s.clone());

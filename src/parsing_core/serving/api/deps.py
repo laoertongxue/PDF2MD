@@ -42,16 +42,31 @@ def session_token_matches(supplied: str, expected: str) -> bool:
         return False
 
 
+def _request_header_values(request: Request, name: str) -> list[str]:
+    expected = name.lower().encode("latin-1")
+    return [
+        value.decode("latin-1")
+        for key, value in request.scope.get("headers", [])
+        if key.lower() == expected
+    ]
+
+
 def require_local_session(request: Request) -> None:
     expected = request.app.state.session_token
-    supplied = request.headers.get(SESSION_HEADER, "")
+    values = _request_header_values(request, SESSION_HEADER)
+    if len(values) > 1:
+        raise HTTPException(status_code=400, detail={"code": "invalid_request"})
+    supplied = values[0] if values else ""
     if not session_token_matches(supplied, expected):
         raise HTTPException(status_code=401, detail={"code": "session_required"})
 
 
 def require_health_session(request: Request) -> None:
     require_local_session(request)
-    origin = request.headers.get("origin")
+    origins = _request_header_values(request, "origin")
+    if len(origins) > 1:
+        raise HTTPException(status_code=400, detail={"code": "invalid_request"})
+    origin = origins[0] if origins else None
     if origin is not None and origin not in request.app.state.allowed_origins:
         raise HTTPException(status_code=403, detail={"code": "origin_forbidden"})
 

@@ -14,11 +14,17 @@ router = APIRouter(tags=["ws"])
 
 @router.websocket("/ws/batch/{batch_id}")
 async def ws_batch(websocket: WebSocket, batch_id: str) -> None:
-    if not origin_is_allowed(websocket.headers.get("origin"), websocket.app.state.allowed_origins):
+    origins = websocket.headers.getlist("origin")
+    if len(origins) != 1 or not origin_is_allowed(origins[0], websocket.app.state.allowed_origins):
+        await websocket.accept()
         await websocket.close(code=4403, reason="origin_forbidden")
         return
-    supplied = websocket_session_from_protocols(websocket.headers.get("sec-websocket-protocol"))
+    protocol_headers = websocket.headers.getlist("sec-websocket-protocol")
+    supplied = websocket_session_from_protocols(
+        protocol_headers[0] if len(protocol_headers) == 1 else None
+    )
     if not session_token_matches(supplied, websocket.app.state.session_token):
+        await websocket.accept()
         await websocket.close(code=4401, reason="session_required")
         return
 
@@ -35,12 +41,10 @@ async def ws_batch(websocket: WebSocket, batch_id: str) -> None:
 
     await websocket.accept(subprotocol=WS_SESSION_PROTOCOL)
     events = await mgr.replay_and_subscribe(batch_id, websocket, since=since)
+    if events is None:
+        return
     for ev in events:
         await websocket.send_text(ev.model_dump_json())
-
-    if mgr.scheduler.is_batch_gone(batch_id):
-        await websocket.close(code=410, reason="batch gone")
-        return
 
     try:
         while True:

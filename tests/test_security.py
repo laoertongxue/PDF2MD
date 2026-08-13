@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import select
@@ -53,6 +54,51 @@ def _client(tmp_path: Path) -> TestClient:
     )
 
 
+def _run_security_middleware(
+    headers: list[tuple[bytes, bytes]], *, method: str = "GET"
+) -> tuple[int, dict | None, bool]:
+    executed = False
+    sent: list[dict] = []
+
+    async def downstream(scope, receive, send):
+        nonlocal executed
+        executed = True
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = serve.LocalApiSecurityMiddleware(
+        downstream,
+        allowed_origins={"http://localhost:1420"},
+        session_token=TEST_SESSION_TOKEN,
+    )
+    request_messages = iter([{"type": "http.request", "body": b"", "more_body": False}])
+
+    async def receive():
+        return next(request_messages)
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": "/api/workbench/courses",
+        "raw_path": b"/api/workbench/courses",
+        "query_string": b"",
+        "headers": headers,
+        "client": ("127.0.0.1", 54321),
+        "server": ("127.0.0.1", 43127),
+    }
+    asyncio.run(middleware(scope, receive, send))
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+    )
+    return start["status"], json.loads(body) if body else None, executed
+
+
 def _confirmed_chapter(client: TestClient, root: Path) -> str:
     course = client.post(
         "/api/workbench/courses",
@@ -90,7 +136,9 @@ def test_source_path_traversal_is_rejected(tmp_path):
     )
 
     assert response.status_code == 400
-    assert "inside course root_dir" in response.json()["detail"]
+    assert response.json() == {"detail": {"code": "path_escape"}}
+    assert str(root) not in response.text
+    assert str(outside) not in response.text
 
 
 def test_source_symlink_escape_is_rejected(tmp_path):
@@ -112,7 +160,30 @@ def test_source_symlink_escape_is_rejected(tmp_path):
     )
 
     assert response.status_code == 400
-    assert "inside course root_dir" in response.json()["detail"]
+    assert response.json() == {"detail": {"code": "path_escape"}}
+    assert str(root) not in response.text
+    assert str(outside) not in response.text
+
+
+def test_source_path_inside_course_root_remains_valid(tmp_path):
+    client = _client(tmp_path)
+    root = tmp_path / "course"
+    nested = root / "textbooks"
+    nested.mkdir(parents=True)
+    source_path = nested / "book.md"
+    source_path.write_text("## 第一章\n合法内容。", encoding="utf-8")
+    course = client.post(
+        "/api/workbench/courses",
+        json={"title": "安全测试", "description": "", "root_dir": str(root)},
+    ).json()
+
+    response = client.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"kind": "main", "file_path": str(source_path), "title": "课程内教材"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["file_path"] == str(source_path.resolve())
 
 
 def test_oversized_request_body_has_stable_error_code(tmp_path):
@@ -126,6 +197,59 @@ def test_oversized_request_body_has_stable_error_code(tmp_path):
 
     assert response.status_code == 413
     assert response.json() == {"detail": {"code": "request_too_large"}}
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [
+            (b"origin", b"https://attacker.example"),
+            (b"origin", b"http://localhost:1420"),
+            (b"x-pdf2md-session", TEST_SESSION_TOKEN.encode()),
+        ],
+        [
+            (b"origin", b"http://localhost:1420"),
+            (b"x-pdf2md-session", b"wrong"),
+            (b"x-pdf2md-session", TEST_SESSION_TOKEN.encode()),
+        ],
+        [
+            (b"origin", b"http://localhost:1420"),
+            (b"x-pdf2md-session", TEST_SESSION_TOKEN.encode()),
+            (b"content-length", b"0"),
+            (b"content-length", b"0"),
+        ],
+    ],
+)
+def test_duplicate_security_headers_fail_closed_before_business(headers):
+    status, body, executed = _run_security_middleware(headers)
+
+    assert status == 400
+    assert body == {"detail": {"code": "invalid_request"}}
+    assert not executed
+
+
+def test_plain_options_without_preflight_headers_requires_session():
+    status, body, executed = _run_security_middleware(
+        [(b"origin", b"http://localhost:1420")], method="OPTIONS"
+    )
+
+    assert status == 401
+    assert body == {"detail": {"code": "session_required"}}
+    assert not executed
+
+
+def test_true_cors_preflight_may_omit_session():
+    status, body, executed = _run_security_middleware(
+        [
+            (b"origin", b"http://localhost:1420"),
+            (b"access-control-request-method", b"POST"),
+        ],
+        method="OPTIONS",
+    )
+
+    assert status == 204
+    assert body is None
+    assert executed
 
 
 def test_malicious_markdown_is_rejected_without_stack_trace(tmp_path):

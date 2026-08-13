@@ -69,26 +69,39 @@ class LocalApiSecurityMiddleware:
             await self.app(scope, receive, send)
             return
 
-        headers = {
-            key.decode("latin-1").lower(): value.decode("latin-1")
-            for key, value in scope.get("headers", [])
-        }
-        origin = headers.get("origin")
+        headers: dict[str, list[str]] = {}
+        for raw_key, raw_value in scope.get("headers", []):
+            key = raw_key.decode("latin-1").lower()
+            headers.setdefault(key, []).append(raw_value.decode("latin-1"))
+
+        origin_values = headers.get("origin", [])
+        session_values = headers.get(SESSION_HEADER.lower(), [])
+        content_length_values = headers.get("content-length", [])
+        request_method_values = headers.get("access-control-request-method", [])
+        if (
+            len(origin_values) > 1
+            or len(session_values) > 1
+            or len(content_length_values) > 1
+            or len(request_method_values) > 1
+        ):
+            await self._reject(scope, receive, send, 400, "invalid_request")
+            return
+
+        origin = origin_values[0] if origin_values else None
         if origin not in self.allowed_origins:
             await self._reject(scope, receive, send, 403, "origin_forbidden")
             return
 
-        is_preflight = scope.get("method") == "OPTIONS"
+        is_preflight = scope.get("method") == "OPTIONS" and len(request_method_values) == 1
         if not is_preflight and not session_token_matches(
-            headers.get(SESSION_HEADER.lower(), ""), self.session_token
+            session_values[0] if session_values else "", self.session_token
         ):
             await self._reject(scope, receive, send, 401, "session_required", allowed_origin=origin)
             return
 
-        content_length = headers.get("content-length")
-        if content_length is not None:
+        if content_length_values:
             try:
-                if int(content_length) > self.max_request_body_bytes:
+                if int(content_length_values[0]) > self.max_request_body_bytes:
                     await self._reject(
                         scope, receive, send, 413, "request_too_large", allowed_origin=origin
                     )

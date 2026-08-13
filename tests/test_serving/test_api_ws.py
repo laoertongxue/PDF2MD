@@ -105,50 +105,33 @@ def test_ws_since_replays_filtered(tmp_path, monkeypatch):
 
 def test_ws_nonexistent_batch_closes(tmp_path, monkeypatch):
     client = make_test_app(tmp_path, monkeypatch)
-    try:
-        with client.websocket_connect(
-            "/ws/batch/nonexistent", headers={"Origin": ALLOWED_ORIGIN}, subprotocols=WS_PROTOCOLS
-        ) as ws:
+    with client.websocket_connect(
+        "/ws/batch/nonexistent", headers={"Origin": ALLOWED_ORIGIN}, subprotocols=WS_PROTOCOLS
+    ) as ws:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
             ws.receive_text()
-        raise AssertionError("should have raised")
-    except Exception:
-        # 410 close or starlette Disconnect
-        pass
+    assert exc_info.value.code == 4410
 
 
-def test_ws_missing_session_closes_before_accept(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("origin", "protocols", "expected_code"),
+    [
+        (ALLOWED_ORIGIN, None, 4401),
+        (ALLOWED_ORIGIN, ["pdf2md-session-v1", "pdf2md-session-token.wrong"], 4401),
+        ("https://attacker.example", WS_PROTOCOLS, 4403),
+    ],
+)
+def test_ws_auth_closes_immediately_after_accept(
+    tmp_path, monkeypatch, origin, protocols, expected_code
+):
     client = make_test_app(tmp_path, monkeypatch)
+    with client.websocket_connect(
+        "/ws/batch/any",
+        headers={"Origin": origin},
+        subprotocols=protocols,
+    ) as ws:
+        assert ws.accepted_subprotocol is None
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            ws.receive_text()
 
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/ws/batch/any", headers={"Origin": ALLOWED_ORIGIN}):
-            pass
-
-    assert exc_info.value.code == 4401
-
-
-def test_ws_wrong_session_closes_before_accept(tmp_path, monkeypatch):
-    client = make_test_app(tmp_path, monkeypatch)
-
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect(
-            "/ws/batch/any",
-            headers={"Origin": ALLOWED_ORIGIN},
-            subprotocols=["pdf2md-session-v1", "pdf2md-session-token.wrong"],
-        ):
-            pass
-
-    assert exc_info.value.code == 4401
-
-
-def test_ws_wrong_origin_closes_before_accept(tmp_path, monkeypatch):
-    client = make_test_app(tmp_path, monkeypatch)
-
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect(
-            "/ws/batch/any",
-            headers={"Origin": "https://attacker.example"},
-            subprotocols=WS_PROTOCOLS,
-        ):
-            pass
-
-    assert exc_info.value.code == 4403
+    assert exc_info.value.code == expected_code

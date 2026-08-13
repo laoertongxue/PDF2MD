@@ -79,13 +79,13 @@ def test_unsubscribe_removes():
     assert ws not in sch._subscribers.get("b1", set())
 
 
-def test_batch_gone_returns_410():
+def test_batch_gone_returns_valid_application_close_code():
     sch = StubScheduler()
     sch._buffers["b1"] = EventRingBuffer(maxlen=10, ttl_sec=0)
     sch._buffers["b1"].append(WSEvent(seq=0, batch_id="b1", event="X", payload={}, ts=0))
     time.sleep(0.01)
     mgr = WsManager(sch)
     ws = FakeWS()
-    asyncio.run(mgr.replay_and_subscribe("b1", ws, since=-1))
-    assert ws.closed is not None
-    assert ws.closed[0] == 410
+    events = asyncio.run(mgr.replay_and_subscribe("b1", ws, since=-1))
+    assert events is None
+    assert ws.closed == (4410, "batch_gone")

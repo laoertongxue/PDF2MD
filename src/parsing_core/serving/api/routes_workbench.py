@@ -140,10 +140,14 @@ def _read_masked_deepseek_key() -> str | None:
     return mask_secret(api_key.strip()) if api_key.strip() else None
 
 
-def _resolve_inside(path: str, base: Path, message: str) -> Path:
-    resolved = Path(path).expanduser().resolve()
-    if not resolved.is_relative_to(base):
-        raise HTTPException(400, message)
+def _resolve_inside(path: str, base: Path) -> Path:
+    try:
+        resolved = Path(path).expanduser().resolve()
+        resolved_base = base.expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(400, {"code": "path_escape"}) from None
+    if not resolved.is_relative_to(resolved_base):
+        raise HTTPException(400, {"code": "path_escape"})
     return resolved
 
 
@@ -392,11 +396,7 @@ async def create_source(course_id: str, req: SourceCreateRequest, sch: Scheduler
     course = repo.get_course(course_id)
     if course is None:
         raise HTTPException(404, "course not found")
-    file_path = _resolve_inside(
-        req.file_path,
-        Path(course.root_dir).resolve(),
-        "file_path must be inside course root_dir",
-    )
+    file_path = _resolve_inside(req.file_path, Path(course.root_dir))
     if not file_path.is_file():
         raise HTTPException(400, "file_path must be an existing file")
     source = repo.create_source(course_id, req.kind, str(file_path), req.title)

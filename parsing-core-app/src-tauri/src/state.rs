@@ -20,7 +20,9 @@ pub struct AppState {
     pub log_path: Option<String>,
     pub logs: Vec<String>,
     pub health_failures: u8,
+    pub generation: u64,
     pub sidecar_child: Option<std::process::Child>,
+    pub sidecar_log_threads: Vec<std::thread::JoinHandle<()>>,
     pub reserved_listener: Option<std::net::TcpListener>,
 }
 
