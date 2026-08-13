@@ -175,7 +175,10 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
             output_path.write_text("# generated\n", encoding="utf-8")
             return {
                 "markdown": "# generated\n",
-                "metadata": {"input_fingerprint": base["metadata"]["input_fingerprint"]},
+                "metadata": {
+                    "input_fingerprint": base["metadata"]["input_fingerprint"],
+                    "note_fingerprint": "internal-note-fingerprint",
+                },
             }
 
     def generate_and_publish(callback, *, expected_final, expected_tree, confirmation):
@@ -184,6 +187,7 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
         assert confirmation["chapter_id"] == tree["chapters"][0]["id"]
         temporary_path = state_root / ".intensive-reading.route.tmp.md"
         note = callback(temporary_path)
+        assert "note_fingerprint" not in note["metadata"]
         temporary_path.replace(published_path)
         return note, published_path
 

@@ -22,7 +22,6 @@ from pypdf import PdfReader
 from .chapters import (
     _chapter_fingerprint,
     detect_chapter_tree,
-    load_chapter_confirmation,
     persist_chapter_confirmation,
     validate_chapter_confirmation,
     validate_chapter_tree,
@@ -34,6 +33,7 @@ _MARKDOWN_FENCE_RE = re.compile(r"```mermaid\n([\s\S]*?)\n```", re.MULTILINE)
 _PUBLISHED_NOTE_RE = re.compile(r"^intensive-reading\.([0-9a-f]{64})\.md$")
 _MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
+_PUBLICATION_STATUS_RETRIES = 3
 _PUBLICATION_MANIFEST_FIELDS = {
     "schema_version",
     "final_snapshot_sha256",
@@ -41,6 +41,21 @@ _PUBLICATION_MANIFEST_FIELDS = {
     "artifact_sha256",
     "proposal_fingerprint",
     "metadata",
+}
+_PUBLICATION_METADATA_FIELDS = {
+    "input_fingerprint",
+    "chapter_fingerprint",
+    "evidence_fingerprint",
+    "prompt_rules_version",
+    "source_id",
+    "chapter_id",
+    "chapter_number",
+    "chapter_title",
+    "page_start",
+    "page_end",
+    "citation_ids",
+    "model",
+    "prompt_fingerprint",
 }
 _PUBLICATION_THREAD_LOCKS: dict[Path, threading.RLock] = {}
 _PUBLICATION_THREAD_LOCKS_GUARD = threading.Lock()
@@ -92,6 +107,15 @@ class WorkflowPaths:
     chapter_tree: Path
     confirmation: Path
     note: Path
+
+
+@dataclass(frozen=True)
+class _PublicationLock:
+    path: Path
+    fd: int
+
+    def validate(self) -> None:
+        _validate_locked_file(self.path, self.fd)
 
 
 def workflow_paths(root: str | Path) -> WorkflowPaths:
@@ -204,12 +228,36 @@ def _completed_ocr_final_is_valid(final: dict[str, Any], source_path: str | Path
 def _publication_status(
     final: dict[str, Any], paths: WorkflowPaths
 ) -> tuple[bool, str | None, Path | None]:
-    try:
-        publication = _read_regular_json(paths.publication)
-    except FileNotFoundError:
-        return _legacy_publication_status(final, paths)
-    except (OSError, ValueError):
-        return False, "ocr_publication_invalid", None
+    for _attempt in range(_PUBLICATION_STATUS_RETRIES):
+        try:
+            publication = _read_regular_json(paths.publication)
+        except FileNotFoundError:
+            result = _legacy_publication_status(final, paths)
+            try:
+                _read_regular_json(paths.publication)
+            except FileNotFoundError:
+                return result
+            except (OSError, ValueError):
+                return False, "ocr_publication_invalid", None
+            continue
+        except (OSError, ValueError):
+            return False, "ocr_publication_invalid", None
+
+        result = _publication_manifest_status(final, paths, publication)
+        try:
+            current_publication = _read_regular_json(paths.publication)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            return False, "ocr_publication_invalid", None
+        if current_publication == publication:
+            return result
+    return False, "ocr_publication_invalid", None
+
+
+def _publication_manifest_status(
+    final: dict[str, Any], paths: WorkflowPaths, publication: dict[str, Any]
+) -> tuple[bool, str | None, Path | None]:
     try:
         if (
             set(publication) != _PUBLICATION_MANIFEST_FIELDS
@@ -241,8 +289,14 @@ def _publication_status(
             if isinstance(chapter_id, str)
             else None
         )
-        if chapter is None or metadata.get("chapter_fingerprint") != _chapter_fingerprint(chapter):
+        if chapter is None:
             raise ValueError("publication chapter is invalid")
+        _validate_publication_metadata(
+            metadata,
+            input_fingerprint=input_fingerprint,
+            evidence_fingerprint=expected_tree["evidence_fingerprint"],
+            chapter=chapter,
+        )
         artifact_path = paths.root / artifact_basename
         content = _read_regular_bytes(artifact_path)
         markdown = content.decode("utf-8")
@@ -251,7 +305,6 @@ def _publication_status(
             publication.get("final_snapshot_sha256") != _json_fingerprint(final)
             or _json_fingerprint(current_final) != _json_fingerprint(final)
             or hashlib.sha256(content).hexdigest() != artifact_sha256
-            or metadata.get("evidence_fingerprint") != expected_tree["evidence_fingerprint"]
             or not _markdown_publication_is_valid(
                 metadata,
                 markdown,
@@ -441,7 +494,12 @@ def _open_publication_lock(path: Path) -> int:
             not stat.S_ISREG(info.st_mode)
             or info.st_nlink != 1
             or info.st_size > _MAX_ARTIFACT_BYTES
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
             or not stat.S_ISREG(path_info.st_mode)
+            or path_info.st_nlink != 1
+            or path_info.st_uid != os.geteuid()
+            or stat.S_IMODE(path_info.st_mode) & 0o077
             or (path_info.st_dev, path_info.st_ino) != (info.st_dev, info.st_ino)
         ):
             raise ValueError("publication lock is not a safe regular file")
@@ -460,14 +518,20 @@ def _validate_locked_file(path: Path, fd: int) -> None:
     if (
         not stat.S_ISREG(info.st_mode)
         or info.st_nlink != 1
+        or info.st_size > _MAX_ARTIFACT_BYTES
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
         or not stat.S_ISREG(path_info.st_mode)
+        or path_info.st_nlink != 1
+        or path_info.st_uid != os.geteuid()
+        or stat.S_IMODE(path_info.st_mode) & 0o077
         or (path_info.st_dev, path_info.st_ino) != (info.st_dev, info.st_ino)
     ):
         raise ValueError("publication lock changed while acquiring")
 
 
 @contextmanager
-def _publication_transaction_lock(paths: WorkflowPaths) -> Iterator[None]:
+def _publication_transaction_lock(paths: WorkflowPaths) -> Iterator[_PublicationLock]:
     paths.root.mkdir(parents=True, exist_ok=True)
     with _publication_thread_lock(paths.root):
         fd = _open_publication_lock(paths.publication_lock)
@@ -476,7 +540,7 @@ def _publication_transaction_lock(paths: WorkflowPaths) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_EX)
             locked = True
             _validate_locked_file(paths.publication_lock, fd)
-            yield
+            yield _PublicationLock(paths.publication_lock, fd)
         finally:
             if locked:
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -500,6 +564,61 @@ def _temporary_note_path(root: Path) -> Iterator[Path]:
 def _json_fingerprint(value: dict[str, Any]) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_publication_metadata(
+    metadata: dict[str, Any],
+    *,
+    input_fingerprint: str,
+    evidence_fingerprint: str,
+    chapter: dict[str, Any],
+) -> None:
+    fields = set(metadata)
+    unexpected = fields - _PUBLICATION_METADATA_FIELDS
+    if unexpected:
+        raise ValueError("published metadata has unexpected fields")
+    if fields != _PUBLICATION_METADATA_FIELDS:
+        raise ValueError("published metadata is incomplete")
+    if metadata.get("model") != "deepseek-v4-pro":
+        raise ValueError("published model is invalid")
+    if metadata.get("prompt_rules_version") != "mba-intensive-reading-v1":
+        raise ValueError("published ruleset is invalid")
+    if metadata.get("input_fingerprint") != input_fingerprint:
+        raise ValueError("published input fingerprint is invalid")
+    if metadata.get("chapter_fingerprint") != _chapter_fingerprint(chapter):
+        raise ValueError("published chapter fingerprint is invalid")
+    if metadata.get("evidence_fingerprint") != evidence_fingerprint:
+        raise ValueError("published evidence fingerprint is invalid")
+    if metadata.get("chapter_id") != chapter.get("id"):
+        raise ValueError("published chapter id is invalid")
+    if any(
+        metadata.get(field) != chapter.get(chapter_field)
+        for field, chapter_field in (
+            ("chapter_number", "number"),
+            ("chapter_title", "title"),
+            ("page_start", "page_start"),
+            ("page_end", "page_end"),
+        )
+    ):
+        raise ValueError("published chapter metadata is invalid")
+    source_id = metadata.get("source_id")
+    prompt_fingerprint = metadata.get("prompt_fingerprint")
+    citation_ids = metadata.get("citation_ids")
+    if not isinstance(source_id, str) or not source_id:
+        raise ValueError("published source id is invalid")
+    if not isinstance(prompt_fingerprint, str) or not prompt_fingerprint:
+        raise ValueError("published prompt fingerprint is invalid")
+    if (
+        not isinstance(citation_ids, list)
+        or not citation_ids
+        or any(
+            not isinstance(citation, str)
+            or not citation.startswith(f"[src:{source_id}:")
+            or not citation.endswith("]")
+            for citation in citation_ids
+        )
+    ):
+        raise ValueError("published citation metadata is invalid")
 
 
 def _markdown_publication_is_valid(
@@ -540,6 +659,11 @@ def _markdown_publication_is_valid(
     if "> 精读规则版本：`mba-intensive-reading-v1`" not in markdown:
         return False
     if "> 模型：`deepseek-v4-pro`" not in markdown:
+        return False
+    citation_ids = metadata.get("citation_ids")
+    if not isinstance(citation_ids, list) or any(
+        not isinstance(citation, str) or citation not in markdown for citation in citation_ids
+    ):
         return False
     if not all(f"## {heading}" in markdown for heading in _SECTION_HEADINGS):
         return False
@@ -600,6 +724,29 @@ def _legacy_markdown_publication_is_valid(
     return "[src:" in markdown
 
 
+def _read_matching_chapter_context(
+    paths: WorkflowPaths,
+    *,
+    expected_tree: dict[str, Any] | None,
+    expected_confirmation: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        tree = _read_regular_json(paths.chapter_tree)
+        validate_chapter_tree(tree)
+    except (OSError, ValueError) as exc:
+        raise ValueError("published chapter tree is invalid") from exc
+    if expected_tree is not None and tree != expected_tree:
+        raise ValueError("published chapter tree changed during note generation")
+    try:
+        confirmation = _read_regular_json(paths.confirmation)
+        validate_chapter_confirmation(confirmation, tree)
+    except (OSError, ValueError) as exc:
+        raise ValueError("published chapter confirmation is invalid") from exc
+    if expected_confirmation is not None and confirmation != expected_confirmation:
+        raise ValueError("published chapter confirmation changed during note generation")
+    return tree, confirmation
+
+
 def bind_published_note(
     final_path: str | Path,
     note_path: str | Path,
@@ -609,6 +756,7 @@ def bind_published_note(
     expected_tree: dict[str, Any] | None = None,
     confirmation: dict[str, Any] | None = None,
     publication_path: str | Path | None = None,
+    publication_lock: _PublicationLock | None = None,
 ) -> Path:
     """Atomically bind a note to immutable OCR and chapter snapshots."""
     final_target = Path(final_path)
@@ -621,41 +769,51 @@ def bind_published_note(
     state_root = publication_target.parent
     if final_target.parent != state_root or note_target.parent != state_root:
         raise ValueError("published note must stay inside the OCR state root")
+    paths = WorkflowPaths(
+        root=state_root,
+        state=state_root / "batch-state.json",
+        final=final_target,
+        publication=publication_target,
+        publication_lock=state_root / ".note-publication.lock",
+        chapter_tree=state_root / "chapter-tree.json",
+        confirmation=state_root / "chapter-confirmation.json",
+        note=state_root / "intensive-reading.md",
+    )
     if not isinstance(expected_final, dict):
         raise ValueError("expected OCR final is required")
+    if publication_lock is not None:
+        if publication_lock.path != paths.publication_lock:
+            raise ValueError("publication lock does not protect this state root")
+        publication_lock.validate()
     final = _read_regular_json(final_target)
     if final != expected_final:
         raise ValueError("OCR final changed during note generation")
 
     pages = _normalized_completed_pages(expected_final)
     detected_tree = detect_chapter_tree(pages, input_fingerprint=_input_fingerprint(expected_final))
+    persisted_tree, persisted_confirmation = _read_matching_chapter_context(
+        paths,
+        expected_tree=expected_tree,
+        expected_confirmation=confirmation,
+    )
     if expected_tree is None:
-        expected_tree = _read_regular_json(final_target.with_name("chapter-tree.json"))
+        expected_tree = persisted_tree
     if expected_tree != detected_tree:
         raise ValueError("published chapter tree fingerprint is invalid")
     if confirmation is None:
-        confirmation = load_chapter_confirmation(
-            final_target.with_name("chapter-confirmation.json")
-        )
+        confirmation = persisted_confirmation
     validate_chapter_confirmation(confirmation, expected_tree)
     if confirmation.get("action") != "confirm":
         raise ValueError("published chapter confirmation is invalid")
-
-    if not isinstance(metadata, dict) or metadata.get("model") != "deepseek-v4-pro":
-        raise ValueError("published model is invalid")
-    if metadata.get("prompt_rules_version") != "mba-intensive-reading-v1":
-        raise ValueError("published ruleset is invalid")
-    if metadata.get("input_fingerprint") != expected_final.get("input_fingerprint"):
-        raise ValueError("published input fingerprint is invalid")
-    if metadata.get("chapter_fingerprint") != confirmation.get("chapter_fingerprint"):
-        raise ValueError("published chapter fingerprint is invalid")
-    if metadata.get("evidence_fingerprint") != expected_tree.get("evidence_fingerprint"):
-        raise ValueError("published evidence fingerprint is invalid")
-    if metadata.get("chapter_id") != confirmation.get("chapter_id"):
-        raise ValueError("published chapter id is invalid")
-    prompt_fingerprint = metadata.get("prompt_fingerprint")
-    if not isinstance(prompt_fingerprint, str) or not prompt_fingerprint:
-        raise ValueError("published prompt fingerprint is invalid")
+    chapter = confirmation.get("chapter")
+    if not isinstance(metadata, dict) or not isinstance(chapter, dict):
+        raise ValueError("published metadata is invalid")
+    _validate_publication_metadata(
+        metadata,
+        input_fingerprint=_input_fingerprint(expected_final),
+        evidence_fingerprint=expected_tree["evidence_fingerprint"],
+        chapter=chapter,
+    )
 
     content = _read_regular_bytes(note_target)
     try:
@@ -690,16 +848,30 @@ def bind_published_note(
         previous_manifest = _read_regular_bytes(publication_target)
     except FileNotFoundError:
         previous_manifest = None
-    if _read_regular_json(final_target) != expected_final:
-        raise ValueError("OCR final changed during note generation")
     try:
+        if publication_lock is not None:
+            publication_lock.validate()
+        if _read_regular_json(final_target) != expected_final:
+            raise ValueError("OCR final changed during note generation")
+        _read_matching_chapter_context(
+            paths,
+            expected_tree=expected_tree,
+            expected_confirmation=confirmation,
+        )
         _atomic_json(publication_target, publication)
+        if publication_lock is not None:
+            publication_lock.validate()
         if _read_regular_json(final_target) != expected_final:
             raise ValueError("OCR final changed during note generation")
         if _read_regular_json(publication_target) != publication:
             raise ValueError("OCR publication changed during note generation")
         if _read_regular_bytes(artifact_path) != content:
             raise ValueError("OCR publication artifact changed during note generation")
+        published, error, published_path = _publication_status(expected_final, paths)
+        if not published or error is not None or published_path != artifact_path:
+            raise ValueError("OCR publication failed post-commit validation")
+        if publication_lock is not None:
+            publication_lock.validate()
     except Exception:
         _restore_previous_manifest(
             publication_target,
@@ -855,11 +1027,13 @@ class OcrWorkflow:
                 self._error = _safe_error(exc)
 
     def detect_chapters(self) -> dict[str, Any]:
-        with self._lock:
+        with _publication_transaction_lock(self.paths) as publication_lock:
             final, pages = self.completed_evidence()
             fingerprint = _input_fingerprint(final)
             tree = detect_chapter_tree(pages, input_fingerprint=fingerprint)
+            publication_lock.validate()
             _atomic_json(self.paths.chapter_tree, tree)
+            publication_lock.validate()
             return tree
 
     def completed_evidence(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -888,50 +1062,56 @@ class OcrWorkflow:
         expected_tree: dict[str, Any],
         confirmation: dict[str, Any],
     ) -> tuple[dict[str, Any], Path]:
-        with self._lock:
-            with _publication_transaction_lock(self.paths):
-                current_final, pages = self.completed_evidence()
-                if current_final != expected_final:
-                    raise ValueError("OCR final changed during note generation")
-                detected_tree = detect_chapter_tree(
-                    pages, input_fingerprint=_input_fingerprint(current_final)
+        with _publication_transaction_lock(self.paths) as publication_lock:
+            current_final, pages = self.completed_evidence()
+            if current_final != expected_final:
+                raise ValueError("OCR final changed during note generation")
+            detected_tree = detect_chapter_tree(
+                pages, input_fingerprint=_input_fingerprint(current_final)
+            )
+            if expected_tree != detected_tree:
+                raise ValueError("published chapter tree fingerprint is invalid")
+            validate_chapter_confirmation(confirmation, expected_tree)
+            if confirmation.get("action") != "confirm":
+                raise ValueError("published chapter confirmation is invalid")
+            _read_matching_chapter_context(
+                self.paths,
+                expected_tree=expected_tree,
+                expected_confirmation=confirmation,
+            )
+            with _temporary_note_path(self.paths.root) as temporary_path:
+                note = generate(temporary_path)
+                publication_lock.validate()
+                _read_matching_chapter_context(
+                    self.paths,
+                    expected_tree=expected_tree,
+                    expected_confirmation=confirmation,
                 )
-                if expected_tree != detected_tree:
-                    raise ValueError("published chapter tree fingerprint is invalid")
-                validate_chapter_confirmation(confirmation, expected_tree)
-                if confirmation.get("action") != "confirm":
-                    raise ValueError("published chapter confirmation is invalid")
-                with _temporary_note_path(self.paths.root) as temporary_path:
-                    note = generate(temporary_path)
-                    if not isinstance(note, dict):
-                        raise ValueError("generated note is invalid")
-                    metadata = note.get("metadata")
-                    markdown = note.get("markdown")
-                    try:
-                        persisted_markdown = _read_regular_bytes(temporary_path).decode("utf-8")
-                    except (OSError, UnicodeError, ValueError) as exc:
-                        raise ValueError("generated note artifact is invalid") from exc
-                    if (
-                        not isinstance(metadata, dict)
-                        or not isinstance(markdown, str)
-                        or markdown != persisted_markdown
-                    ):
-                        raise ValueError("generated note does not match its artifact")
-                    artifact_path = bind_published_note(
-                        self.paths.final,
-                        temporary_path,
-                        metadata,
-                        expected_final=expected_final,
-                        expected_tree=expected_tree,
-                        confirmation=confirmation,
-                        publication_path=self.paths.publication,
-                    )
-                    published, error, published_path = _publication_status(
-                        expected_final, self.paths
-                    )
-                    if not published or error is not None or published_path != artifact_path:
-                        raise ValueError("OCR publication failed post-commit validation")
-                    return note, artifact_path
+                if not isinstance(note, dict):
+                    raise ValueError("generated note is invalid")
+                metadata = note.get("metadata")
+                markdown = note.get("markdown")
+                try:
+                    persisted_markdown = _read_regular_bytes(temporary_path).decode("utf-8")
+                except (OSError, UnicodeError, ValueError) as exc:
+                    raise ValueError("generated note artifact is invalid") from exc
+                if (
+                    not isinstance(metadata, dict)
+                    or not isinstance(markdown, str)
+                    or markdown != persisted_markdown
+                ):
+                    raise ValueError("generated note does not match its artifact")
+                artifact_path = bind_published_note(
+                    self.paths.final,
+                    temporary_path,
+                    metadata,
+                    expected_final=expected_final,
+                    expected_tree=expected_tree,
+                    confirmation=confirmation,
+                    publication_path=self.paths.publication,
+                    publication_lock=publication_lock,
+                )
+                return note, artifact_path
 
     def _persisted_status(
         self,
@@ -959,10 +1139,12 @@ class OcrWorkflow:
         return status, error, None
 
     def confirm_chapter(self, chapter_id: str) -> dict[str, Any]:
-        with self._lock:
+        with _publication_transaction_lock(self.paths) as publication_lock:
             _final, _pages, tree = self.completed_chapter_context()
             confirmation = build_confirmation(tree, chapter_id)
+            publication_lock.validate()
             persist_chapter_confirmation(self.paths.confirmation, confirmation)
+            publication_lock.validate()
             return confirmation
 
 

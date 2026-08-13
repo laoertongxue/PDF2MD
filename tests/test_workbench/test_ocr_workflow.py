@@ -121,10 +121,17 @@ def _valid_markdown(
 
 
 def _note_metadata(final: dict, tree: dict, confirmation: dict) -> dict[str, object]:
+    chapter = confirmation["chapter"]
     return {
         "model": "deepseek-v4-pro",
         "prompt_rules_version": "mba-intensive-reading-v1",
+        "source_id": "test",
         "chapter_id": confirmation["chapter_id"],
+        "chapter_number": chapter["number"],
+        "chapter_title": chapter["title"],
+        "page_start": chapter["page_start"],
+        "page_end": chapter["page_end"],
+        "citation_ids": ["[src:test:p1:codex-block]"],
         "chapter_fingerprint": confirmation["chapter_fingerprint"],
         "prompt_fingerprint": "prompt-fingerprint",
         "input_fingerprint": final["input_fingerprint"],
@@ -303,6 +310,41 @@ def test_failed_manifest_commit_keeps_previous_publication_unchanged(
     assert before_path.read_text(encoding="utf-8") == before_content
 
 
+def test_failed_post_commit_publication_validation_restores_previous_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    replacement = _valid_markdown(final, tree, confirmation, concept="复核失败替代概念")
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    previous_manifest = workflow.paths.publication.read_bytes()
+
+    monkeypatch.setattr(
+        workflow_module,
+        "_publication_status",
+        lambda _final, _paths: (False, "ocr_publication_invalid", None),
+    )
+
+    def generate(output_path: Path):
+        output_path.write_text(replacement, encoding="utf-8")
+        return {"markdown": replacement, "metadata": metadata}
+
+    with pytest.raises(ValueError, match="post-commit validation"):
+        workflow.generate_and_publish(
+            generate,
+            expected_final=final,
+            expected_tree=tree,
+            confirmation=confirmation,
+        )
+
+    assert workflow.paths.publication.read_bytes() == previous_manifest
+
+
 def test_two_workflow_instances_serialize_generation_with_state_root_lock(tmp_path: Path):
     _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
     _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
@@ -374,6 +416,246 @@ def test_two_workflow_instances_serialize_generation_with_state_root_lock(tmp_pa
     ).status()
     assert payload["publishable"] is True
     assert payload["markdown_path"] == str(second_path)
+
+
+def test_status_does_not_wait_for_model_generation_on_the_same_workflow(tmp_path: Path):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    markdown = _valid_markdown(final, tree, confirmation)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    generation_entered = threading.Event()
+    release_generation = threading.Event()
+    status_finished = threading.Event()
+
+    def generate(output_path: Path):
+        generation_entered.set()
+        assert release_generation.wait(5)
+        output_path.write_text(markdown, encoding="utf-8")
+        return {"markdown": markdown, "metadata": metadata}
+
+    def read_status():
+        payload = workflow.status()
+        status_finished.set()
+        return payload
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        publication = executor.submit(
+            workflow.generate_and_publish,
+            generate,
+            expected_final=final,
+            expected_tree=tree,
+            confirmation=confirmation,
+        )
+        try:
+            assert generation_entered.wait(2)
+            status = executor.submit(read_status)
+            assert status_finished.wait(0.2) is True
+            payload = status.result(timeout=2)
+            assert payload["status"] == "completed"
+            assert payload["publishable"] is False
+            release_generation.set()
+            publication.result(timeout=5)
+        finally:
+            release_generation.set()
+
+
+@pytest.mark.parametrize("changed_file", ["tree", "confirmation"])
+def test_generate_rejects_chapter_context_changed_while_waiting_for_lock(
+    tmp_path: Path, changed_file: str
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    holder_entered = threading.Event()
+    release_holder = threading.Event()
+    generation_started = threading.Event()
+    callback_called = False
+
+    def hold_lock():
+        with workflow_module._publication_transaction_lock(workflow.paths):
+            holder_entered.set()
+            assert release_holder.wait(5)
+
+    def generate(_output_path: Path):
+        nonlocal callback_called
+        callback_called = True
+        pytest.fail("stale chapter context must fail before generation")
+
+    def run_generation():
+        generation_started.set()
+        return workflow.generate_and_publish(
+            generate,
+            expected_final=final,
+            expected_tree=tree,
+            confirmation=confirmation,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holder = executor.submit(hold_lock)
+        assert holder_entered.wait(2)
+        generation = executor.submit(run_generation)
+        assert generation_started.wait(2)
+        if changed_file == "tree":
+            changed = json.loads(json.dumps(tree))
+            changed["warnings"].append("concurrent chapter update")
+            workflow_module._atomic_json(workflow.paths.chapter_tree, changed)
+        else:
+            changed = json.loads(json.dumps(confirmation))
+            changed["revision"] += 1
+            workflow_module._atomic_json(workflow.paths.confirmation, changed)
+        release_holder.set()
+        holder.result(timeout=5)
+        with pytest.raises(ValueError, match="chapter"):
+            generation.result(timeout=5)
+
+    assert callback_called is False
+
+
+def test_confirm_chapter_waits_for_generation_and_updates_after_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    markdown = _valid_markdown(final, tree, confirmation)
+    publisher = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    confirmer = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    generation_entered = threading.Event()
+    release_generation = threading.Event()
+    confirmation_started = threading.Event()
+    confirmation_write_entered = threading.Event()
+    original_build_confirmation = workflow_module.build_confirmation
+    original_persist_confirmation = workflow_module.persist_chapter_confirmation
+
+    def generate(output_path: Path):
+        generation_entered.set()
+        assert release_generation.wait(5)
+        output_path.write_text(markdown, encoding="utf-8")
+        return {"markdown": markdown, "metadata": metadata}
+
+    def build_updated_confirmation(value: dict, chapter_id: str):
+        updated = original_build_confirmation(value, chapter_id)
+        updated["revision"] = 2
+        return updated
+
+    def persist_updated_confirmation(path: Path, value: dict):
+        confirmation_write_entered.set()
+        return original_persist_confirmation(path, value)
+
+    monkeypatch.setattr(workflow_module, "build_confirmation", build_updated_confirmation)
+    monkeypatch.setattr(
+        workflow_module, "persist_chapter_confirmation", persist_updated_confirmation
+    )
+
+    def run_confirmation():
+        confirmation_started.set()
+        return confirmer.confirm_chapter(confirmation["chapter_id"])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        publication = executor.submit(
+            publisher.generate_and_publish,
+            generate,
+            expected_final=final,
+            expected_tree=tree,
+            confirmation=confirmation,
+        )
+        try:
+            assert generation_entered.wait(2)
+            confirmation_future = executor.submit(run_confirmation)
+            assert confirmation_started.wait(2)
+            assert confirmation_write_entered.wait(0.2) is False
+            release_generation.set()
+            publication.result(timeout=5)
+            current_confirmation = confirmation_future.result(timeout=5)
+        finally:
+            release_generation.set()
+
+    assert current_confirmation["revision"] == 2
+    manifest = json.loads(publisher.paths.publication.read_text(encoding="utf-8"))
+    assert manifest["metadata"]["chapter_id"] == current_confirmation["chapter_id"]
+    assert (
+        manifest["metadata"]["chapter_fingerprint"] == current_confirmation["chapter_fingerprint"]
+    )
+
+
+def test_detect_chapters_waits_for_generation_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    markdown = _valid_markdown(final, tree, confirmation)
+    publisher = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    detector = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    generation_entered = threading.Event()
+    release_generation = threading.Event()
+    detection_started = threading.Event()
+    tree_write_entered = threading.Event()
+    original_atomic_json = workflow_module._atomic_json
+
+    def generate(output_path: Path):
+        generation_entered.set()
+        assert release_generation.wait(5)
+        output_path.write_text(markdown, encoding="utf-8")
+        return {"markdown": markdown, "metadata": metadata}
+
+    def observe_tree_write(path: Path, value: dict):
+        if path == detector.paths.chapter_tree:
+            tree_write_entered.set()
+        return original_atomic_json(path, value)
+
+    monkeypatch.setattr(workflow_module, "_atomic_json", observe_tree_write)
+
+    def run_detection():
+        detection_started.set()
+        return detector.detect_chapters()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        publication = executor.submit(
+            publisher.generate_and_publish,
+            generate,
+            expected_final=final,
+            expected_tree=tree,
+            confirmation=confirmation,
+        )
+        try:
+            assert generation_entered.wait(2)
+            detection = executor.submit(run_detection)
+            assert detection_started.wait(2)
+            assert tree_write_entered.wait(0.2) is False
+            release_generation.set()
+            publication.result(timeout=5)
+            detected = detection.result(timeout=5)
+        finally:
+            release_generation.set()
+
+    assert detected == tree
+    assert tree_write_entered.is_set()
 
 
 def test_publication_lock_serializes_independent_processes(tmp_path: Path):
@@ -504,6 +786,100 @@ def test_status_rejects_coordinated_manifest_and_artifact_chapter_rebinding(tmp_
     assert payload["error"] == "ocr_publication_invalid"
 
 
+def test_status_retries_when_publication_manifest_changes_during_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    first_markdown = _valid_markdown(final, tree, confirmation, concept="第一份状态快照")
+    first_artifact = _write_content_addressed_publication(
+        state_root, final, tree, confirmation, first_markdown
+    )
+    manifest_path = state_root / "note-publication.json"
+    first_manifest = manifest_path.read_bytes()
+    second_markdown = _valid_markdown(final, tree, confirmation, concept="第二份状态快照")
+    second_artifact = _write_content_addressed_publication(
+        state_root, final, tree, confirmation, second_markdown
+    )
+    second_manifest = manifest_path.read_bytes()
+    manifest_path.write_bytes(first_manifest)
+    original_read = workflow_module._read_regular_json
+    manifest_reads = 0
+
+    def switch_manifest_after_first_read(path: Path):
+        nonlocal manifest_reads
+        value = original_read(path)
+        if path == manifest_path:
+            manifest_reads += 1
+            if manifest_reads == 1:
+                manifest_path.write_bytes(second_manifest)
+        return value
+
+    monkeypatch.setattr(workflow_module, "_read_regular_json", switch_manifest_after_first_read)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+
+    payload = workflow.status()
+
+    assert first_artifact != second_artifact
+    assert manifest_reads >= 3
+    assert payload["publishable"] is True
+    assert payload["markdown_path"] == str(second_artifact)
+
+
+def test_status_does_not_publish_when_manifest_never_stabilizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    first_markdown = _valid_markdown(final, tree, confirmation, concept="抖动状态甲")
+    first_artifact = _write_content_addressed_publication(
+        state_root, final, tree, confirmation, first_markdown
+    )
+    manifest_path = state_root / "note-publication.json"
+    first_manifest = manifest_path.read_bytes()
+    second_markdown = _valid_markdown(final, tree, confirmation, concept="抖动状态乙")
+    second_artifact = _write_content_addressed_publication(
+        state_root, final, tree, confirmation, second_markdown
+    )
+    second_manifest = manifest_path.read_bytes()
+    manifest_path.write_bytes(first_manifest)
+    original_read = workflow_module._read_regular_json
+    manifest_reads = 0
+
+    def keep_switching_manifest(path: Path):
+        nonlocal manifest_reads
+        value = original_read(path)
+        if path == manifest_path:
+            manifest_reads += 1
+            replacement = (
+                second_manifest
+                if value["artifact_basename"] == first_artifact.name
+                else first_manifest
+            )
+            manifest_path.write_bytes(replacement)
+        return value
+
+    monkeypatch.setattr(workflow_module, "_read_regular_json", keep_switching_manifest)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+
+    payload = workflow.status()
+
+    assert first_artifact != second_artifact
+    assert manifest_reads == workflow_module._PUBLICATION_STATUS_RETRIES * 2
+    assert payload["status"] == "completed"
+    assert payload["publishable"] is False
+    assert payload["markdown_path"] is None
+    assert payload["error"] == "ocr_publication_invalid"
+
+
 def test_status_payload_does_not_report_unpublished_result_as_completed(tmp_path: Path):
     payload = status_payload(
         status=WorkflowStatus.RUNNING,
@@ -620,7 +996,7 @@ def test_untrusted_publication_manifest_or_artifact_is_rejected(tmp_path: Path, 
     assert payload["error"] == "ocr_publication_invalid"
 
 
-@pytest.mark.parametrize("attack", ["symlink", "hardlink"])
+@pytest.mark.parametrize("attack", ["symlink", "hardlink", "permissions"])
 def test_generate_rejects_untrusted_state_root_publication_lock(tmp_path: Path, attack: str):
     _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
     _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
@@ -629,8 +1005,11 @@ def test_generate_rejects_untrusted_state_root_publication_lock(tmp_path: Path, 
     backing.write_text("", encoding="utf-8")
     if attack == "symlink":
         lock_path.symlink_to(backing)
-    else:
+    elif attack == "hardlink":
         os.link(backing, lock_path)
+    else:
+        lock_path.write_text("", encoding="utf-8")
+        lock_path.chmod(0o644)
     callback_called = False
     workflow = OcrWorkflow(
         source_path=tmp_path / "book.pdf",
@@ -651,6 +1030,75 @@ def test_generate_rejects_untrusted_state_root_publication_lock(tmp_path: Path, 
             confirmation=confirmation,
         )
     assert callback_called is False
+
+
+def test_generation_rejects_replaced_lock_before_manifest_commit(tmp_path: Path):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    replacement = _valid_markdown(final, tree, confirmation, concept="锁替换后的内容")
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    previous_manifest = workflow.paths.publication.read_bytes()
+
+    def replace_lock(output_path: Path):
+        workflow.paths.publication_lock.unlink()
+        workflow.paths.publication_lock.write_bytes(b"")
+        workflow.paths.publication_lock.chmod(0o600)
+        output_path.write_text(replacement, encoding="utf-8")
+        return {"markdown": replacement, "metadata": metadata}
+
+    with pytest.raises(ValueError, match="publication lock"):
+        workflow.generate_and_publish(
+            replace_lock,
+            expected_final=final,
+            expected_tree=tree,
+            confirmation=confirmation,
+        )
+
+    assert workflow.paths.publication.read_bytes() == previous_manifest
+
+
+def test_generation_rolls_back_when_lock_is_replaced_after_manifest_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    replacement = _valid_markdown(final, tree, confirmation, concept="提交后锁替换")
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    previous_manifest = workflow.paths.publication.read_bytes()
+    original_atomic_json = workflow_module._atomic_json
+
+    def replace_lock_after_commit(path: Path, value: dict):
+        original_atomic_json(path, value)
+        if path == workflow.paths.publication:
+            workflow.paths.publication_lock.unlink()
+            workflow.paths.publication_lock.write_bytes(b"")
+            workflow.paths.publication_lock.chmod(0o600)
+
+    monkeypatch.setattr(workflow_module, "_atomic_json", replace_lock_after_commit)
+
+    def generate(output_path: Path):
+        output_path.write_text(replacement, encoding="utf-8")
+        return {"markdown": replacement, "metadata": metadata}
+
+    with pytest.raises(ValueError, match="publication lock"):
+        workflow.generate_and_publish(
+            generate,
+            expected_final=final,
+            expected_tree=tree,
+            confirmation=confirmation,
+        )
+
+    assert workflow.paths.publication.read_bytes() == previous_manifest
 
 
 def test_invalid_completed_final_is_blocked(tmp_path: Path):
@@ -882,6 +1330,34 @@ def test_bind_published_note_rejects_metadata_outside_verified_context(
             metadata,
             expected_final=final,
         )
+
+
+def test_generate_rejects_unknown_publication_metadata_without_replacing_manifest(tmp_path: Path):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    metadata["api_secret"] = "sk-secret-must-not-be-persisted"
+    replacement = _valid_markdown(final, tree, confirmation, concept="未知元数据")
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    previous_manifest = workflow.paths.publication.read_bytes()
+
+    def generate(output_path: Path):
+        output_path.write_text(replacement, encoding="utf-8")
+        return {"markdown": replacement, "metadata": metadata}
+
+    with pytest.raises(ValueError, match="metadata.*unexpected"):
+        workflow.generate_and_publish(
+            generate,
+            expected_final=final,
+            expected_tree=tree,
+            confirmation=confirmation,
+        )
+
+    assert workflow.paths.publication.read_bytes() == previous_manifest
 
 
 @pytest.mark.parametrize("persisted", [{}, {"status": "future-status"}])

@@ -2,6 +2,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
@@ -532,9 +533,21 @@ async def generate_source_note(
         generator = DeepSeekIntensiveReadingGenerator(
             DeepSeekClient(api_key, settings.deepseek_model)
         )
+
+        def generate_publication(output_path: Path) -> dict[str, Any]:
+            generated = generator.generate(base, output_path=output_path)
+            metadata = generated.get("metadata")
+            if not isinstance(metadata, dict):
+                return generated
+            publication_note = dict(generated)
+            publication_metadata = dict(metadata)
+            publication_metadata.pop("note_fingerprint", None)
+            publication_note["metadata"] = publication_metadata
+            return publication_note
+
         note, markdown_path = await run_in_threadpool(
             lambda: workflow.generate_and_publish(
-                lambda output_path: generator.generate(base, output_path=output_path),
+                generate_publication,
                 expected_final=final,
                 expected_tree=tree,
                 confirmation=confirmation,
