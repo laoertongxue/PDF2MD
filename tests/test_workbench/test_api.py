@@ -154,12 +154,12 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
     workflow.paths.chapter_tree.write_text(json.dumps(tree), encoding="utf-8")
     confirmation = build_confirmation(tree, tree["chapters"][0]["id"])
     workflow.paths.confirmation.write_text(json.dumps(confirmation), encoding="utf-8")
-    evidence_calls = 0
+    context_calls = 0
 
-    def completed_evidence():
-        nonlocal evidence_calls
-        evidence_calls += 1
-        return final, pages
+    def completed_chapter_context():
+        nonlocal context_calls
+        context_calls += 1
+        return final, pages, tree
 
     class FakeGenerator:
         def generate(self, base, *, output_path):
@@ -169,10 +169,15 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
                 "metadata": {"input_fingerprint": base["metadata"]["input_fingerprint"]},
             }
 
-    def bind_note(_final_path, _note_path, _metadata, *, expected_final):
+    def publish_note(_metadata, *, expected_final, expected_tree, confirmation):
         assert expected_final is final
+        assert expected_tree is tree
+        assert confirmation["chapter_id"] == tree["chapters"][0]["id"]
 
-    monkeypatch.setattr(workflow, "completed_evidence", completed_evidence, raising=False)
+    monkeypatch.setattr(
+        workflow, "completed_chapter_context", completed_chapter_context, raising=False
+    )
+    monkeypatch.setattr(workflow, "publish_note", publish_note, raising=False)
     monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
     monkeypatch.setattr(
         routes_workbench,
@@ -190,8 +195,6 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
     monkeypatch.setattr(
         routes_workbench, "DeepSeekIntensiveReadingGenerator", lambda _client: FakeGenerator()
     )
-    monkeypatch.setattr(routes_workbench, "bind_published_note", bind_note)
-
     response = c.post(
         f"/api/workbench/sources/{source['id']}/ocr/generate",
         json={"chapter_id": confirmation["chapter_id"]},
@@ -199,7 +202,60 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
 
     assert response.status_code == 200
     assert response.json()["input_fingerprint"] == final["input_fingerprint"]
-    assert evidence_calls == 1
+    assert context_calls == 1
+
+
+@pytest.mark.parametrize("tree_kind", ["symlink", "foreign-ocr"])
+def test_ocr_generate_route_rejects_chapter_tree_outside_current_ocr_snapshot(
+    tmp_path, monkeypatch, tree_kind
+):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    fixture_root = root / "ocr-fixture"
+    fixture_root.mkdir()
+    _engines, state_root, final = _complete_workflow_fixture(fixture_root, publish_note=False)
+    _course, source = _registered_pdf_source(c, root, fixture_root / "book.pdf")
+    workflow = OcrWorkflow(
+        source_path=fixture_root / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    pages = _normalized_ocr_pages(final)
+    tree = detect_chapter_tree(
+        pages,
+        input_fingerprint=(
+            final["input_fingerprint"] if tree_kind == "symlink" else "foreign-ocr-input"
+        ),
+    )
+    if tree_kind == "symlink":
+        backing = workflow.paths.root / "untrusted-chapter-tree.json"
+        backing.write_text(json.dumps(tree), encoding="utf-8")
+        workflow.paths.chapter_tree.symlink_to(backing)
+    else:
+        workflow.paths.chapter_tree.write_text(json.dumps(tree), encoding="utf-8")
+    confirmation = build_confirmation(tree, tree["chapters"][0]["id"])
+    workflow.paths.confirmation.write_text(json.dumps(confirmation), encoding="utf-8")
+    build_calls = 0
+
+    def reject_if_untrusted_tree_reaches_note_builder(*_args, **_kwargs):
+        nonlocal build_calls
+        build_calls += 1
+        raise ValueError("untrusted tree reached note builder")
+
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench,
+        "build_intensive_reading_note",
+        reject_if_untrusted_tree_reaches_note_builder,
+    )
+
+    response = c.post(
+        f"/api/workbench/sources/{source['id']}/ocr/generate",
+        json={"chapter_id": confirmation["chapter_id"]},
+    )
+
+    assert response.status_code == 409
+    assert build_calls == 0
 
 
 def test_create_course_and_list(tmp_path):

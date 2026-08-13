@@ -9,7 +9,6 @@ import re
 import stat
 import tempfile
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -21,7 +20,9 @@ from pypdf import PdfReader
 from .chapters import (
     _chapter_fingerprint,
     detect_chapter_tree,
+    load_chapter_confirmation,
     persist_chapter_confirmation,
+    validate_chapter_confirmation,
     validate_chapter_tree,
 )
 from .markdown_notes import validate_mermaid_block
@@ -73,6 +74,7 @@ class WorkflowPaths:
     root: Path
     state: Path
     final: Path
+    publication: Path
     chapter_tree: Path
     confirmation: Path
     note: Path
@@ -84,6 +86,7 @@ def workflow_paths(root: str | Path) -> WorkflowPaths:
         root=root_path,
         state=root_path / "batch-state.json",
         final=root_path / "batch-final.json",
+        publication=root_path / "note-publication.json",
         chapter_tree=root_path / "chapter-tree.json",
         confirmation=root_path / "chapter-confirmation.json",
         note=root_path / "intensive-reading.md",
@@ -128,7 +131,7 @@ def _status_payload_from_snapshot(
             status = WorkflowStatus.BLOCKED
             error = "ocr_evidence_invalid"
         else:
-            published, error = _publication_status(completed_final, paths.note)
+            published, error = _publication_status(completed_final, paths)
     return {
         "status": status.value,
         "source_path": str(Path(source_path).expanduser()),
@@ -182,16 +185,31 @@ def _completed_ocr_final_is_valid(final: dict[str, Any], source_path: str | Path
         return False
 
 
-def _publication_status(final: dict[str, Any], note_path: Path) -> tuple[bool, str | None]:
+def _publication_status(final: dict[str, Any], paths: WorkflowPaths) -> tuple[bool, str | None]:
     try:
-        markdown = _read_regular_bytes(note_path).decode("utf-8")
+        publication = _read_regular_json(paths.publication)
     except FileNotFoundError:
-        return False, None
+        try:
+            _read_regular_bytes(paths.note)
+        except FileNotFoundError:
+            return False, None
+        except (OSError, ValueError):
+            return False, "ocr_publication_invalid"
+        return False, "ocr_publication_invalid"
+    except (OSError, ValueError):
+        return False, "ocr_publication_invalid"
+    try:
+        markdown = _read_regular_bytes(paths.note).decode("utf-8")
+        current_final = _read_regular_json(paths.final)
     except (OSError, UnicodeError, ValueError):
         return False, "ocr_publication_invalid"
     input_fingerprint = final.get("input_fingerprint")
-    if not isinstance(input_fingerprint, str) or not _markdown_publication_is_valid(
-        final, markdown, input_fingerprint
+    if (
+        not isinstance(input_fingerprint, str)
+        or _json_fingerprint(current_final) != _json_fingerprint(final)
+        or not _markdown_publication_is_valid(
+            publication, markdown, input_fingerprint, final_snapshot=final
+        )
     ):
         return False, "ocr_publication_invalid"
     return True, None
@@ -271,26 +289,60 @@ def _read_regular_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _json_fingerprint(value: dict[str, Any]) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _markdown_publication_is_valid(
-    final: dict[str, Any], markdown: str, input_fingerprint: str
+    publication: dict[str, Any],
+    markdown: str,
+    input_fingerprint: str,
+    *,
+    final_snapshot: dict[str, Any],
 ) -> bool:
+    expected_fields = {
+        "schema_version",
+        "final_snapshot_sha256",
+        "markdown_sha256",
+        "model",
+        "ruleset",
+        "prompt_fingerprint",
+        "input_fingerprint",
+        "chapter_fingerprint",
+        "evidence_fingerprint",
+        "proposal_fingerprint",
+        "chapter_id",
+    }
+    if set(publication) != expected_fields or publication.get("schema_version") != 1:
+        return False
     if not markdown.endswith("\n") or "待由 DeepSeek" in markdown:
         return False
-    if final.get("markdown_sha256") != hashlib.sha256(markdown.encode("utf-8")).hexdigest():
+    if publication.get("final_snapshot_sha256") != _json_fingerprint(final_snapshot):
+        return False
+    if publication.get("markdown_sha256") != hashlib.sha256(markdown.encode("utf-8")).hexdigest():
         return False
     if (
-        final.get("model") != "deepseek-v4-pro"
-        or final.get("ruleset") != "mba-intensive-reading-v1"
+        publication.get("model") != "deepseek-v4-pro"
+        or publication.get("ruleset") != "mba-intensive-reading-v1"
     ):
         return False
-    if final.get("note_input_fingerprint") != input_fingerprint:
+    if publication.get("input_fingerprint") != input_fingerprint:
         return False
-    chapter_fingerprint = final.get("chapter_fingerprint")
-    evidence_fingerprint = final.get("note_evidence_fingerprint")
-    prompt_fingerprint = final.get("prompt_fingerprint")
+    chapter_fingerprint = publication.get("chapter_fingerprint")
+    evidence_fingerprint = publication.get("evidence_fingerprint")
+    prompt_fingerprint = publication.get("prompt_fingerprint")
+    proposal_fingerprint = publication.get("proposal_fingerprint")
+    chapter_id = publication.get("chapter_id")
     if not all(
         isinstance(value, str) and value
-        for value in (chapter_fingerprint, evidence_fingerprint, prompt_fingerprint)
+        for value in (
+            chapter_fingerprint,
+            evidence_fingerprint,
+            prompt_fingerprint,
+            proposal_fingerprint,
+            chapter_id,
+        )
     ):
         return False
     if f"> 章节指纹：`{chapter_fingerprint}`" not in markdown:
@@ -324,42 +376,85 @@ def bind_published_note(
     metadata: dict[str, Any],
     *,
     expected_final: dict[str, Any] | None = None,
+    expected_tree: dict[str, Any] | None = None,
+    confirmation: dict[str, Any] | None = None,
+    publication_path: str | Path | None = None,
 ) -> None:
-    """Bind the generated note artifact to the completed OCR evidence."""
-    final = _read_regular_json(Path(final_path))
-    if expected_final is not None and final != expected_final:
+    """Atomically bind a note to immutable OCR and chapter snapshots."""
+    final_target = Path(final_path)
+    note_target = Path(note_path)
+    publication_target = (
+        Path(publication_path)
+        if publication_path is not None
+        else final_target.with_name("note-publication.json")
+    )
+    if not isinstance(expected_final, dict):
+        raise ValueError("expected OCR final is required")
+    final = _read_regular_json(final_target)
+    if final != expected_final:
         raise ValueError("OCR final changed during note generation")
-    content = _read_regular_bytes(Path(note_path))
+
+    pages = _normalized_completed_pages(expected_final)
+    detected_tree = detect_chapter_tree(pages, input_fingerprint=_input_fingerprint(expected_final))
+    if expected_tree is None:
+        expected_tree = _read_regular_json(final_target.with_name("chapter-tree.json"))
+    if expected_tree != detected_tree:
+        raise ValueError("published chapter tree fingerprint is invalid")
+    if confirmation is None:
+        confirmation = load_chapter_confirmation(
+            final_target.with_name("chapter-confirmation.json")
+        )
+    validate_chapter_confirmation(confirmation, expected_tree)
+    if confirmation.get("action") != "confirm":
+        raise ValueError("published chapter confirmation is invalid")
+
     if not isinstance(metadata, dict) or metadata.get("model") != "deepseek-v4-pro":
         raise ValueError("published model is invalid")
     if metadata.get("prompt_rules_version") != "mba-intensive-reading-v1":
         raise ValueError("published ruleset is invalid")
-    if metadata.get("input_fingerprint") != final.get("input_fingerprint"):
+    if metadata.get("input_fingerprint") != expected_final.get("input_fingerprint"):
         raise ValueError("published input fingerprint is invalid")
-    final.update(
-        {
-            "markdown_sha256": hashlib.sha256(content).hexdigest(),
-            "model": metadata["model"],
-            "ruleset": metadata["prompt_rules_version"],
-            "prompt_fingerprint": metadata.get("prompt_fingerprint", ""),
-            "chapter_fingerprint": metadata.get("chapter_fingerprint", ""),
-            "note_input_fingerprint": metadata.get("input_fingerprint", ""),
-            "note_evidence_fingerprint": metadata.get("evidence_fingerprint", ""),
-        }
-    )
-    encoded = json.dumps(final, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    fd, temp_name = tempfile.mkstemp(prefix=".batch-final-note.", dir=Path(final_path).parent)
+    if metadata.get("chapter_fingerprint") != confirmation.get("chapter_fingerprint"):
+        raise ValueError("published chapter fingerprint is invalid")
+    if metadata.get("evidence_fingerprint") != expected_tree.get("evidence_fingerprint"):
+        raise ValueError("published evidence fingerprint is invalid")
+    if metadata.get("chapter_id") != confirmation.get("chapter_id"):
+        raise ValueError("published chapter id is invalid")
+    prompt_fingerprint = metadata.get("prompt_fingerprint")
+    if not isinstance(prompt_fingerprint, str) or not prompt_fingerprint:
+        raise ValueError("published prompt fingerprint is invalid")
+
+    content = _read_regular_bytes(note_target)
     try:
-        os.write(fd, encoded)
-        os.fsync(fd)
-        os.close(fd)
-        os.replace(temp_name, final_path)
-    finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        Path(temp_name).unlink(missing_ok=True)
+        markdown = content.decode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError("published markdown is invalid") from exc
+    publication = {
+        "schema_version": 1,
+        "final_snapshot_sha256": _json_fingerprint(expected_final),
+        "markdown_sha256": hashlib.sha256(content).hexdigest(),
+        "model": metadata["model"],
+        "ruleset": metadata["prompt_rules_version"],
+        "prompt_fingerprint": prompt_fingerprint,
+        "input_fingerprint": metadata["input_fingerprint"],
+        "chapter_fingerprint": metadata["chapter_fingerprint"],
+        "evidence_fingerprint": metadata["evidence_fingerprint"],
+        "proposal_fingerprint": expected_tree["proposal_fingerprint"],
+        "chapter_id": confirmation["chapter_id"],
+    }
+    if not _markdown_publication_is_valid(
+        publication,
+        markdown,
+        metadata["input_fingerprint"],
+        final_snapshot=expected_final,
+    ):
+        raise ValueError("published markdown is invalid")
+
+    _atomic_json(publication_target, publication)
+    if _read_regular_json(final_target) != expected_final:
+        raise ValueError("OCR final changed during note generation")
+    if _read_regular_json(publication_target) != publication:
+        raise ValueError("OCR publication changed during note generation")
 
 
 def build_confirmation(tree: dict[str, Any], chapter_id: str) -> dict[str, Any]:
@@ -418,7 +513,7 @@ class OcrWorkflow:
         self._thread: threading.Thread | None = None
         self._status = WorkflowStatus.IDLE
         self._error: str | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def start(self, *, dpi: int = 300, languages: tuple[str, ...] = ("zh-Hans", "en-US")) -> None:
         with self._lock:
@@ -436,14 +531,15 @@ class OcrWorkflow:
         self._cancel.set()
 
     def status(self) -> dict[str, Any]:
-        status, error, completed_final = self._effective_status()
-        return _status_payload_from_snapshot(
-            status=status,
-            source_path=self.source_path,
-            paths=self.paths,
-            error=error,
-            completed_final=completed_final,
-        )
+        with self._lock:
+            status, error, completed_final = self._effective_status()
+            return _status_payload_from_snapshot(
+                status=status,
+                source_path=self.source_path,
+                paths=self.paths,
+                error=error,
+                completed_final=completed_final,
+            )
 
     def _effective_status(
         self,
@@ -451,15 +547,15 @@ class OcrWorkflow:
         with self._lock:
             status = self._status
             error = self._error
-        if status is WorkflowStatus.IDLE:
-            return self._persisted_status()
-        if status is WorkflowStatus.COMPLETED:
-            try:
-                final = _read_completed_ocr_final(self.paths.final, self.source_path)
-            except (OSError, ValueError):
-                return WorkflowStatus.BLOCKED, "ocr_evidence_invalid", None
-            return WorkflowStatus.COMPLETED, None, final
-        return status, error, None
+            if status is WorkflowStatus.IDLE:
+                return self._persisted_status()
+            if status is WorkflowStatus.COMPLETED:
+                try:
+                    final = _read_completed_ocr_final(self.paths.final, self.source_path)
+                except (OSError, ValueError):
+                    return WorkflowStatus.BLOCKED, "ocr_evidence_invalid", None
+                return WorkflowStatus.COMPLETED, None, final
+            return status, error, None
 
     def _run(self, dpi: int, languages: tuple[str, ...]) -> None:
         try:
@@ -486,17 +582,57 @@ class OcrWorkflow:
                 self._error = _safe_error(exc)
 
     def detect_chapters(self) -> dict[str, Any]:
-        final, pages = self.completed_evidence()
-        fingerprint = _input_fingerprint(final)
-        tree = detect_chapter_tree(pages, input_fingerprint=fingerprint)
-        _atomic_json(self.paths.chapter_tree, tree)
-        return tree
+        with self._lock:
+            final, pages = self.completed_evidence()
+            fingerprint = _input_fingerprint(final)
+            tree = detect_chapter_tree(pages, input_fingerprint=fingerprint)
+            _atomic_json(self.paths.chapter_tree, tree)
+            return tree
 
     def completed_evidence(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        status, _error, final = self._effective_status()
-        if status is not WorkflowStatus.COMPLETED or final is None:
-            raise ValueError("OCR 尚未完成，不能读取证据")
-        return final, _normalized_completed_pages(final)
+        with self._lock:
+            status, _error, final = self._effective_status()
+            if status is not WorkflowStatus.COMPLETED or final is None:
+                raise ValueError("OCR 尚未完成，不能读取证据")
+            return final, _normalized_completed_pages(final)
+
+    def completed_chapter_context(
+        self,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+        with self._lock:
+            final, pages = self.completed_evidence()
+            tree = _read_regular_json(self.paths.chapter_tree)
+            expected = detect_chapter_tree(pages, input_fingerprint=_input_fingerprint(final))
+            if tree != expected:
+                raise ValueError("章节树与当前 OCR 证据不一致")
+            return final, pages, tree
+
+    def publish_note(
+        self,
+        metadata: dict[str, Any],
+        *,
+        expected_final: dict[str, Any],
+        expected_tree: dict[str, Any],
+        confirmation: dict[str, Any],
+    ) -> None:
+        with self._lock:
+            current_final, pages = self.completed_evidence()
+            if current_final != expected_final:
+                raise ValueError("OCR final changed during note generation")
+            detected_tree = detect_chapter_tree(
+                pages, input_fingerprint=_input_fingerprint(current_final)
+            )
+            if expected_tree != detected_tree:
+                raise ValueError("published chapter tree fingerprint is invalid")
+            bind_published_note(
+                self.paths.final,
+                self.paths.note,
+                metadata,
+                expected_final=expected_final,
+                expected_tree=expected_tree,
+                confirmation=confirmation,
+                publication_path=self.paths.publication,
+            )
 
     def _persisted_status(
         self,
@@ -524,10 +660,11 @@ class OcrWorkflow:
         return status, error, None
 
     def confirm_chapter(self, chapter_id: str) -> dict[str, Any]:
-        tree = _load_json(self.paths.chapter_tree)
-        confirmation = build_confirmation(tree, chapter_id)
-        persist_chapter_confirmation(self.paths.confirmation, confirmation)
-        return confirmation
+        with self._lock:
+            _final, _pages, tree = self.completed_chapter_context()
+            confirmation = build_confirmation(tree, chapter_id)
+            persist_chapter_confirmation(self.paths.confirmation, confirmation)
+            return confirmation
 
 
 def _workflow_status(status: BatchStatus) -> WorkflowStatus:
@@ -558,26 +695,28 @@ def _input_fingerprint(final: dict[str, Any]) -> str:
     return value
 
 
-def _load_json(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("OCR 证据文件无法读取") from exc
-    if not isinstance(value, dict):
-        raise ValueError("OCR 证据文件格式无效")
-    return value
-
-
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        temporary.write_text(
-            json.dumps(value, ensure_ascii=False, sort_keys=True), encoding="utf-8"
-        )
-        temporary.replace(path)
+        written = 0
+        while written < len(encoded):
+            written += os.write(fd, encoded[written:])
+        os.fsync(fd)
+        os.close(fd)
+        os.replace(temporary_name, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        Path(temporary_name).unlink(missing_ok=True)
 
 
 def _safe_error(exc: Exception) -> str:

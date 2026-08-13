@@ -1,4 +1,3 @@
-import hashlib
 import json
 from pathlib import Path
 
@@ -6,6 +5,7 @@ import pytest
 from test_ocr_orchestrator import FakeEngines, _orchestrator, _run
 
 from parsing_core.workbench.ocr import workflow as workflow_module
+from parsing_core.workbench.ocr.chapters import detect_chapter_tree
 from parsing_core.workbench.ocr.workflow import (
     OcrWorkflow,
     WorkflowStatus,
@@ -31,14 +31,20 @@ def _complete_workflow_fixture(tmp_path: Path, *, publish_note: bool = True):
     final = json.loads((state_root / "batch-final.json").read_text(encoding="utf-8"))
     if not publish_note:
         return engines, state_root, final
-    page = final["pages"]["1"]
+    pages = workflow_module._normalized_completed_pages(final)
+    tree = detect_chapter_tree(pages, input_fingerprint=final["input_fingerprint"])
+    confirmation = build_confirmation(tree, tree["chapters"][0]["id"])
+    (state_root / "chapter-tree.json").write_text(json.dumps(tree), encoding="utf-8")
+    (state_root / "chapter-confirmation.json").write_text(
+        json.dumps(confirmation), encoding="utf-8"
+    )
     markdown = (
         "\n".join(
             [
                 "# 1 战略管理",
                 f"> 输入指纹：`{final['input_fingerprint']}`",
-                "> 章节指纹：`chapter-fingerprint`",
-                f"> OCR 证据指纹：`{page['evidence_fingerprint']}`",
+                f"> 章节指纹：`{confirmation['chapter_fingerprint']}`",
+                f"> OCR 证据指纹：`{tree['evidence_fingerprint']}`",
                 "> 精读规则版本：`mba-intensive-reading-v1`",
                 "> 模型：`deepseek-v4-pro`",
                 "> Prompt 指纹：`prompt-fingerprint`",
@@ -70,19 +76,39 @@ def _complete_workflow_fixture(tmp_path: Path, *, publish_note: bool = True):
         + "\n"
     )
     (state_root / "intensive-reading.md").write_text(markdown, encoding="utf-8")
-    final.update(
+    bind_published_note(
+        state_root / "batch-final.json",
+        state_root / "intensive-reading.md",
         {
-            "markdown_sha256": hashlib.sha256(markdown.encode()).hexdigest(),
             "model": "deepseek-v4-pro",
-            "ruleset": "mba-intensive-reading-v1",
-            "chapter_fingerprint": "chapter-fingerprint",
+            "prompt_rules_version": "mba-intensive-reading-v1",
+            "chapter_id": confirmation["chapter_id"],
+            "chapter_fingerprint": confirmation["chapter_fingerprint"],
             "prompt_fingerprint": "prompt-fingerprint",
-            "note_input_fingerprint": final["input_fingerprint"],
-            "note_evidence_fingerprint": page["evidence_fingerprint"],
-        }
+            "input_fingerprint": final["input_fingerprint"],
+            "evidence_fingerprint": tree["evidence_fingerprint"],
+        },
+        expected_final=final,
+        expected_tree=tree,
+        confirmation=confirmation,
     )
-    (state_root / "batch-final.json").write_text(json.dumps(final), encoding="utf-8")
     return engines, state_root, final
+
+
+def _published_note_metadata(state_root: Path, final: dict[str, object]) -> dict[str, object]:
+    tree = json.loads((state_root / "chapter-tree.json").read_text(encoding="utf-8"))
+    confirmation = json.loads(
+        (state_root / "chapter-confirmation.json").read_text(encoding="utf-8")
+    )
+    return {
+        "model": "deepseek-v4-pro",
+        "prompt_rules_version": "mba-intensive-reading-v1",
+        "chapter_id": confirmation["chapter_id"],
+        "prompt_fingerprint": "prompt-fingerprint",
+        "input_fingerprint": final["input_fingerprint"],
+        "chapter_fingerprint": confirmation["chapter_fingerprint"],
+        "evidence_fingerprint": tree["evidence_fingerprint"],
+    }
 
 
 def test_status_payload_publishes_only_a_complete_validated_result(tmp_path: Path):
@@ -126,7 +152,9 @@ def test_status_payload_blocks_invalid_ocr_evidence(tmp_path: Path, mutation: st
 def test_status_payload_keeps_valid_ocr_completed_when_publication_is_invalid(
     tmp_path: Path, mutation: str
 ):
-    _engines, state_root, final = _complete_workflow_fixture(tmp_path)
+    _engines, state_root, _final = _complete_workflow_fixture(tmp_path)
+    publication_path = state_root / "note-publication.json"
+    publication = json.loads(publication_path.read_text(encoding="utf-8"))
     if mutation == "markdown":
         note = state_root / "intensive-reading.md"
         note.write_text(
@@ -134,12 +162,13 @@ def test_status_payload_keeps_valid_ocr_completed_when_publication_is_invalid(
             encoding="utf-8",
         )
     elif mutation == "chapter":
-        final["chapter_fingerprint"] = "foreign-chapter"
+        publication["chapter_fingerprint"] = "foreign-chapter"
     elif mutation == "model":
-        final["model"] = "other-model"
+        publication["model"] = "other-model"
     elif mutation == "ruleset":
-        final["ruleset"] = "other-ruleset"
-    (state_root / "batch-final.json").write_text(json.dumps(final), encoding="utf-8")
+        publication["ruleset"] = "other-ruleset"
+    if mutation != "markdown":
+        publication_path.write_text(json.dumps(publication), encoding="utf-8")
 
     payload = status_payload(
         status=WorkflowStatus.COMPLETED,
@@ -289,6 +318,40 @@ def test_detect_chapters_uses_the_same_validated_final_snapshot(
     assert final_reads == 1
 
 
+def test_status_does_not_publish_when_final_changes_during_publication_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path)
+    final_path = state_root / "batch-final.json"
+    note_path = state_root / "intensive-reading.md"
+    replacement = dict(final)
+    replacement["generation"] = 2
+    original_read = workflow_module._read_regular_bytes
+    replaced = False
+
+    def replace_final_while_reading_note(path: Path):
+        nonlocal replaced
+        content = original_read(path)
+        if path == note_path and not replaced:
+            final_path.write_text(json.dumps(replacement), encoding="utf-8")
+            replaced = True
+        return content
+
+    monkeypatch.setattr(workflow_module, "_read_regular_bytes", replace_final_while_reading_note)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+
+    payload = workflow.status()
+
+    assert replaced is True
+    assert payload["status"] == "completed"
+    assert payload["publishable"] is False
+    assert payload["error"] == "ocr_publication_invalid"
+
+
 def test_bind_published_note_rejects_a_replaced_final_snapshot(tmp_path: Path):
     _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
     note = state_root / "intensive-reading.md"
@@ -305,6 +368,75 @@ def test_bind_published_note_rejects_a_replaced_final_snapshot(tmp_path: Path):
                 "model": "deepseek-v4-pro",
                 "prompt_rules_version": "mba-intensive-reading-v1",
             },
+            expected_final=final,
+        )
+
+
+def test_bind_published_note_never_overwrites_a_final_replaced_after_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path)
+    final_path = state_root / "batch-final.json"
+    note_path = state_root / "intensive-reading.md"
+    replacement = dict(final)
+    replacement["generation"] = 2
+    metadata = _published_note_metadata(state_root, final)
+    original_read = workflow_module._read_regular_bytes
+    replaced = False
+
+    def replace_final_after_comparison(path: Path):
+        nonlocal replaced
+        content = original_read(path)
+        if path == note_path and not replaced:
+            final_path.write_text(json.dumps(replacement), encoding="utf-8")
+            replaced = True
+        return content
+
+    monkeypatch.setattr(workflow_module, "_read_regular_bytes", replace_final_after_comparison)
+
+    with pytest.raises(ValueError, match="changed during note generation"):
+        bind_published_note(
+            final_path,
+            note_path,
+            metadata,
+            expected_final=final,
+        )
+
+    assert replaced is True
+    assert json.loads(final_path.read_text(encoding="utf-8")) == replacement
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    payload = workflow.status()
+    assert payload["status"] == "completed"
+    assert payload["publishable"] is False
+    assert payload["error"] == "ocr_publication_invalid"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("input_fingerprint", ""),
+        ("chapter_fingerprint", ""),
+        ("chapter_fingerprint", "foreign-chapter"),
+        ("evidence_fingerprint", ""),
+        ("evidence_fingerprint", "foreign-evidence"),
+    ],
+)
+def test_bind_published_note_rejects_metadata_outside_verified_context(
+    tmp_path: Path, field: str, value: str
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path)
+    metadata = _published_note_metadata(state_root, final)
+    metadata[field] = value
+
+    with pytest.raises(ValueError, match="fingerprint is invalid"):
+        bind_published_note(
+            state_root / "batch-final.json",
+            state_root / "intensive-reading.md",
+            metadata,
             expected_final=final,
         )
 
