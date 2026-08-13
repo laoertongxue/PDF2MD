@@ -4,13 +4,19 @@ import json
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
-from test_ocr_workflow import _complete_workflow_fixture
+from test_ocr_workflow import (
+    _complete_workflow_fixture,
+    _note_metadata,
+    _prepare_chapter_context,
+    _valid_markdown,
+)
 
 from parsing_core.llm.stub_client import StubLLMClient
 from parsing_core.orchestrator import Orchestrator
@@ -155,6 +161,8 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
     confirmation = build_confirmation(tree, tree["chapters"][0]["id"])
     workflow.paths.confirmation.write_text(json.dumps(confirmation), encoding="utf-8")
     context_calls = 0
+    generated_paths = []
+    published_path = state_root / "intensive-reading.published.md"
 
     def completed_chapter_context():
         nonlocal context_calls
@@ -163,21 +171,26 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
 
     class FakeGenerator:
         def generate(self, base, *, output_path):
+            generated_paths.append(output_path)
             output_path.write_text("# generated\n", encoding="utf-8")
             return {
                 "markdown": "# generated\n",
                 "metadata": {"input_fingerprint": base["metadata"]["input_fingerprint"]},
             }
 
-    def publish_note(_metadata, *, expected_final, expected_tree, confirmation):
+    def generate_and_publish(callback, *, expected_final, expected_tree, confirmation):
         assert expected_final is final
         assert expected_tree is tree
         assert confirmation["chapter_id"] == tree["chapters"][0]["id"]
+        temporary_path = state_root / ".intensive-reading.route.tmp.md"
+        note = callback(temporary_path)
+        temporary_path.replace(published_path)
+        return note, published_path
 
     monkeypatch.setattr(
         workflow, "completed_chapter_context", completed_chapter_context, raising=False
     )
-    monkeypatch.setattr(workflow, "publish_note", publish_note, raising=False)
+    monkeypatch.setattr(workflow, "generate_and_publish", generate_and_publish, raising=False)
     monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
     monkeypatch.setattr(
         routes_workbench,
@@ -202,7 +215,122 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
 
     assert response.status_code == 200
     assert response.json()["input_fingerprint"] == final["input_fingerprint"]
+    assert response.json()["markdown_path"] == str(published_path)
     assert context_calls == 1
+    assert generated_paths == [state_root / ".intensive-reading.route.tmp.md"]
+    assert workflow.paths.note.exists() is False
+
+
+def test_concurrent_generate_routes_remain_publishable_across_workflow_instances(
+    tmp_path, monkeypatch
+):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    fixture_root = root / "ocr-fixture"
+    fixture_root.mkdir()
+    _engines, state_root, final = _complete_workflow_fixture(fixture_root, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    first_markdown = _valid_markdown(final, tree, confirmation, concept="路由第一版")
+    second_markdown = _valid_markdown(final, tree, confirmation, concept="路由第二版")
+    _course, source = _registered_pdf_source(c, root, fixture_root / "book.pdf")
+    workflows = [
+        OcrWorkflow(
+            source_path=fixture_root / "book.pdf",
+            state_root=state_root,
+            orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+        )
+        for _index in range(2)
+    ]
+    workflow_index = 0
+    generator_index = 0
+    selection_lock = threading.Lock()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_entered = threading.Event()
+    release_second = threading.Event()
+
+    def select_workflow(_source, _course):
+        nonlocal workflow_index
+        with selection_lock:
+            selected = workflows[workflow_index]
+            workflow_index += 1
+            return selected
+
+    class FakeGenerator:
+        def __init__(self, index):
+            self.index = index
+
+        def generate(self, _base, *, output_path):
+            if self.index == 0:
+                first_entered.set()
+                assert release_first.wait(5)
+                markdown = first_markdown
+            else:
+                second_entered.set()
+                assert release_second.wait(5)
+                markdown = second_markdown
+            output_path.write_text(markdown, encoding="utf-8")
+            return {"markdown": markdown, "metadata": metadata}
+
+    def generator_factory(_client):
+        nonlocal generator_index
+        with selection_lock:
+            generator = FakeGenerator(generator_index)
+            generator_index += 1
+            return generator
+
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", select_workflow)
+    monkeypatch.setattr(routes_workbench, "_read_configured_deepseek_key", lambda: "key")
+    monkeypatch.setattr(
+        routes_workbench,
+        "load_settings",
+        lambda _path: SimpleNamespace(deepseek_model="deepseek-v4-pro"),
+    )
+    monkeypatch.setattr(routes_workbench, "DeepSeekClient", lambda *_args: object())
+    monkeypatch.setattr(routes_workbench, "DeepSeekIntensiveReadingGenerator", generator_factory)
+
+    def post_generate():
+        return c.post(
+            f"/api/workbench/sources/{source['id']}/ocr/generate",
+            json={"chapter_id": confirmation["chapter_id"]},
+        )
+
+    def post_second():
+        second_started.set()
+        return post_generate()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(post_generate)
+        try:
+            assert first_entered.wait(2)
+            second_future = executor.submit(post_second)
+            assert second_started.wait(2)
+            assert second_entered.wait(0.2) is False
+            release_first.set()
+            assert second_entered.wait(2)
+            first_response = first_future.result(timeout=5)
+            first_status = workflows[0].status()
+            release_second.set()
+            second_response = second_future.result(timeout=5)
+        finally:
+            release_first.set()
+            release_second.set()
+
+    assert first_response.status_code == 200
+    assert first_status["publishable"] is True
+    assert first_status["markdown_path"] == first_response.json()["markdown_path"]
+    assert second_response.status_code == 200
+    final_status = workflows[1].status()
+    assert final_status["publishable"] is True
+    assert final_status["markdown_path"] == second_response.json()["markdown_path"]
+    assert (
+        Path(first_response.json()["markdown_path"]).read_text(encoding="utf-8") == first_markdown
+    )
+    assert (
+        Path(second_response.json()["markdown_path"]).read_text(encoding="utf-8") == second_markdown
+    )
 
 
 @pytest.mark.parametrize("tree_kind", ["symlink", "foreign-ocr"])

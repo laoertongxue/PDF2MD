@@ -532,12 +532,9 @@ async def generate_source_note(
         generator = DeepSeekIntensiveReadingGenerator(
             DeepSeekClient(api_key, settings.deepseek_model)
         )
-        note = await run_in_threadpool(
-            lambda: generator.generate(base, output_path=workflow.paths.note)
-        )
-        await run_in_threadpool(
-            lambda: workflow.publish_note(
-                note["metadata"],
+        note, markdown_path = await run_in_threadpool(
+            lambda: workflow.generate_and_publish(
+                lambda output_path: generator.generate(base, output_path=output_path),
                 expected_final=final,
                 expected_tree=tree,
                 confirmation=confirmation,
@@ -550,7 +547,7 @@ async def generate_source_note(
     return {
         "status": "completed",
         "publishable": True,
-        "markdown_path": str(workflow.paths.note),
+        "markdown_path": str(markdown_path),
         "markdown": note["markdown"],
         "input_fingerprint": final["input_fingerprint"],
     }
