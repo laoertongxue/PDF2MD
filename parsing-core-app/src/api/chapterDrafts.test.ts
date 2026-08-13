@@ -34,7 +34,7 @@ it("reads, replaces and confirms chapter drafts using the backend snapshot contr
   expect(fetchMock).toHaveBeenNthCalledWith(
     1,
     "http://127.0.0.1:8000/api/workbench/sources/s1/chapter-drafts",
-    undefined,
+    expect.objectContaining({ headers: expect.any(Headers) }),
   );
   expect(fetchMock).toHaveBeenNthCalledWith(
     2,
@@ -52,6 +52,11 @@ it("reads, replaces and confirms chapter drafts using the backend snapshot contr
     "http://127.0.0.1:8000/api/workbench/sources/s1/chapter-drafts/confirm",
     expect.objectContaining({ method: "POST", body: JSON.stringify({ expected_fingerprint: "fp-2" }) }),
   );
+  for (const [, init] of fetchMock.mock.calls) {
+    expect(new Headers((init as RequestInit).headers).get("X-PDF2MD-Session")).toBe(
+      "test-session-token-0123456789abcdef0123456789abcdef",
+    );
+  }
 });
 
 it("rejects malformed chapter boundaries from the service", async () => {

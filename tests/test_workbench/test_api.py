@@ -35,6 +35,9 @@ from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
 from parsing_core.workbench.source_import import CourseStorageError, TextbookImportBatch
 
+TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
+AUTH_HEADERS = {"Origin": "http://localhost:1420", "X-PDF2MD-Session": TEST_SESSION_TOKEN}
+
 
 def client(tmp_path, *, raise_server_exceptions=True):
     db_path = tmp_path / "serve.db"
@@ -50,7 +53,11 @@ def client(tmp_path, *, raise_server_exceptions=True):
             str(db_path),
         )
 
-    return TestClient(build_app(factory), raise_server_exceptions=raise_server_exceptions)
+    return TestClient(
+        build_app(factory, session_token=TEST_SESSION_TOKEN),
+        headers=AUTH_HEADERS,
+        raise_server_exceptions=raise_server_exceptions,
+    )
 
 
 def course_root(tmp_path):
@@ -892,7 +899,9 @@ async def test_import_copy_does_not_block_health_on_same_event_loop(tmp_path, mo
         paused_copy,
     )
     transport = ASGITransport(app=test_client.app)
-    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
         course = (
             await async_client.post(
                 "/api/workbench/courses",

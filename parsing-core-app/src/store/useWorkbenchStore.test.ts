@@ -187,7 +187,10 @@ describe("主题工作流 Store", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(null, { status: 204 }));
 
     await expect(actualApi.deleteTopic("topic-1")).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:8000/api/workbench/topics/topic-1", { method: "DELETE" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/workbench/topics/topic-1",
+      expect.objectContaining({ method: "DELETE", headers: expect.any(Headers) }),
+    );
   });
 
   it("Topic API 拒绝对象代替数组", async () => {

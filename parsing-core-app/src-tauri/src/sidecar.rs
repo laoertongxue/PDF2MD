@@ -1,5 +1,7 @@
-use crate::state::AppState;
+use crate::state::{generate_session_token, AppState};
+use serde::Deserialize;
 use std::fs::{create_dir_all, OpenOptions};
+use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
@@ -10,6 +12,26 @@ const HEALTH_INTERVAL_SECS: u64 = 3;
 const HEALTH_STARTUP_GRACE_SECS: u64 = 60;
 const MAX_HEALTH_FAILURES: u8 = 3;
 const TERMINATION_TIMEOUT_MS: u64 = 2_000;
+const SESSION_HEADER: &str = "X-PDF2MD-Session";
+const SESSION_ENV: &str = "PDF2MD_SESSION_TOKEN";
+const READY_SCHEMA: &str = "pdf2md.sidecar.ready.v1";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyPayload {
+    schema: String,
+    host: String,
+    pub port: u16,
+}
+
+pub fn parse_ready_line(line: &str, expected_port: u16) -> Result<ReadyPayload, String> {
+    let ready: ReadyPayload =
+        serde_json::from_str(line).map_err(|_| "invalid sidecar ready message".to_string())?;
+    if ready.schema != READY_SCHEMA || ready.host != "127.0.0.1" || ready.port != expected_port {
+        return Err("invalid sidecar ready message".into());
+    }
+    Ok(ready)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StopReason {
@@ -20,11 +42,21 @@ pub enum StopReason {
 
 pub fn record_failure(state: &Arc<Mutex<AppState>>, category: &str, message: String) {
     if let Ok(mut s) = state.lock() {
+        let message = if s.session_token.is_empty() {
+            message
+        } else {
+            message.replace(&s.session_token, "[REDACTED]")
+        };
         s.starting = false;
         s.running = false;
         s.service_state = "failed".into();
-        s.error = Some(crate::state::ServiceError { category: category.into(), message: message.clone() });
-        s.logs.push(format!("[sidecar] {category} failure: {message}"));
+        s.error = Some(crate::state::ServiceError {
+            category: category.into(),
+            message: message.clone(),
+        });
+        s.logs
+            .push(format!("[sidecar] {category} failure: {message}"));
+        s.session_token.clear();
     }
 }
 
@@ -46,6 +78,17 @@ pub fn reserve_loopback_port() -> std::io::Result<(TcpListener, u16)> {
     Ok((listener, port))
 }
 
+fn reserve_loopback_port_excluding(excluded_port: u16) -> std::io::Result<(TcpListener, u16)> {
+    let candidate = reserve_loopback_port()?;
+    if excluded_port == 0 || candidate.1 != excluded_port {
+        return Ok(candidate);
+    }
+
+    let replacement = reserve_loopback_port()?;
+    drop(candidate);
+    Ok(replacement)
+}
+
 pub fn make_socket_inheritable(listener: &TcpListener) -> std::io::Result<()> {
     let fd = listener.as_raw_fd();
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
@@ -58,16 +101,20 @@ pub fn make_socket_inheritable(listener: &TcpListener) -> std::io::Result<()> {
     Ok(())
 }
 
-fn sidecar_command(script: &Path, socket_fd: RawFd, parent_pid: u32, health_token: &str) -> Command {
+fn sidecar_command(
+    script: &Path,
+    socket_fd: RawFd,
+    parent_pid: u32,
+    session_token: &str,
+) -> Command {
     let mut command = Command::new("/bin/bash");
     command.arg(script).args([
         "--parent-pid",
         &parent_pid.to_string(),
         "--socket-fd",
         &socket_fd.to_string(),
-        "--health-token",
-        health_token,
     ]);
+    command.env(SESSION_ENV, session_token);
     command
 }
 
@@ -78,7 +125,10 @@ pub struct StartupGuard {
 
 impl StartupGuard {
     pub fn new(state: Arc<Mutex<AppState>>) -> Self {
-        Self { state, committed: false }
+        Self {
+            state,
+            committed: false,
+        }
     }
 
     fn commit(mut self) {
@@ -126,7 +176,8 @@ pub fn terminate_child(child: &mut std::process::Child) -> std::io::Result<()> {
         if unsafe { libc::kill(child.id() as i32, libc::SIGTERM) } == -1 {
             return Err(std::io::Error::last_os_error());
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(TERMINATION_TIMEOUT_MS);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(TERMINATION_TIMEOUT_MS);
         while std::time::Instant::now() < deadline {
             if child_exited(child)? {
                 return Ok(());
@@ -141,14 +192,20 @@ pub fn terminate_child(child: &mut std::process::Child) -> std::io::Result<()> {
 
 async fn instance_is_healthy(client: &reqwest::Client, port: u16, token: &str) -> bool {
     let url = format!("http://127.0.0.1:{}/health", port);
-    match client.get(url).header("X-PDF2MD-Health-Token", token).send().await {
-        Ok(response) if response.status().is_success() => response
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|body| body.get("instance").and_then(|value| value.as_str()).map(str::to_owned))
-            .as_deref()
-            == Some(token),
+    match client.get(url).header(SESSION_HEADER, token).send().await {
+        Ok(response) if response.status().is_success() => {
+            response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| {
+                    body.get("status")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("ok")
+        }
         _ => false,
     }
 }
@@ -158,7 +215,7 @@ async fn start_sidecar_with_intent(
     state: Arc<Mutex<AppState>>,
     restore_desired_running: bool,
 ) -> Result<(), String> {
-    let (listener, port, health_token) = {
+    let (listener, port, session_token) = {
         let mut s = state.lock().map_err(|e| e.to_string())?;
         if restore_desired_running {
             s.desired_running = true;
@@ -174,16 +231,18 @@ async fn start_sidecar_with_intent(
                 let port = listener.local_addr().map_err(|e| e.to_string())?.port();
                 (listener, port)
             }
-            None => reserve_loopback_port().map_err(|e| e.to_string())?,
+            None => reserve_loopback_port_excluding(s.port).map_err(|e| e.to_string())?,
         };
         s.starting = true;
         s.service_state = "starting".into();
         s.error = None;
         s.port = port;
-        (listener, port, s.health_token.clone())
+        s.session_token = generate_session_token();
+        (listener, port, s.session_token.clone())
     };
     let startup_guard = StartupGuard::new(state.clone());
-    make_socket_inheritable(&listener).map_err(|e| format!("failed to inherit sidecar socket: {e}"))?;
+    make_socket_inheritable(&listener)
+        .map_err(|e| format!("failed to inherit sidecar socket: {e}"))?;
 
     let parent_pid = std::process::id();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -195,22 +254,24 @@ async fn start_sidecar_with_intent(
         .ok_or_else(|| "missing application support directory".to_string())?
         .join("PDF2MD")
         .join("logs");
-    create_dir_all(&log_dir).map_err(|e| format!("failed to create log dir {}: {}", log_dir.display(), e))?;
+    create_dir_all(&log_dir)
+        .map_err(|e| format!("failed to create log dir {}: {}", log_dir.display(), e))?;
     let log_path = log_dir.join("sidecar.log");
     if let Ok(mut s) = state.lock() {
         s.log_path = Some(log_path.to_string_lossy().into_owned());
     }
-    let stdout = OpenOptions::new()
+    let log_file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
         .map_err(|e| format!("failed to open {}: {}", log_path.display(), e))?;
-    let stderr = stdout
+    let mut stdout_log = log_file
         .try_clone()
         .map_err(|e| format!("failed to clone {}: {}", log_path.display(), e))?;
-    let spawn_result = sidecar_command(&python, listener.as_raw_fd(), parent_pid, &health_token)
+    let stderr = log_file;
+    let spawn_result = sidecar_command(&python, listener.as_raw_fd(), parent_pid, &session_token)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
+        .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr))
         .spawn();
     let child = match spawn_result {
@@ -221,13 +282,44 @@ async fn start_sidecar_with_intent(
     };
     let mut child_guard = ChildGuard(Some(child));
 
+    let child_stdout = child_guard
+        .child_mut()
+        .stdout
+        .take()
+        .ok_or_else(|| "sidecar stdout unavailable".to_string())?;
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("sidecar-stdout".into())
+        .spawn(move || {
+            let mut reader = BufReader::new(child_stdout);
+            let mut line = String::new();
+            let ready = match reader.read_line(&mut line) {
+                Ok(0) => Err("sidecar exited before ready".to_string()),
+                Ok(_) => Ok(line),
+                Err(_) => Err("failed to read sidecar ready message".to_string()),
+            };
+            let _ = ready_tx.send(ready);
+            let _ = std::io::copy(&mut reader, &mut stdout_log);
+        })
+        .map_err(|_| "failed to start sidecar output reader".to_string())?;
+
+    let ready_line = tokio::time::timeout(
+        std::time::Duration::from_secs(HEALTH_STARTUP_GRACE_SECS),
+        ready_rx,
+    )
+    .await
+    .map_err(|_| "sidecar did not emit ready message before timeout".to_string())?
+    .map_err(|_| "sidecar ready channel closed".to_string())??;
+    let ready = parse_ready_line(&ready_line, port)?;
+
     let client = reqwest::Client::new();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(HEALTH_STARTUP_GRACE_SECS);
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(HEALTH_STARTUP_GRACE_SECS);
     loop {
         if child_exited(child_guard.child_mut()).map_err(|e| e.to_string())? {
             return Err("sidecar exited before becoming healthy".into());
         }
-        if instance_is_healthy(&client, port, &health_token).await {
+        if instance_is_healthy(&client, ready.port, &session_token).await {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -240,18 +332,32 @@ async fn start_sidecar_with_intent(
     {
         let mut s = state.lock().map_err(|e| e.to_string())?;
         s.sidecar_child = Some(child_guard.take());
+        s.port = ready.port;
         s.starting = false;
         s.running = true;
         s.service_state = "running".into();
-        s.logs.push(format!("[sidecar] started on port {}, log {}", port, log_path.display()));
+        s.logs.push(format!(
+            "[sidecar] started on port {}, log {}",
+            ready.port,
+            log_path.display()
+        ));
     }
     startup_guard.commit();
 
     Ok(())
 }
 
-pub async fn start_sidecar(app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) -> Result<(), String> {
-    start_sidecar_with_intent(app, state, true).await
+pub async fn start_sidecar(
+    app: &tauri::AppHandle,
+    state: Arc<Mutex<AppState>>,
+) -> Result<(), String> {
+    match start_sidecar_with_intent(app, state.clone(), true).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            record_failure(&state, classify_startup_error(&error), error.clone());
+            Err(error)
+        }
+    }
 }
 
 pub fn prepare_retry(state: &mut AppState) {
@@ -272,16 +378,106 @@ pub fn health_failure_requires_restart(state: &mut AppState) -> bool {
         return false;
     }
     state.service_state = "restarting".into();
-    state.logs.push("[health] 3 failures, restarting sidecar...".into());
+    state
+        .logs
+        .push("[health] 3 failures, restarting sidecar...".into());
     true
+}
+
+pub fn stop_sidecar(state: Arc<Mutex<AppState>>, reason: StopReason) -> Result<(), String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    if let Some(mut child) = s.sidecar_child.take() {
+        terminate_child(&mut child).map_err(|e| e.to_string())?;
+        s.logs.push("[sidecar] stopped".into());
+    }
+    s.running = false;
+    s.starting = false;
+    s.health_failures = 0;
+    s.session_token.clear();
+    match reason {
+        StopReason::Manual => {
+            s.desired_running = false;
+            s.manual_stopped = true;
+            s.service_state = "failed".into();
+            s.error = Some(crate::state::ServiceError {
+                category: "manual_stop".into(),
+                message: "service stopped by user".into(),
+            });
+        }
+        StopReason::Exit => {
+            s.desired_running = false;
+            s.manual_stopped = false;
+            s.logs.push("[sidecar] application exit".into());
+        }
+        StopReason::Restart => {
+            s.service_state = "restarting".into();
+        }
+    }
+    Ok(())
+}
+
+pub async fn restart_sidecar(
+    app: &tauri::AppHandle,
+    state: Arc<Mutex<AppState>>,
+) -> Result<(), String> {
+    stop_sidecar(state.clone(), StopReason::Restart)?;
+    if let Err(error) = start_sidecar_with_intent(app, state.clone(), false).await {
+        record_failure(&state, classify_startup_error(&error), error.clone());
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub async fn retry_sidecar(
+    app: &tauri::AppHandle,
+    state: Arc<Mutex<AppState>>,
+) -> Result<(), String> {
+    {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        prepare_retry(&mut s);
+    }
+    restart_sidecar(app, state).await
+}
+
+pub async fn health_loop(app: tauri::AppHandle, state: Arc<Mutex<AppState>>) {
+    tokio::time::sleep(std::time::Duration::from_secs(HEALTH_STARTUP_GRACE_SECS)).await;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(HEALTH_INTERVAL_SECS)).await;
+        let (port, token) = {
+            let s = state.lock().unwrap();
+            if !s.desired_running || s.manual_stopped {
+                continue;
+            }
+            (s.port, s.session_token.clone())
+        };
+        match instance_is_healthy(&reqwest::Client::new(), port, &token).await {
+            true => {
+                state.lock().unwrap().health_failures = 0;
+            }
+            false => {
+                let should_restart = {
+                    let mut s = state.lock().unwrap();
+                    health_failure_requires_restart(&mut s)
+                };
+                if should_restart {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if let Err(error) = restart_sidecar(&app, state.clone()).await {
+                        record_failure(&state, "health", error);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(HEALTH_STARTUP_GRACE_SECS))
+                        .await;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        child_exited, health_failure_requires_restart, make_socket_inheritable,
-        prepare_retry, reserve_loopback_port, sidecar_command, stop_sidecar, terminate_child,
-        StartupGuard, StopReason,
+        child_exited, health_failure_requires_restart, make_socket_inheritable, parse_ready_line,
+        prepare_retry, reserve_loopback_port, reserve_loopback_port_excluding, sidecar_command,
+        stop_sidecar, terminate_child, StartupGuard, StopReason,
     };
     use crate::state::AppState;
     use std::ffi::OsStr;
@@ -291,22 +487,47 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn sidecar_uses_fixed_shell_and_loopback_host() {
-        let command = sidecar_command(Path::new("/bundle/python3"), 9, 42, "instance-token");
+    fn sidecar_uses_fixed_shell_and_passes_secret_only_in_environment() {
+        let command = sidecar_command(Path::new("/bundle/python3"), 9, 42, "session-token");
         assert_eq!(command.get_program(), OsStr::new("/bin/bash"));
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(
             args,
-            [
-                "/bundle/python3",
-                "--parent-pid",
-                "42",
-                "--socket-fd",
-                "9",
-                "--health-token",
-                "instance-token",
-            ]
+            ["/bundle/python3", "--parent-pid", "42", "--socket-fd", "9"]
         );
+        assert!(args
+            .iter()
+            .all(|value| *value != OsStr::new("session-token")));
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == OsStr::new("PDF2MD_SESSION_TOKEN")
+                && value == Some(OsStr::new("session-token"))));
+    }
+
+    #[test]
+    fn ready_message_has_a_strict_loopback_schema() {
+        let ready = parse_ready_line(
+            r#"{"schema":"pdf2md.sidecar.ready.v1","host":"127.0.0.1","port":43127}"#,
+            43127,
+        )
+        .unwrap();
+
+        assert_eq!(ready.port, 43127);
+        assert!(parse_ready_line(
+            r#"{"schema":"pdf2md.sidecar.ready.v1","host":"0.0.0.0","port":43127}"#,
+            43127,
+        )
+        .is_err());
+        assert!(parse_ready_line(
+            r#"{"schema":"pdf2md.sidecar.ready.v1","host":"127.0.0.1","port":43127,"token":"leak"}"#,
+            43127,
+        )
+        .is_err());
+        assert!(parse_ready_line(
+            r#"{"schema":"pdf2md.sidecar.ready.v1","host":"127.0.0.1","port":43128}"#,
+            43127,
+        )
+        .is_err());
     }
 
     #[test]
@@ -319,13 +540,33 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_startup_material_rotates_port_and_session() {
+        let (first_listener, first_port) = reserve_loopback_port().expect("reserve first port");
+        let first_session = crate::state::generate_session_token();
+        drop(first_listener);
+        let (second_listener, second_port) =
+            reserve_loopback_port_excluding(first_port).expect("reserve a different second port");
+        let second_session = crate::state::generate_session_token();
+
+        assert_eq!(
+            second_listener.local_addr().unwrap().ip().to_string(),
+            "127.0.0.1"
+        );
+        assert_ne!(first_port, second_port);
+        assert_ne!(first_session, second_session);
+    }
+
+    #[test]
     fn reserved_socket_cannot_be_stolen_before_sidecar_inherits_it() {
         let (listener, port) = reserve_loopback_port().expect("reserve port");
         make_socket_inheritable(&listener).expect("make socket inheritable");
 
         let competitor = TcpListener::bind(("127.0.0.1", port));
 
-        assert_eq!(competitor.unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
+        assert_eq!(
+            competitor.unwrap_err().kind(),
+            std::io::ErrorKind::AddrInUse
+        );
         let flags = unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_GETFD) };
         assert_eq!(flags & libc::FD_CLOEXEC, 0);
     }
@@ -347,20 +588,29 @@ mod tests {
 
     #[test]
     fn records_a_structured_failure_for_status_consumers() {
-        let state = Arc::new(Mutex::new(AppState::default()));
+        let secret = "session-token-that-must-never-appear-in-logs";
+        let state = Arc::new(Mutex::new(AppState {
+            session_token: secret.into(),
+            ..Default::default()
+        }));
 
-        super::record_failure(&state, "startup", "runtime missing".into());
+        super::record_failure(&state, "startup", format!("runtime missing {secret}"));
 
         let state = state.lock().unwrap();
         assert_eq!(state.service_state, "failed");
         let error = state.error.as_ref().expect("structured error");
         assert_eq!(error.category, "startup");
-        assert_eq!(error.message, "runtime missing");
+        assert_eq!(error.message, "runtime missing [REDACTED]");
+        assert!(!state.logs.join("\n").contains(secret));
+        assert!(state.session_token.is_empty());
     }
 
     #[test]
     fn classifies_actionable_startup_failures() {
-        assert_eq!(super::classify_startup_error("failed to start python3"), "spawn");
+        assert_eq!(
+            super::classify_startup_error("failed to start python3"),
+            "spawn"
+        );
         assert_eq!(
             super::classify_startup_error("sidecar exited before becoming healthy"),
             "early_exit"
@@ -373,26 +623,40 @@ mod tests {
 
     #[test]
     fn detects_and_reaps_an_early_child_exit() {
-        let mut child = std::process::Command::new("/usr/bin/false").spawn().unwrap();
+        let mut child = std::process::Command::new("/usr/bin/false")
+            .spawn()
+            .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
             if child_exited(&mut child).unwrap() {
+                child.wait().unwrap();
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        let _ = child.kill();
+        let _ = child.wait();
         panic!("child did not exit");
     }
 
     #[test]
     fn terminates_and_reaps_a_running_child() {
         let marker = std::env::temp_dir().join(format!("pdf2md-term-{}", std::process::id()));
-        let script = format!("trap 'touch {} ; exit 0' TERM; while :; do sleep 1; done", marker.display());
-        let mut child = std::process::Command::new("/bin/sh").args(["-c", &script]).spawn().unwrap();
+        let script = format!(
+            "trap 'touch {} ; exit 0' TERM; while :; do sleep 1; done",
+            marker.display()
+        );
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .spawn()
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         terminate_child(&mut child).expect("terminate child");
         assert!(child.try_wait().unwrap().is_some());
-        assert!(marker.exists(), "child must receive SIGTERM before any SIGKILL fallback");
+        assert!(
+            marker.exists(),
+            "child must receive SIGTERM before any SIGKILL fallback"
+        );
         let _ = std::fs::remove_file(marker);
     }
 
@@ -460,88 +724,5 @@ mod tests {
         }
         assert!(health_failure_requires_restart(&mut state));
         assert_eq!(state.service_state, "restarting");
-    }
-}
-
-pub fn stop_sidecar(state: Arc<Mutex<AppState>>, reason: StopReason) -> Result<(), String> {
-    let mut s = state.lock().map_err(|e| e.to_string())?;
-    if let Some(mut child) = s.sidecar_child.take() {
-        terminate_child(&mut child).map_err(|e| e.to_string())?;
-        s.logs.push("[sidecar] stopped".into());
-    }
-    s.running = false;
-    s.starting = false;
-    s.health_failures = 0;
-    match reason {
-        StopReason::Manual => {
-            s.desired_running = false;
-            s.manual_stopped = true;
-            s.service_state = "failed".into();
-            s.error = Some(crate::state::ServiceError {
-                category: "manual_stop".into(),
-                message: "service stopped by user".into(),
-            });
-        }
-        StopReason::Exit => {
-            s.desired_running = false;
-            s.manual_stopped = false;
-            s.logs.push("[sidecar] application exit".into());
-        }
-        StopReason::Restart => {
-            s.service_state = "restarting".into();
-        }
-    }
-    Ok(())
-}
-
-pub async fn restart_sidecar(app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) -> Result<(), String> {
-    stop_sidecar(state.clone(), StopReason::Restart)?;
-    if let Err(error) = start_sidecar_with_intent(app, state.clone(), false).await {
-        record_failure(&state, classify_startup_error(&error), error.clone());
-        return Err(error);
-    }
-    Ok(())
-}
-
-pub async fn retry_sidecar(app: &tauri::AppHandle, state: Arc<Mutex<AppState>>) -> Result<(), String> {
-    {
-        let mut s = state.lock().map_err(|e| e.to_string())?;
-        prepare_retry(&mut s);
-    }
-    restart_sidecar(app, state).await
-}
-
-pub async fn health_loop(app: tauri::AppHandle, state: Arc<Mutex<AppState>>) {
-    tokio::time::sleep(std::time::Duration::from_secs(HEALTH_STARTUP_GRACE_SECS)).await;
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(HEALTH_INTERVAL_SECS)).await;
-        let (port, token) = {
-            let s = state.lock().unwrap();
-            if !s.desired_running || s.manual_stopped {
-                continue;
-            }
-            (s.port, s.health_token.clone())
-        };
-        match instance_is_healthy(&reqwest::Client::new(), port, &token).await {
-            true => {
-                state.lock().unwrap().health_failures = 0;
-            }
-            false => {
-                let should_restart = {
-                    let mut s = state.lock().unwrap();
-                    health_failure_requires_restart(&mut s)
-                };
-                if should_restart {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    if let Err(error) = restart_sidecar(&app, state.clone()).await {
-                        record_failure(&state, "health", error);
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(
-                        HEALTH_STARTUP_GRACE_SECS,
-                    ))
-                    .await;
-                }
-            }
-        }
     }
 }

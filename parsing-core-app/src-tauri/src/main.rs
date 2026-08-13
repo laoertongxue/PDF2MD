@@ -3,14 +3,14 @@
 mod sidecar;
 mod state;
 
-use state::{ApiConfig, AppState, StatusPayload};
+use state::{ready_api_config, ApiConfig, AppState, StatusPayload};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 type SharedState = Arc<Mutex<AppState>>;
 const TEXTBOOK_EXTENSIONS: &[&str] = &[
-    "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "png", "jpg", "jpeg", "gif",
-    "bmp", "tif", "tiff", "webp",
+    "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "png", "jpg", "jpeg", "gif", "bmp", "tif",
+    "tiff", "webp",
 ];
 
 #[tauri::command]
@@ -28,9 +28,9 @@ fn get_status(state: tauri::State<SharedState>) -> StatusPayload {
 }
 
 #[tauri::command]
-fn get_api_config(state: tauri::State<SharedState>) -> ApiConfig {
+fn get_api_config(state: tauri::State<SharedState>) -> Result<ApiConfig, String> {
     let s = state.lock().unwrap();
-    ApiConfig { api_base: format!("http://127.0.0.1:{}", s.port), port: s.port }
+    ready_api_config(&s)
 }
 
 #[tauri::command]
@@ -49,7 +49,10 @@ async fn stop_service(state: tauri::State<'_, SharedState>) -> Result<String, St
 }
 
 #[tauri::command]
-async fn retry_service(app: tauri::AppHandle, state: tauri::State<'_, SharedState>) -> Result<String, String> {
+async fn retry_service(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SharedState>,
+) -> Result<String, String> {
     sidecar::retry_sidecar(&app, state.inner().clone()).await?;
     Ok("restarting".into())
 }
@@ -59,7 +62,10 @@ async fn pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let files = app.dialog().file().blocking_pick_files();
     match files {
-        Some(paths) => Ok(paths.iter().map(|p| p.as_path().unwrap().to_string_lossy().to_string()).collect()),
+        Some(paths) => Ok(paths
+            .iter()
+            .map(|p| p.as_path().unwrap().to_string_lossy().to_string())
+            .collect()),
         None => Ok(vec![]),
     }
 }
@@ -92,8 +98,8 @@ mod textbook_picker_tests {
     #[test]
     fn picker_matches_the_supported_textbook_contract() {
         for extension in [
-            "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "png", "jpg", "jpeg",
-            "webp", "tiff", "bmp",
+            "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "png", "jpg", "jpeg", "webp",
+            "tiff", "bmp",
         ] {
             assert!(TEXTBOOK_EXTENSIONS.contains(&extension));
         }
@@ -119,7 +125,7 @@ fn main() {
                 .map_err(|error| format!("failed to reserve sidecar port: {error}"))?;
             let s = SharedState::new(Mutex::new(AppState {
                 port,
-                health_token: uuid::Uuid::new_v4().to_string(),
+                session_token: String::new(),
                 starting: false,
                 running: false,
                 desired_running: true,
@@ -136,10 +142,7 @@ fn main() {
             let app_handle = app.handle().clone();
             let state = s.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(err) = sidecar::start_sidecar(&app_handle, state.clone()).await {
-                    let category = sidecar::classify_startup_error(&err);
-                    sidecar::record_failure(&state, category, err);
-                }
+                let _ = sidecar::start_sidecar(&app_handle, state).await;
             });
             tauri::async_runtime::spawn(sidecar::health_loop(app.handle().clone(), s));
             Ok(())
@@ -158,7 +161,10 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+            if matches!(
+                event,
+                tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
+            ) {
                 let state = app.state::<SharedState>().inner().clone();
                 let _ = sidecar::stop_sidecar(state, sidecar::StopReason::Exit);
             }

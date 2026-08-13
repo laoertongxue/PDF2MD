@@ -6,5 +6,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
+    env: {
+      VITE_PDF2MD_SESSION_TOKEN: "test-session-token-0123456789abcdef0123456789abcdef",
+    },
   },
 });

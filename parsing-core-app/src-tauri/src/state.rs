@@ -7,10 +7,10 @@ pub struct ServiceError {
     pub message: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct AppState {
     pub port: u16,
-    pub health_token: String,
+    pub session_token: String,
     pub starting: bool,
     pub running: bool,
     pub desired_running: bool,
@@ -40,5 +40,68 @@ pub struct StatusPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ApiConfig {
     pub api_base: String,
-    pub port: u16,
+    pub session_token: String,
+}
+
+pub fn generate_session_token() -> String {
+    [
+        uuid::Uuid::new_v4().simple().to_string(),
+        uuid::Uuid::new_v4().simple().to_string(),
+        uuid::Uuid::new_v4().simple().to_string(),
+    ]
+    .concat()
+}
+
+pub fn ready_api_config(state: &AppState) -> Result<ApiConfig, String> {
+    if !state.running || state.port == 0 || state.session_token.len() < 32 {
+        return Err("service not ready".into());
+    }
+    Ok(ApiConfig {
+        api_base: format!("http://127.0.0.1:{}", state.port),
+        session_token: state.session_token.clone(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{generate_session_token, ready_api_config, AppState};
+
+    #[test]
+    fn session_tokens_are_strong_and_unique() {
+        let first = generate_session_token();
+        let second = generate_session_token();
+
+        assert!(first.len() >= 64);
+        assert!(second.len() >= 64);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn api_config_is_unavailable_until_ready() {
+        let state = AppState {
+            port: 43127,
+            session_token: "session-token-0123456789abcdef0123456789abcdef".into(),
+            running: false,
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            ready_api_config(&state),
+            Err(error) if error == "service not ready"
+        ));
+    }
+
+    #[test]
+    fn ready_api_config_includes_the_in_memory_session() {
+        let state = AppState {
+            port: 43127,
+            session_token: "session-token-0123456789abcdef0123456789abcdef".into(),
+            running: true,
+            ..Default::default()
+        };
+
+        let config = ready_api_config(&state).unwrap();
+        assert_eq!(config.api_base, "http://127.0.0.1:43127");
+        assert_eq!(config.session_token, state.session_token);
+    }
 }

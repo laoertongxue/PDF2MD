@@ -30,7 +30,14 @@ describe("chapter workbench API contract", () => {
     );
     const api = await import("./workbench");
     await expect(api.listChapterRuns("ch1")).resolves.toHaveLength(1);
-    expect(fetch).toHaveBeenCalledWith("http://127.0.0.1:8000/api/workbench/chapters/ch1/runs", undefined);
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/workbench/chapters/ch1/runs",
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    );
+    const init = vi.mocked(fetch).mock.calls[0]![1] as RequestInit;
+    expect(new Headers(init.headers).get("X-PDF2MD-Session")).toBe(
+      "test-session-token-0123456789abcdef0123456789abcdef",
+    );
   });
 
   it("patches a Mermaid block with optimistic concurrency", async () => {

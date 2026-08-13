@@ -1,5 +1,5 @@
 import type { WsEvent } from "./types";
-import { getWsBase } from "./runtime";
+import { getWsConfig, WS_SESSION_PROTOCOL, WS_SESSION_TOKEN_PREFIX } from "./runtime";
 
 export function connectBatchWs(
   batchId: string,
@@ -9,20 +9,25 @@ export function connectBatchWs(
 ): () => void {
   let ws: WebSocket | undefined;
   let canceled = false;
-  void getWsBase().then((base) => {
-    if (canceled) return;
-    ws = new WebSocket(`${base}/ws/batch/${batchId}?since=${since}`);
-    ws.onmessage = (msg) => {
-      try {
-        onEvent(JSON.parse(msg.data));
-      } catch {
-        /* ignore */
-      }
-    };
-    ws.onclose = () => {
-      onClose?.();
-    };
-  });
+  void getWsConfig()
+    .then(({ wsBase, sessionToken }) => {
+      if (canceled) return;
+      ws = new WebSocket(`${wsBase}/ws/batch/${encodeURIComponent(batchId)}?since=${since}`, [
+        WS_SESSION_PROTOCOL,
+        `${WS_SESSION_TOKEN_PREFIX}${sessionToken}`,
+      ]);
+      ws.onmessage = (msg) => {
+        try {
+          onEvent(JSON.parse(msg.data));
+        } catch {
+          /* ignore */
+        }
+      };
+      ws.onclose = () => {
+        onClose?.();
+      };
+    })
+    .catch(() => onClose?.());
   return () => {
     canceled = true;
     ws?.close();

@@ -12,6 +12,9 @@ from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
 
+TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
+AUTH_HEADERS = {"Origin": "http://localhost:1420", "X-PDF2MD-Session": TEST_SESSION_TOKEN}
+
 
 def make_app(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
@@ -26,7 +29,11 @@ def make_app(tmp_path, monkeypatch):
         repo = Repository(conn)
         return Orchestrator(repo=repo, fs=fs, llm=StubLLMClient(), db_path=str(db_path))
 
-    return build_app(orch_factory=orch_factory, max_global_concurrency=4)
+    return build_app(
+        orch_factory=orch_factory,
+        max_global_concurrency=4,
+        session_token=TEST_SESSION_TOKEN,
+    )
 
 
 @pytest.mark.asyncio
@@ -34,7 +41,9 @@ async def test_e2e_batch_submit_and_complete(tmp_path, monkeypatch):
     app = make_app(tmp_path, monkeypatch)
     sample = str(Path("tests/fixtures/sample.md").resolve())
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as cli:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as cli:
         r = await cli.post("/api/batches", json={"files": [sample] * 3, "concurrency": 3})
         assert r.status_code == 200
         batch_id = r.json()["batch_id"]
@@ -54,7 +63,9 @@ async def test_e2e_merged_download(tmp_path, monkeypatch):
     app = make_app(tmp_path, monkeypatch)
     sample = str(Path("tests/fixtures/sample.md").resolve())
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as cli:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as cli:
         r = await cli.get("/health")
         assert r.json() == {"status": "ok"}
 

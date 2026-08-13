@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,11 @@ KEYCHAIN_SERVICE = "pdf2md.deepseek"
 KEYCHAIN_ACCOUNT = "api-key"
 _OCR_WORKFLOWS: dict[str, OcrWorkflow] = {}
 _OCR_WORKFLOWS_LOCK = threading.Lock()
+_UNSAFE_MARKDOWN_RE = re.compile(
+    r"(?ims)<\s*/?\s*(?:script|iframe|object|embed|svg|math)\b|"
+    r"(?:\]\(\s*|^\s*\[[^\]\r\n]+\]\s*:\s*|(?:href|src)\s*=\s*['\"]?\s*|<\s*)"
+    r"(?:javascript|vbscript|data)\s*:|\bon\w+\s*="
+)
 
 
 class TopicBlockPatchRequest(BaseModel):
@@ -105,6 +111,11 @@ class ChapterBlockPatchRequest(BaseModel):
 
 def _repo(sch: SchedulerDep) -> WorkbenchRepository:
     return WorkbenchRepository(sch._query_orch.repo.conn)
+
+
+def _require_safe_markdown(value: str) -> None:
+    if _UNSAFE_MARKDOWN_RE.search(value):
+        raise HTTPException(422, {"code": "unsafe_markdown"})
 
 
 def _settings_path(sch: SchedulerDep) -> Path:
@@ -935,7 +946,9 @@ async def patch_topic_note_block(
         try:
             validate_mermaid_subset(req.content)
         except ValueError as exc:
-            raise HTTPException(422, "invalid Mermaid source") from exc
+            raise HTTPException(422, {"code": "invalid_mermaid"}) from exc
+    else:
+        _require_safe_markdown(req.content)
     repo = _repo(sch)
     try:
         block = repo.prepare_topic_note_block_update(
@@ -969,7 +982,9 @@ async def patch_chapter_note_block(
         try:
             validate_mermaid_subset(req.body)
         except ValueError as exc:
-            raise HTTPException(422, "invalid Mermaid source") from exc
+            raise HTTPException(422, {"code": "invalid_mermaid"}) from exc
+    else:
+        _require_safe_markdown(req.body)
     repo = _repo(sch)
     try:
         block = repo.patch_chapter_note_block(chapter_id, kind, req.body, req.expected_body)

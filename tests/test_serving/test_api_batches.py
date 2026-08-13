@@ -11,6 +11,9 @@ from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
 
+TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
+AUTH_HEADERS = {"Origin": "http://localhost:1420", "X-PDF2MD-Session": TEST_SESSION_TOKEN}
+
 
 def make_test_app(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
@@ -27,7 +30,14 @@ def make_test_app(tmp_path, monkeypatch):
         repo = Repository(conn)
         return Orchestrator(repo=repo, fs=fs, llm=StubLLMClient(), db_path=str(db_path))
 
-    return TestClient(build_app(orch_factory=orch_factory, max_global_concurrency=4))
+    return TestClient(
+        build_app(
+            orch_factory=orch_factory,
+            max_global_concurrency=4,
+            session_token=TEST_SESSION_TOKEN,
+        ),
+        headers=AUTH_HEADERS,
+    )
 
 
 def test_create_batch(tmp_path, monkeypatch):

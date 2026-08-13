@@ -27,6 +27,9 @@ from parsing_core.workbench.topic_markdown_sync import (
     sync_topic_map_markdown,
 )
 
+TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
+AUTH_HEADERS = {"Origin": "http://localhost:1420", "X-PDF2MD-Session": TEST_SESSION_TOKEN}
+
 
 def client(tmp_path):
     db_path = tmp_path / "serve.db"
@@ -39,7 +42,10 @@ def client(tmp_path):
             Repository(conn), FsLayout(base_dir=str(tmp_path / "fs")), StubLLMClient(), str(db_path)
         )
 
-    return TestClient(build_app(factory))
+    return TestClient(
+        build_app(factory, session_token=TEST_SESSION_TOKEN),
+        headers=AUTH_HEADERS,
+    )
 
 
 def setup_course(client, tmp_path):
@@ -641,7 +647,9 @@ async def test_topic_request_waiting_for_repo_lock_does_not_block_health(tmp_pat
     timeout_release.start()
 
     transport = ASGITransport(app=test_client.app)
-    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
         started_at = time.monotonic()
         topic_request = asyncio.create_task(
             async_client.get(f"/api/workbench/courses/{course['id']}/topics")

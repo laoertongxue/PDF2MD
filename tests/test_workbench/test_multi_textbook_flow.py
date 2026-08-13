@@ -13,6 +13,9 @@ from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
 from parsing_core.workbench.schema import apply_workbench_schema
 
+TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
+AUTH_HEADERS = {"Origin": "http://localhost:1420", "X-PDF2MD-Session": TEST_SESSION_TOKEN}
+
 
 def _app_factory(db_path: Path, fs_root: Path):
     def factory():
@@ -26,7 +29,7 @@ def _app_factory(db_path: Path, fs_root: Path):
             str(db_path),
         )
 
-    return build_app(factory)
+    return build_app(factory, session_token=TEST_SESSION_TOKEN)
 
 
 def _expect_ok(response):
@@ -95,7 +98,7 @@ def test_multi_textbook_topic_fusion_survives_restart_and_stales_shared_topics(t
     original_digests = {path: _file_digest(path) for path in textbook_paths}
 
     app = _app_factory(db_path, fs_root)
-    with TestClient(app) as client:
+    with TestClient(app, headers=AUTH_HEADERS) as client:
         course = _expect_ok(
             client.post(
                 "/api/workbench/courses",
@@ -193,7 +196,7 @@ def test_multi_textbook_topic_fusion_survives_restart_and_stales_shared_topics(t
             )
             assert result["status"] == "COMPLETED"
 
-    with TestClient(_app_factory(db_path, fs_root)) as restarted:
+    with TestClient(_app_factory(db_path, fs_root), headers=AUTH_HEADERS) as restarted:
         topics = _expect_ok(restarted.get(f"/api/workbench/courses/{course['id']}/topics"))
         assert len(topics) == 2
         assert [set(topic["chapter_ids"]) for topic in topics] == [

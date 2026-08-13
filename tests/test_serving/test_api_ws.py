@@ -2,7 +2,9 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from parsing_core.llm.stub_client import StubLLMClient
 from parsing_core.orchestrator import Orchestrator
@@ -11,6 +13,11 @@ from parsing_core.storage.fs_layout import FsLayout
 from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
+
+TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
+ALLOWED_ORIGIN = "http://localhost:1420"
+AUTH_HEADERS = {"Origin": ALLOWED_ORIGIN, "X-PDF2MD-Session": TEST_SESSION_TOKEN}
+WS_PROTOCOLS = ["pdf2md-session-v1", f"pdf2md-session-token.{TEST_SESSION_TOKEN}"]
 
 
 def make_test_app(tmp_path, monkeypatch):
@@ -28,15 +35,24 @@ def make_test_app(tmp_path, monkeypatch):
         repo = Repository(conn)
         return Orchestrator(repo=repo, fs=fs, llm=StubLLMClient(), db_path=str(db_path))
 
-    return TestClient(build_app(orch_factory=orch_factory, max_global_concurrency=4))
+    return TestClient(
+        build_app(
+            orch_factory=orch_factory,
+            max_global_concurrency=4,
+            session_token=TEST_SESSION_TOKEN,
+        )
+    )
 
 
 def test_ws_receives_event(tmp_path, monkeypatch):
     client = make_test_app(tmp_path, monkeypatch)
     sample = str(Path("tests/fixtures/sample.md").resolve())
-    r = client.post("/api/batches", json={"files": [sample]})
+    r = client.post("/api/batches", json={"files": [sample]}, headers=AUTH_HEADERS)
     batch_id = r.json()["batch_id"]
-    with client.websocket_connect(f"/ws/batch/{batch_id}") as ws:
+    with client.websocket_connect(
+        f"/ws/batch/{batch_id}", headers={"Origin": ALLOWED_ORIGIN}, subprotocols=WS_PROTOCOLS
+    ) as ws:
+        assert ws.accepted_subprotocol == "pdf2md-session-v1"
         msg = json.loads(ws.receive_text())
         assert msg["batch_id"] == batch_id
 
@@ -44,9 +60,11 @@ def test_ws_receives_event(tmp_path, monkeypatch):
 def test_ws_receives_batch_done(tmp_path, monkeypatch):
     client = make_test_app(tmp_path, monkeypatch)
     sample = str(Path("tests/fixtures/sample.md").resolve())
-    r = client.post("/api/batches", json={"files": [sample]})
+    r = client.post("/api/batches", json={"files": [sample]}, headers=AUTH_HEADERS)
     batch_id = r.json()["batch_id"]
-    with client.websocket_connect(f"/ws/batch/{batch_id}") as ws:
+    with client.websocket_connect(
+        f"/ws/batch/{batch_id}", headers={"Origin": ALLOWED_ORIGIN}, subprotocols=WS_PROTOCOLS
+    ) as ws:
         events = []
         for _ in range(30):
             try:
@@ -64,10 +82,14 @@ def test_ws_receives_batch_done(tmp_path, monkeypatch):
 def test_ws_since_replays_filtered(tmp_path, monkeypatch):
     client = make_test_app(tmp_path, monkeypatch)
     sample = str(Path("tests/fixtures/sample.md").resolve())
-    r = client.post("/api/batches", json={"files": [sample]})
+    r = client.post("/api/batches", json={"files": [sample]}, headers=AUTH_HEADERS)
     batch_id = r.json()["batch_id"]
     time.sleep(2)
-    with client.websocket_connect(f"/ws/batch/{batch_id}?since=0") as ws:
+    with client.websocket_connect(
+        f"/ws/batch/{batch_id}?since=0",
+        headers={"Origin": ALLOWED_ORIGIN},
+        subprotocols=WS_PROTOCOLS,
+    ) as ws:
         events = []
         for _ in range(30):
             try:
@@ -84,9 +106,49 @@ def test_ws_since_replays_filtered(tmp_path, monkeypatch):
 def test_ws_nonexistent_batch_closes(tmp_path, monkeypatch):
     client = make_test_app(tmp_path, monkeypatch)
     try:
-        with client.websocket_connect("/ws/batch/nonexistent") as ws:
+        with client.websocket_connect(
+            "/ws/batch/nonexistent", headers={"Origin": ALLOWED_ORIGIN}, subprotocols=WS_PROTOCOLS
+        ) as ws:
             ws.receive_text()
         raise AssertionError("should have raised")
     except Exception:
         # 410 close or starlette Disconnect
         pass
+
+
+def test_ws_missing_session_closes_before_accept(tmp_path, monkeypatch):
+    client = make_test_app(tmp_path, monkeypatch)
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/ws/batch/any", headers={"Origin": ALLOWED_ORIGIN}):
+            pass
+
+    assert exc_info.value.code == 4401
+
+
+def test_ws_wrong_session_closes_before_accept(tmp_path, monkeypatch):
+    client = make_test_app(tmp_path, monkeypatch)
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            "/ws/batch/any",
+            headers={"Origin": ALLOWED_ORIGIN},
+            subprotocols=["pdf2md-session-v1", "pdf2md-session-token.wrong"],
+        ):
+            pass
+
+    assert exc_info.value.code == 4401
+
+
+def test_ws_wrong_origin_closes_before_accept(tmp_path, monkeypatch):
+    client = make_test_app(tmp_path, monkeypatch)
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            "/ws/batch/any",
+            headers={"Origin": "https://attacker.example"},
+            subprotocols=WS_PROTOCOLS,
+        ):
+            pass
+
+    assert exc_info.value.code == 4403

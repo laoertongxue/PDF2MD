@@ -15,6 +15,8 @@ from parsing_core.storage.schema import init_db
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
 
+TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
+
 
 def test_shutdown_marks_running_tasks_recoverable_and_cleans_temp_dir(tmp_path):
     db_path = tmp_path / "serve.db"
@@ -57,6 +59,7 @@ async def test_shutdown_hook_composes_with_existing_lifespan():
 
     app = build_app(
         orch_factory=lambda: object(),
+        session_token=TEST_SESSION_TOKEN,
         lifespan=existing_lifespan,
         shutdown_hook=lambda: events.append("shutdown-hook"),
     )
@@ -99,6 +102,7 @@ def test_production_server_starts_and_runs_shutdown_hook_on_sigterm(tmp_path):
         port = reserved.getsockname()[1]
     env = os.environ.copy()
     env["XDG_DATA_HOME"] = str(tmp_path)
+    env["PDF2MD_SESSION_TOKEN"] = TEST_SESSION_TOKEN
     process = subprocess.Popen(
         [sys.executable, "-m", "parsing_core.serving.serve", "--port", str(port)],
         env=env,
@@ -113,8 +117,11 @@ def test_production_server_starts_and_runs_shutdown_hook_on_sigterm(tmp_path):
             if process.poll() is not None:
                 pytest.fail(f"server exited during startup:\n{process.stdout.read()}")
             try:
-                health_url = f"http://127.0.0.1:{port}/health"
-                with urllib.request.urlopen(health_url, timeout=0.2) as response:
+                health_request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/health",
+                    headers={"X-PDF2MD-Session": TEST_SESSION_TOKEN},
+                )
+                with urllib.request.urlopen(health_request, timeout=0.2) as response:
                     assert response.status == 200
                     break
             except OSError:

@@ -8,6 +8,9 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import httpx
 
+TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
+AUTH_HEADERS = {"Origin": "http://localhost:1420", "X-PDF2MD-Session": TEST_SESSION_TOKEN}
+
 
 def _unused_loopback_port() -> int:
     with socket.socket() as sock:
@@ -19,6 +22,7 @@ def _start_server(data_root: Path) -> tuple[subprocess.Popen[str], httpx.Client]
     port = _unused_loopback_port()
     env = os.environ.copy()
     env["XDG_DATA_HOME"] = str(data_root)
+    env["PDF2MD_SESSION_TOKEN"] = TEST_SESSION_TOKEN
     process = subprocess.Popen(
         [
             sys.executable,
@@ -34,7 +38,7 @@ def _start_server(data_root: Path) -> tuple[subprocess.Popen[str], httpx.Client]
         stderr=subprocess.PIPE,
         text=True,
     )
-    client = httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=20)
+    client = httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=20, headers=AUTH_HEADERS)
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         if process.poll() is not None:

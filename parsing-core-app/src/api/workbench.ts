@@ -26,7 +26,7 @@ import type {
   OcrChapterTree,
   OcrNoteResult,
 } from "./workbenchTypes";
-import { getApiBase } from "./runtime";
+import { apiFetch } from "./client";
 
 export type SafeApiErrorCategory =
   | "invalid_request"
@@ -309,7 +309,7 @@ async function request<T>(
   statusCategories: Partial<Record<number, SafeApiErrorCategory>> = {},
 ): Promise<T> {
   try {
-    const res = await fetch(`${await getApiBase()}${path}`, init);
+    const res = await apiFetch(path, init);
     if (!res.ok) {
       const categories: Record<number, SafeApiErrorCategory> = {
         400: "invalid_request",

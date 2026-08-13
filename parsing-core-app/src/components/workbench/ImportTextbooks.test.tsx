@@ -99,12 +99,15 @@ describe("ImportTextbooks", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       "http://127.0.0.1:8000/api/workbench/courses/course-1/sources/import",
-      {
+      expect.objectContaining({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: expect.any(Headers),
         body: JSON.stringify({ paths: ["/books/战略管理.pdf"], titles: ["战略管理（第 5 版）"] }),
-      },
+      }),
     );
+    const headers = new Headers((fetchMock.mock.calls[0]![1] as RequestInit).headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("X-PDF2MD-Session")).toBe("test-session-token-0123456789abcdef0123456789abcdef");
     await expect(workbenchApi.importSources("course-1", ["/books/bad.pdf"])).rejects.toThrow(
       "服务返回数据格式异常，请稍后重试",
     );
