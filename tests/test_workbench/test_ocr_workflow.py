@@ -9,12 +9,13 @@ from parsing_core.workbench.ocr import workflow as workflow_module
 from parsing_core.workbench.ocr.workflow import (
     OcrWorkflow,
     WorkflowStatus,
+    bind_published_note,
     build_confirmation,
     status_payload,
 )
 
 
-def _complete_workflow_fixture(tmp_path: Path):
+def _complete_workflow_fixture(tmp_path: Path, *, publish_note: bool = True):
     engines = FakeEngines()
     adjudicate = engines.codex.adjudicate_page
 
@@ -28,6 +29,8 @@ def _complete_workflow_fixture(tmp_path: Path):
     assert _run(orchestrator, engines).status.value == "completed"
     state_root = tmp_path / "ocr-state"
     final = json.loads((state_root / "batch-final.json").read_text(encoding="utf-8"))
+    if not publish_note:
+        return engines, state_root, final
     page = final["pages"]["1"]
     markdown = (
         "\n".join(
@@ -96,24 +99,41 @@ def test_status_payload_publishes_only_a_complete_validated_result(tmp_path: Pat
     assert payload["markdown_path"] is not None
 
 
-@pytest.mark.parametrize(
-    "mutation", ["batch", "page", "markdown", "fingerprint", "chapter", "model", "ruleset"]
-)
-def test_status_payload_blocks_incomplete_or_tampered_publication(tmp_path: Path, mutation: str):
+@pytest.mark.parametrize("mutation", ["batch", "page", "fingerprint"])
+def test_status_payload_blocks_invalid_ocr_evidence(tmp_path: Path, mutation: str):
     _engines, state_root, final = _complete_workflow_fixture(tmp_path)
     if mutation == "batch":
         final["status"] = "running"
     elif mutation == "page":
         del final["pages"]["1"]["decision"]
-    elif mutation == "markdown":
+    elif mutation == "fingerprint":
+        final["input_fingerprint"] = "foreign-input"
+    (state_root / "batch-final.json").write_text(json.dumps(final), encoding="utf-8")
+
+    payload = status_payload(
+        status=WorkflowStatus.COMPLETED,
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["publishable"] is False
+    assert payload["markdown_path"] is None
+    assert payload["error"] == "ocr_evidence_invalid"
+
+
+@pytest.mark.parametrize("mutation", ["markdown", "chapter", "model", "ruleset"])
+def test_status_payload_keeps_valid_ocr_completed_when_publication_is_invalid(
+    tmp_path: Path, mutation: str
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path)
+    if mutation == "markdown":
         note = state_root / "intensive-reading.md"
         note.write_text(
             note.read_text(encoding="utf-8").replace("概念内容", "被篡改内容"),
             encoding="utf-8",
         )
-    elif mutation == "fingerprint":
-        final["input_fingerprint"] = "foreign-input"
-    if mutation == "chapter":
+    elif mutation == "chapter":
         final["chapter_fingerprint"] = "foreign-chapter"
     elif mutation == "model":
         final["model"] = "other-model"
@@ -127,9 +147,10 @@ def test_status_payload_blocks_incomplete_or_tampered_publication(tmp_path: Path
         state_root=state_root,
     )
 
-    assert payload["status"] == "blocked"
+    assert payload["status"] == "completed"
     assert payload["publishable"] is False
     assert payload["markdown_path"] is None
+    assert payload["error"] == "ocr_publication_invalid"
 
 
 def test_status_payload_does_not_report_unpublished_result_as_completed(tmp_path: Path):
@@ -144,14 +165,28 @@ def test_status_payload_does_not_report_unpublished_result_as_completed(tmp_path
     assert payload["markdown_path"] is None
 
 
-def test_cold_start_does_not_publish_completed_batch_without_note(tmp_path: Path):
+def test_completed_ocr_without_note_is_not_yet_publishable(tmp_path: Path):
+    _engines, state_root, _final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+
+    payload = workflow.status()
+
+    assert payload["status"] == "completed"
+    assert payload["publishable"] is False
+    assert payload["markdown_path"] is None
+    assert payload["error"] is None
+
+
+def test_invalid_completed_final_is_blocked(tmp_path: Path):
     state_root = tmp_path / "state"
     state_root.mkdir()
     (state_root / "batch-final.json").write_text(
-        '{"status":"completed","input_fingerprint":"input-1","pages":{}}',
-        encoding="utf-8",
+        '{"status":"completed","input_fingerprint":"input-1","pages":{}}', encoding="utf-8"
     )
-
     workflow = OcrWorkflow(
         source_path=tmp_path / "book.pdf",
         state_root=state_root,
@@ -163,10 +198,11 @@ def test_cold_start_does_not_publish_completed_batch_without_note(tmp_path: Path
     assert payload["status"] == "blocked"
     assert payload["publishable"] is False
     assert payload["markdown_path"] is None
+    assert payload["error"] == "ocr_evidence_invalid"
 
 
 def test_completed_workflow_remains_completed_after_process_restart(tmp_path: Path):
-    _engines, state_root, _final = _complete_workflow_fixture(tmp_path)
+    _engines, state_root, _final = _complete_workflow_fixture(tmp_path, publish_note=False)
     (state_root / "batch-state.json").write_text('{"status":"running"}', encoding="utf-8")
     workflow = OcrWorkflow(
         source_path=tmp_path / "book.pdf",
@@ -174,11 +210,33 @@ def test_completed_workflow_remains_completed_after_process_restart(tmp_path: Pa
         orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
     )
 
-    assert workflow.status()["status"] == "completed"
+    payload = workflow.status()
+
+    assert payload["status"] == "completed"
+    assert payload["publishable"] is False
+    assert payload["error"] is None
     assert workflow.detect_chapters()["chapters"]
 
 
 def test_invalid_completed_final_cannot_detect_chapters(tmp_path: Path):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    del final["pages"]["1"]["decision"]
+    (state_root / "batch-final.json").write_text(json.dumps(final), encoding="utf-8")
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("invalid work must not rerun"),
+    )
+
+    payload = workflow.status()
+
+    assert payload["status"] == "blocked"
+    assert payload["error"] == "ocr_evidence_invalid"
+    with pytest.raises(ValueError, match="OCR 尚未完成"):
+        workflow.detect_chapters()
+
+
+def test_invalid_publication_does_not_block_chapter_detection(tmp_path: Path):
     _engines, state_root, _final = _complete_workflow_fixture(tmp_path)
     note = state_root / "intensive-reading.md"
     note.write_text(
@@ -188,12 +246,67 @@ def test_invalid_completed_final_cannot_detect_chapters(tmp_path: Path):
     workflow = OcrWorkflow(
         source_path=tmp_path / "book.pdf",
         state_root=state_root,
-        orchestrator_factory=lambda _cancel: pytest.fail("invalid work must not rerun"),
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
     )
 
-    assert workflow.status()["status"] == "blocked"
-    with pytest.raises(ValueError, match="OCR 尚未完成"):
-        workflow.detect_chapters()
+    payload = workflow.status()
+
+    assert payload["status"] == "completed"
+    assert payload["publishable"] is False
+    assert payload["error"] == "ocr_publication_invalid"
+    assert workflow.detect_chapters()["chapters"]
+
+
+def test_detect_chapters_uses_the_same_validated_final_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, _final = _complete_workflow_fixture(tmp_path)
+    final_path = state_root / "batch-final.json"
+    original_read = workflow_module._read_regular_json
+    final_reads = 0
+
+    def replace_final_after_read(path: Path):
+        nonlocal final_reads
+        value = original_read(path)
+        if path == final_path:
+            final_reads += 1
+            final_path.write_text(
+                '{"status":"completed","input_fingerprint":"unverified","pages":{}}',
+                encoding="utf-8",
+            )
+        return value
+
+    monkeypatch.setattr(workflow_module, "_read_regular_json", replace_final_after_read)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+
+    tree = workflow.detect_chapters()
+
+    assert tree["chapters"]
+    assert final_reads == 1
+
+
+def test_bind_published_note_rejects_a_replaced_final_snapshot(tmp_path: Path):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    note = state_root / "intensive-reading.md"
+    note.write_text("# generated\n", encoding="utf-8")
+    replaced = dict(final)
+    replaced["concurrent_update"] = True
+    (state_root / "batch-final.json").write_text(json.dumps(replaced), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="changed during note generation"):
+        bind_published_note(
+            state_root / "batch-final.json",
+            note,
+            {
+                "model": "deepseek-v4-pro",
+                "prompt_rules_version": "mba-intensive-reading-v1",
+            },
+            expected_final=final,
+        )
 
 
 @pytest.mark.parametrize("persisted", [{}, {"status": "future-status"}])
@@ -242,6 +355,42 @@ def test_corrupted_final_is_stably_blocked_before_state_fallback(tmp_path: Path)
         source_path=tmp_path / "book.pdf",
         state_root=state_root,
         orchestrator_factory=lambda _cancel: pytest.fail("corrupt work must not rerun"),
+    )
+
+    payload = workflow.status()
+
+    assert payload["status"] == "blocked"
+    assert payload["error"] == "ocr_evidence_invalid"
+
+
+def test_symlinked_final_is_rejected_as_invalid_ocr_evidence(tmp_path: Path):
+    _engines, state_root, _final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    final_path = state_root / "batch-final.json"
+    backing = state_root / "untrusted-final.json"
+    final_path.replace(backing)
+    final_path.symlink_to(backing)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("untrusted work must not rerun"),
+    )
+
+    payload = workflow.status()
+
+    assert payload["status"] == "blocked"
+    assert payload["error"] == "ocr_evidence_invalid"
+
+
+def test_symlinked_state_is_rejected_as_invalid_persisted_state(tmp_path: Path):
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    backing = state_root / "untrusted-state.json"
+    backing.write_text('{"status":"failed","error":"unsafe"}', encoding="utf-8")
+    (state_root / "batch-state.json").symlink_to(backing)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("untrusted work must not rerun"),
     )
 
     payload = workflow.status()

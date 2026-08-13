@@ -5,10 +5,12 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+from test_ocr_workflow import _complete_workflow_fixture
 
 from parsing_core.llm.stub_client import StubLLMClient
 from parsing_core.orchestrator import Orchestrator
@@ -21,6 +23,8 @@ from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
 from parsing_core.workbench import pipeline as workbench_pipeline
 from parsing_core.workbench.keychain import KeychainError
+from parsing_core.workbench.ocr.chapters import detect_chapter_tree
+from parsing_core.workbench.ocr.workflow import OcrWorkflow, build_confirmation
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
 from parsing_core.workbench.source_import import CourseStorageError, TextbookImportBatch
@@ -64,6 +68,138 @@ def confirmed_chapter(client, root):
     confirm_res = client.post(f"/api/workbench/chapters/{chapter['id']}/confirm")
     assert confirm_res.status_code == 200
     return course, source, chapter
+
+
+def _registered_pdf_source(c: TestClient, root: Path, pdf_path: Path):
+    course = c.post(
+        "/api/workbench/courses",
+        json={"title": "战略管理", "description": "", "root_dir": str(root)},
+    ).json()
+    source = c.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"kind": "main", "file_path": str(pdf_path), "title": "战略教材"},
+    ).json()
+    return course, source
+
+
+def _normalized_ocr_pages(final: dict) -> list[dict]:
+    fingerprint = final["input_fingerprint"]
+    pages = []
+    for key in sorted(final["pages"], key=int):
+        record = dict(final["pages"][key])
+        record["page"] = int(key)
+        record["page_input_fingerprint"] = fingerprint
+        pages.append(record)
+    return pages
+
+
+def test_ocr_chapter_route_uses_workflow_validated_snapshot(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    fixture_root = root / "ocr-fixture"
+    fixture_root.mkdir()
+    _engines, state_root, _final = _complete_workflow_fixture(fixture_root, publish_note=False)
+    _course, source = _registered_pdf_source(c, root, fixture_root / "book.pdf")
+    workflow = OcrWorkflow(
+        source_path=fixture_root / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench,
+        "_ocr_final_pages",
+        lambda _root: pytest.fail("route must not read OCR final independently"),
+        raising=False,
+    )
+
+    response = c.post(f"/api/workbench/sources/{source['id']}/ocr/chapters")
+
+    assert response.status_code == 200
+    assert response.json()["chapters"]
+
+
+def test_ocr_chapter_route_returns_conflict_without_completed_evidence(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf_path = root / "book.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\nno evidence\n")
+    _course, source = _registered_pdf_source(c, root, pdf_path)
+    workflow = OcrWorkflow(
+        source_path=pdf_path,
+        state_root=root / ".pdf2md" / "empty-ocr",
+        orchestrator_factory=lambda _cancel: pytest.fail("missing work must not run"),
+    )
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+
+    response = c.post(f"/api/workbench/sources/{source['id']}/ocr/chapters")
+
+    assert response.status_code == 409
+
+
+def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    fixture_root = root / "ocr-fixture"
+    fixture_root.mkdir()
+    _engines, state_root, final = _complete_workflow_fixture(fixture_root, publish_note=False)
+    _course, source = _registered_pdf_source(c, root, fixture_root / "book.pdf")
+    workflow = OcrWorkflow(
+        source_path=fixture_root / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    pages = _normalized_ocr_pages(final)
+    tree = detect_chapter_tree(pages, input_fingerprint=final["input_fingerprint"])
+    workflow.paths.chapter_tree.write_text(json.dumps(tree), encoding="utf-8")
+    confirmation = build_confirmation(tree, tree["chapters"][0]["id"])
+    workflow.paths.confirmation.write_text(json.dumps(confirmation), encoding="utf-8")
+    evidence_calls = 0
+
+    def completed_evidence():
+        nonlocal evidence_calls
+        evidence_calls += 1
+        return final, pages
+
+    class FakeGenerator:
+        def generate(self, base, *, output_path):
+            output_path.write_text("# generated\n", encoding="utf-8")
+            return {
+                "markdown": "# generated\n",
+                "metadata": {"input_fingerprint": base["metadata"]["input_fingerprint"]},
+            }
+
+    def bind_note(_final_path, _note_path, _metadata, *, expected_final):
+        assert expected_final is final
+
+    monkeypatch.setattr(workflow, "completed_evidence", completed_evidence, raising=False)
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench,
+        "_ocr_final_pages",
+        lambda _root: pytest.fail("route must not read OCR final independently"),
+        raising=False,
+    )
+    monkeypatch.setattr(routes_workbench, "_read_configured_deepseek_key", lambda: "key")
+    monkeypatch.setattr(
+        routes_workbench,
+        "load_settings",
+        lambda _path: SimpleNamespace(deepseek_model="deepseek-v4-pro"),
+    )
+    monkeypatch.setattr(routes_workbench, "DeepSeekClient", lambda *_args: object())
+    monkeypatch.setattr(
+        routes_workbench, "DeepSeekIntensiveReadingGenerator", lambda _client: FakeGenerator()
+    )
+    monkeypatch.setattr(routes_workbench, "bind_published_note", bind_note)
+
+    response = c.post(
+        f"/api/workbench/sources/{source['id']}/ocr/generate",
+        json={"chapter_id": confirmation["chapter_id"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["input_fingerprint"] == final["input_fingerprint"]
+    assert evidence_calls == 1
 
 
 def test_create_course_and_list(tmp_path):

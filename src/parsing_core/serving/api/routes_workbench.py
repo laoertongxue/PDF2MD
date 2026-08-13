@@ -2,7 +2,6 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
@@ -265,29 +264,6 @@ def _ocr_workflow(source, course) -> OcrWorkflow:
         return _OCR_WORKFLOWS.setdefault(source.id, workflow)
 
 
-def _ocr_final_pages(state_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    final_path = state_root / "batch-final.json"
-    try:
-        final = json.loads(final_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise HTTPException(409, "OCR 尚未发布完整证据") from exc
-    if not isinstance(final, dict) or final.get("status") != "completed":
-        raise HTTPException(409, "OCR 尚未发布完整证据")
-    fingerprint = final.get("input_fingerprint")
-    pages = final.get("pages")
-    if not isinstance(fingerprint, str) or not isinstance(pages, dict):
-        raise HTTPException(409, "OCR 证据指纹无效")
-    normalized = []
-    for key in sorted(pages, key=int):
-        record = pages[key]
-        if not isinstance(record, dict) or record.get("status") != "completed":
-            raise HTTPException(409, "OCR 页证据不完整")
-        normalized_record = dict(record)
-        normalized_record["page_input_fingerprint"] = fingerprint
-        normalized.append(normalized_record)
-    return final, normalized
-
-
 class OcrChapterConfirmationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     chapter_id: str = Field(min_length=1, max_length=128)
@@ -503,13 +479,10 @@ async def recognize_source_chapters(source_id: str, sch: SchedulerDep):
     if course is None:
         raise HTTPException(404, "course not found")
     workflow = _ocr_workflow(source, course)
-    _final, pages = _ocr_final_pages(workflow.paths.root)
     try:
-        tree = await run_in_threadpool(lambda: workflow.detect_chapters() if pages else None)
+        tree = await run_in_threadpool(workflow.detect_chapters)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    if tree is None:
-        raise HTTPException(409, "OCR 证据为空")
     return tree
 
 
@@ -542,8 +515,8 @@ async def generate_source_note(
     if course is None:
         raise HTTPException(404, "course not found")
     workflow = _ocr_workflow(source, course)
-    final, pages = _ocr_final_pages(workflow.paths.root)
     try:
+        final, pages = await run_in_threadpool(workflow.completed_evidence)
         tree = json.loads(workflow.paths.chapter_tree.read_text(encoding="utf-8"))
         confirmation = load_chapter_confirmation(workflow.paths.confirmation)
         validate_chapter_confirmation(confirmation, tree)
@@ -563,7 +536,12 @@ async def generate_source_note(
         note = await run_in_threadpool(
             lambda: generator.generate(base, output_path=workflow.paths.note)
         )
-        bind_published_note(workflow.paths.final, workflow.paths.note, note["metadata"])
+        bind_published_note(
+            workflow.paths.final,
+            workflow.paths.note,
+            note["metadata"],
+            expected_final=final,
+        )
     except HTTPException:
         raise
     except Exception as exc:
