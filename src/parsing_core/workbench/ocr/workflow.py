@@ -228,31 +228,38 @@ def _completed_ocr_final_is_valid(final: dict[str, Any], source_path: str | Path
 def _publication_status(
     final: dict[str, Any], paths: WorkflowPaths
 ) -> tuple[bool, str | None, Path | None]:
+    expected_final_fingerprint = _json_fingerprint(final)
     for _attempt in range(_PUBLICATION_STATUS_RETRIES):
         try:
-            publication = _read_regular_json(paths.publication)
-        except FileNotFoundError:
-            result = _legacy_publication_status(final, paths)
-            try:
-                _read_regular_json(paths.publication)
-            except FileNotFoundError:
-                return result
-            except (OSError, ValueError):
-                return False, "ocr_publication_invalid", None
-            continue
+            final_before = _read_regular_json(paths.final)
+            publication_before = _read_publication_snapshot(paths.publication)
         except (OSError, ValueError):
+            return False, "ocr_publication_invalid", None
+        if _json_fingerprint(final_before) != expected_final_fingerprint:
             return False, "ocr_publication_invalid", None
 
-        result = _publication_manifest_status(final, paths, publication)
+        result = (
+            _legacy_publication_status(final, paths)
+            if publication_before is None
+            else _publication_manifest_status(final, paths, publication_before)
+        )
         try:
-            current_publication = _read_regular_json(paths.publication)
-        except FileNotFoundError:
-            continue
+            publication_after = _read_publication_snapshot(paths.publication)
+            final_after = _read_regular_json(paths.final)
         except (OSError, ValueError):
             return False, "ocr_publication_invalid", None
-        if current_publication == publication:
+        if _json_fingerprint(final_after) != expected_final_fingerprint:
+            return False, "ocr_publication_invalid", None
+        if publication_after == publication_before:
             return result
     return False, "ocr_publication_invalid", None
+
+
+def _read_publication_snapshot(path: Path) -> dict[str, Any] | None:
+    try:
+        return _read_regular_json(path)
+    except FileNotFoundError:
+        return None
 
 
 def _publication_manifest_status(

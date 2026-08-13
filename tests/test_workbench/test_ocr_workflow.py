@@ -830,6 +830,42 @@ def test_status_retries_when_publication_manifest_changes_during_validation(
     assert payload["markdown_path"] == str(second_artifact)
 
 
+def test_status_rejects_final_replaced_after_manifest_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path)
+    final_path = state_root / "batch-final.json"
+    replacement = dict(final)
+    replacement["generation"] = 2
+    original_status = workflow_module._publication_manifest_status
+    replaced = False
+
+    def validate_then_replace(
+        expected_final: dict, paths: workflow_module.WorkflowPaths, publication: dict
+    ):
+        nonlocal replaced
+        result = original_status(expected_final, paths, publication)
+        if result[0] and not replaced:
+            workflow_module._atomic_json(final_path, replacement)
+            replaced = True
+        return result
+
+    monkeypatch.setattr(workflow_module, "_publication_manifest_status", validate_then_replace)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+
+    payload = workflow.status()
+
+    assert replaced is True
+    assert payload["status"] == "completed"
+    assert payload["publishable"] is False
+    assert payload["markdown_path"] is None
+    assert payload["error"] == "ocr_publication_invalid"
+
+
 def test_status_does_not_publish_when_manifest_never_stabilizes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -956,6 +992,55 @@ def test_legacy_final_metadata_and_canonical_note_remain_publishable(tmp_path: P
     assert payload["publishable"] is True
     assert payload["error"] is None
     assert payload["markdown_path"] == str(state_root / "intensive-reading.md")
+
+
+def test_legacy_status_rejects_final_replaced_after_publication_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    markdown = _valid_markdown(final, tree, confirmation)
+    (state_root / "intensive-reading.md").write_text(markdown, encoding="utf-8")
+    final.update(
+        {
+            "markdown_sha256": hashlib.sha256(markdown.encode()).hexdigest(),
+            "model": "deepseek-v4-pro",
+            "ruleset": "mba-intensive-reading-v1",
+            "prompt_fingerprint": "prompt-fingerprint",
+            "chapter_fingerprint": confirmation["chapter_fingerprint"],
+            "note_input_fingerprint": final["input_fingerprint"],
+            "note_evidence_fingerprint": tree["evidence_fingerprint"],
+        }
+    )
+    final_path = state_root / "batch-final.json"
+    workflow_module._atomic_json(final_path, final)
+    replacement = dict(final)
+    replacement["generation"] = 2
+    original_status = workflow_module._legacy_publication_status
+    replaced = False
+
+    def validate_then_replace(expected_final: dict, paths: workflow_module.WorkflowPaths):
+        nonlocal replaced
+        result = original_status(expected_final, paths)
+        if result[0] and not replaced:
+            workflow_module._atomic_json(final_path, replacement)
+            replaced = True
+        return result
+
+    monkeypatch.setattr(workflow_module, "_legacy_publication_status", validate_then_replace)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+
+    payload = workflow.status()
+
+    assert replaced is True
+    assert payload["status"] == "completed"
+    assert payload["publishable"] is False
+    assert payload["markdown_path"] is None
+    assert payload["error"] == "ocr_publication_invalid"
 
 
 @pytest.mark.parametrize(
