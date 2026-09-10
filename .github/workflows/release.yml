@@ -67,6 +67,9 @@ jobs:
             exit 1
           }
 
+      - name: Build Apple Vision OCR helper
+        run: ./parsing-core-app/scripts/build-vision-ocr.sh
+
       - name: Run repository quality and security gates
         run: |
           ./scripts/verify-fast.sh
@@ -110,9 +113,6 @@ jobs:
             PDF2MD_WHEELHOUSE_ROOT="$PDF2MD_WHEELHOUSE_ROOT" \
             TMPDIR="$RUNNER_TEMP" \
             /bin/bash -p --noprofile --norc ./parsing-core-app/scripts/prepare-sidecar-python.sh
-
-      - name: Build Apple Vision OCR helper
-        run: ./parsing-core-app/scripts/build-vision-ocr.sh
 
       - name: Build desktop app natively
         working-directory: parsing-core-app

@@ -50,6 +50,9 @@ jobs:
       - name: Restore locked Python environment
         run: uv sync --frozen --all-extras
 
+      - name: Build Apple Vision OCR helper
+        run: ./parsing-core-app/scripts/build-vision-ocr.sh
+
       - name: Run repository quality gates
         run: ./scripts/verify-fast.sh
 

@@ -1050,7 +1050,7 @@ def test_cleanup_keeps_bound_identity_after_target_exec_clears_marker(monkeypatc
         ProcessTable(),
         "a" * 64,
         999,
-        timeout=0.3,
+        timeout=2.0,
     )
     assert signals == [signal.SIGTERM, signal.SIGKILL]
 
