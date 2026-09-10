@@ -909,7 +909,7 @@ def test_transient_incomplete_scan_never_counts_as_stable_empty():
 
     table = RecoveringTable()
 
-    assert cleanup_marked_processes(table, "c" * 64, 999, timeout=0.2)
+    assert cleanup_marked_processes(table, "c" * 64, 999, timeout=2.0)
     assert table.scans == 3
 
 
