@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -69,6 +70,21 @@ _FORMULA_OPERATOR_RE = re.compile(r"(?:<=|>=|!=|==|=|<|>|\+|-|\*|/|\^)")
 
 _OPENCC = OpenCC("t2s")
 
+# Primary OCR below this confidence is evidence for escalation, not publication.
+MIN_PRIMARY_BLOCK_CONFIDENCE = 0.85
+_ILLEGIBLE_TEXT_MARKERS = frozenset(
+    {
+        "[illegible]",
+        "<illegible>",
+        "illegible",
+        "[unreadable]",
+        "<unreadable>",
+        "unreadable",
+        "无法识别",
+        "不可辨认",
+    }
+)
+
 
 def normalize_text(text: str) -> str:
     if not isinstance(text, str):
@@ -96,6 +112,10 @@ def compare_observations(apple: Any, codex: Any) -> AlignmentResult:
         text_reason = _text_conflict_reason(left_block, right_block)
         if text_reason:
             conflicts.append(_conflict(text_reason, left_block, right_block, apple, codex))
+        if left_block.get("type") != right_block.get("type"):
+            conflicts.append(
+                _conflict("structure_type_conflict", left_block, right_block, apple, codex)
+            )
         if left_block.get("type") == "formula" and right_block.get("type") == "formula":
             if _formula_value(left_block) != _formula_value(right_block):
                 conflicts.append(
@@ -147,12 +167,38 @@ def compare_observations(apple: Any, codex: Any) -> AlignmentResult:
 
 def classify_page(apple: Any, codex: Any) -> AlignmentDecision:
     result = compare_observations(apple, codex)
-    blocks = _blocks(apple) + _blocks(codex)
+    apple_blocks = _blocks(apple)
+    codex_blocks = _blocks(codex)
+    blocks = apple_blocks + codex_blocks
+    if not apple_blocks or not codex_blocks:
+        return AlignmentDecision.COMPLEX
     if any(block.get("type") in {"table", "formula", "image", "list"} for block in blocks):
         return AlignmentDecision.COMPLEX
     if _uncertain_items(apple) or _uncertain_items(codex):
         return AlignmentDecision.COMPLEX
+    if any(primary_block_uncertainty_reason(block) is not None for block in blocks):
+        return AlignmentDecision.COMPLEX
     return result.status
+
+
+def primary_block_uncertainty_reason(block: Mapping[str, Any]) -> str | None:
+    reason = block.get("uncertainty_reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    confidence = block.get("confidence")
+    if (
+        not isinstance(confidence, int | float)
+        or isinstance(confidence, bool)
+        or not math.isfinite(float(confidence))
+        or confidence < MIN_PRIMARY_BLOCK_CONFIDENCE
+    ):
+        return "low_confidence"
+    text = block.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return "empty_text"
+    if text.strip().casefold() in _ILLEGIBLE_TEXT_MARKERS:
+        return "illegible_text"
+    return None
 
 
 def needs_baidu(

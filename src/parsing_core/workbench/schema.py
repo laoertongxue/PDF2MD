@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import sqlite3
+
+CHAPTER_SYNC_PENDING = "SYNC_PENDING"
 
 WORKBENCH_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS wb_courses (
@@ -109,7 +113,9 @@ CREATE TABLE IF NOT EXISTS wb_chapter_generation_runs (
   output TEXT NOT NULL DEFAULT '',
   error TEXT NOT NULL DEFAULT '',
   started_at INTEGER NOT NULL,
-  finished_at INTEGER
+  finished_at INTEGER,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS wb_chapter_generation_candidates (
@@ -118,7 +124,62 @@ CREATE TABLE IF NOT EXISTS wb_chapter_generation_candidates (
   owner_id TEXT NOT NULL,
   round_key TEXT NOT NULL,
   output TEXT NOT NULL,
+  input_fingerprint TEXT NOT NULL DEFAULT '',
+  citation_ids_json TEXT NOT NULL DEFAULT '[]',
+  configuration_fingerprint TEXT NOT NULL DEFAULT '',
+  task_fingerprint TEXT NOT NULL DEFAULT '',
+  output_fingerprint TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS wb_chapter_generation_publications (
+  chapter_id TEXT PRIMARY KEY REFERENCES wb_chapters(id) ON DELETE CASCADE,
+  publication_id TEXT NOT NULL UNIQUE,
+  owner_id TEXT NOT NULL,
+  review_run_id TEXT NOT NULL UNIQUE
+    REFERENCES wb_chapter_generation_runs(id) ON DELETE CASCADE,
+  input_fingerprint TEXT NOT NULL,
+  output_fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status = 'SYNC_PENDING'),
+  error TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS wb_chapter_publication_receipts (
+  chapter_id TEXT PRIMARY KEY REFERENCES wb_chapters(id) ON DELETE CASCADE,
+  publication_id TEXT NOT NULL UNIQUE,
+  output_fingerprint TEXT NOT NULL,
+  file_fingerprint TEXT NOT NULL,
+  completed_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS wb_markdown_publications (
+  entity_type TEXT NOT NULL CHECK (entity_type IN ('chapter', 'topic')),
+  entity_id TEXT NOT NULL,
+  publication_id TEXT NOT NULL UNIQUE,
+  owner_id TEXT NOT NULL,
+  state_fingerprint TEXT NOT NULL,
+  state_revision INTEGER NOT NULL,
+  content_fingerprint TEXT NOT NULL,
+  lease_expires_at INTEGER NOT NULL,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(entity_type, entity_id)
+);
+
+CREATE TABLE IF NOT EXISTS wb_markdown_publication_receipts (
+  entity_type TEXT NOT NULL CHECK (entity_type IN ('chapter', 'topic')),
+  entity_id TEXT NOT NULL,
+  publication_id TEXT NOT NULL UNIQUE,
+  state_fingerprint TEXT NOT NULL,
+  state_revision INTEGER NOT NULL,
+  content_fingerprint TEXT NOT NULL,
+  file_fingerprint TEXT NOT NULL,
+  completed_at INTEGER NOT NULL,
+  PRIMARY KEY(entity_type, entity_id)
 );
 
 CREATE TABLE IF NOT EXISTS wb_topics (
@@ -171,7 +232,9 @@ CREATE TABLE IF NOT EXISTS wb_topic_runs (
   output TEXT NOT NULL DEFAULT '',
   error TEXT NOT NULL DEFAULT '',
   started_at INTEGER NOT NULL,
-  finished_at INTEGER
+  finished_at INTEGER,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS wb_topic_generation_leases (
@@ -187,7 +250,9 @@ CREATE TABLE IF NOT EXISTS wb_topic_markdown_sync (
   error TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL,
   owner_id TEXT NOT NULL DEFAULT '',
-  lease_expires_at INTEGER NOT NULL DEFAULT 0
+  lease_expires_at INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS wb_schema_versions (
@@ -211,6 +276,20 @@ CREATE INDEX IF NOT EXISTS idx_wb_topic_runs_topic ON wb_topic_runs(topic_id, st
 """
 
 OCR_SCHEMA_VERSION = 3
+
+PUBLICATION_REVISION_TABLES = (
+    "wb_courses",
+    "wb_sources",
+    "wb_chapters",
+    "wb_note_blocks",
+    "wb_cards",
+    "wb_runs",
+    "wb_topics",
+    "wb_topic_chapters",
+    "wb_topic_note_blocks",
+    "wb_topic_cards",
+    "wb_topic_runs",
+)
 
 
 class UnsupportedOcrSchemaVersionError(RuntimeError):
@@ -399,7 +478,7 @@ OCR_TABLE_COLUMNS = {
         "input_fingerprint",
     ),
 }
-OCR_MIGRATION_DEFAULTS = {
+OCR_MIGRATION_DEFAULTS: dict[str, dict[str, object]] = {
     "wb_ocr_observations": {"engine_config_hash": ""},
     "wb_ocr_diffs": {"adjudication_reason": ""},
     "wb_ocr_decisions": {"decided_at": 0},
@@ -489,7 +568,9 @@ def _backup_ocr_rows(conn: sqlite3.Connection) -> dict[str, list[dict[str, objec
             raise RuntimeError(f"cannot safely migrate populated {table}: missing columns")
         backups[table] = []
         for row in rows:
-            restored = dict(zip(columns, row, strict=True))
+            if len(columns) != len(row):
+                raise RuntimeError("OCR backup row width mismatch")
+            restored = {column: row[index] for index, column in enumerate(columns)}
             restored.update({column: defaults[column] for column in missing})
             backups[table].append(restored)
     return backups
@@ -553,6 +634,7 @@ def apply_workbench_schema(conn: sqlite3.Connection) -> None:
     _reject_future_ocr_schema(conn)
     conn.executescript(WORKBENCH_SCHEMA_SQL)
     _apply_ocr_schema(conn)
+    _ensure_publication_revision_tracking(conn)
     chapter_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_chapters)")}
     for name, definition in {
         "source_start": "INTEGER NOT NULL DEFAULT 0",
@@ -578,6 +660,54 @@ def apply_workbench_schema(conn: sqlite3.Connection) -> None:
     }.items():
         if name not in run_columns:
             conn.execute(f"ALTER TABLE wb_runs ADD COLUMN {name} {definition}")
+    candidate_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(wb_chapter_generation_candidates)")
+    }
+    for name, definition in {
+        "input_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "citation_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+        "configuration_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "task_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "output_fingerprint": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if name not in candidate_columns:
+            conn.execute(
+                f"ALTER TABLE wb_chapter_generation_candidates ADD COLUMN {name} {definition}"
+            )
+    for table in ("wb_markdown_publications", "wb_markdown_publication_receipts"):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "state_revision" not in columns:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 0"
+            )
+    publication_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(wb_chapter_generation_publications)")
+    }
+    if "publication_id" not in publication_columns:
+        conn.execute(
+            "ALTER TABLE wb_chapter_generation_publications "
+            "ADD COLUMN publication_id TEXT NOT NULL DEFAULT ''"
+        )
+    conn.execute(
+        "UPDATE wb_chapter_generation_publications "
+        "SET publication_id = lower(hex(randomblob(16))) WHERE publication_id = ''"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_wb_chapter_publications_token "
+        "ON wb_chapter_generation_publications(publication_id)"
+    )
+    receipt_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(wb_chapter_publication_receipts)")
+    }
+    if "file_fingerprint" not in receipt_columns:
+        conn.execute(
+            "ALTER TABLE wb_chapter_publication_receipts "
+            "ADD COLUMN file_fingerprint TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            "UPDATE wb_chapter_publication_receipts "
+            "SET file_fingerprint = output_fingerprint WHERE file_fingerprint = ''"
+        )
     topic_columns = {row[1] for row in conn.execute("PRAGMA table_info(wb_topics)")}
     if "generation_reason" not in topic_columns:
         conn.execute("ALTER TABLE wb_topics ADD COLUMN generation_reason TEXT NOT NULL DEFAULT ''")
@@ -621,4 +751,53 @@ def apply_workbench_schema(conn: sqlite3.Connection) -> None:
             DROP TABLE wb_topic_markdown_sync_old;
             """
         )
+    for table, code, message in (
+        (
+            "wb_chapter_generation_runs",
+            "CHAPTER_GENERATION_FAILED",
+            "chapter generation failed",
+        ),
+        (
+            "wb_chapter_generation_publications",
+            "CHAPTER_MARKDOWN_PUBLICATION_FAILED",
+            "chapter Markdown publication failed",
+        ),
+        (
+            "wb_topic_runs",
+            "TOPIC_GENERATION_FAILED",
+            "topic generation failed",
+        ),
+        (
+            "wb_topic_markdown_sync",
+            "TOPIC_MARKDOWN_PUBLICATION_FAILED",
+            "topic Markdown publication failed",
+        ),
+    ):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column in ("error_code", "error_message"):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            f"UPDATE {table} SET error = ?, error_code = ?, error_message = ? WHERE error <> ''",
+            (message, code, message),
+        )
     conn.commit()
+
+
+def _ensure_publication_revision_tracking(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS wb_markdown_state_revision ("
+        "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+        "revision INTEGER NOT NULL CHECK (revision >= 0))"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO wb_markdown_state_revision(singleton, revision) VALUES (1, 0)"
+    )
+    for table in PUBLICATION_REVISION_TABLES:
+        for action in ("INSERT", "UPDATE", "DELETE"):
+            trigger = f"trg_{table}_publication_revision_{action.lower()}"
+            conn.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {trigger} AFTER {action} ON {table} "
+                "BEGIN UPDATE wb_markdown_state_revision "
+                "SET revision = revision + 1 WHERE singleton = 1; END"
+            )

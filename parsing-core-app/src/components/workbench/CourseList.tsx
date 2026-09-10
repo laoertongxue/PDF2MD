@@ -1,32 +1,22 @@
-import { FormEvent, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { FormEvent, useState } from "react";
+import { Link, useOutletContext } from "react-router-dom";
 import { BookOpen, FolderOpen, Loader2, PlusCircle } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 import { isTauriRuntime } from "../../api/runtime";
+import type { WorkbenchOutletContext } from "../Layout";
 
 export default function CourseList() {
-  const { courses, createCourse, loadCourseCards, loadCourses, loadSources, selectCourse, selectedCourseId } =
-    useWorkbenchStore();
+  const { courses, createCourse, selectCourse, selectedCourseId } = useWorkbenchStore();
+  const courseLoad = useOutletContext<WorkbenchOutletContext | null>();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [rootDir, setRootDir] = useState("");
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const desktop = isTauriRuntime();
-
-  useEffect(() => {
-    loadCourses()
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : "加载失败"))
-      .finally(() => setLoading(false));
-  }, [loadCourses]);
-
-  useEffect(() => {
-    if (!selectedCourseId) return;
-    Promise.all([loadSources(selectedCourseId), loadCourseCards(selectedCourseId)]).catch((e: unknown) =>
-      setError(e instanceof Error ? e.message : "课程数据加载失败"),
-    );
-  }, [loadCourseCards, loadSources, selectedCourseId]);
+  const loading = courseLoad?.coursesLoading ?? false;
+  const serviceUnavailable = courseLoad?.serviceUnavailable ?? false;
+  const visibleError = error ?? courseLoad?.coursesError;
 
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -129,9 +119,9 @@ export default function CourseList() {
             浏览器版不支持选择本地课程目录，请使用桌面客户端或粘贴目录路径。
           </p>
         )}
-        {error && (
+        {visibleError && (
           <p role="alert" className="text-sm text-red-500">
-            {error}
+            {visibleError}
           </p>
         )}
         <button
@@ -145,14 +135,20 @@ export default function CourseList() {
       </form>
 
       <div className="space-y-3">
+        {serviceUnavailable && (
+          <div role="status" className="border-l-2 border-red-500 bg-red-50 px-4 py-3 text-sm text-red-700">
+            服务不可用，请先重试启动
+          </div>
+        )}
+
         {loading && (
-          <div className="rounded-lg border border-zinc-200 bg-white p-5">
+          <div data-testid="course-list-skeleton" className="rounded-lg border border-zinc-200 bg-white p-5">
             <div className="h-4 w-24 shimmer rounded mb-3" />
             <div className="h-3 w-48 shimmer rounded" />
           </div>
         )}
 
-        {!loading && courses.length === 0 && (
+        {!loading && !serviceUnavailable && courses.length === 0 && (
           <div className="rounded-lg border border-dashed border-zinc-300 bg-white py-12 px-8 text-center">
             <BookOpen size={32} className="text-zinc-300 mx-auto mb-3" strokeWidth={1.5} />
             <p className="text-sm font-medium text-zinc-700">还没有课程</p>

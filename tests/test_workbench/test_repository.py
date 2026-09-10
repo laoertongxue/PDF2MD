@@ -1,14 +1,23 @@
 import gc
 import json
 import sqlite3
+import subprocess
+import sys
 import threading
+import time
 from contextlib import contextmanager
+from dataclasses import replace
 
 import pytest
 
 from parsing_core.storage import connection_lock
 from parsing_core.storage.schema import init_db
-from parsing_core.workbench.repository import WorkbenchRepository
+from parsing_core.workbench import repository as repository_module
+from parsing_core.workbench.repository import (
+    ChapterGenerationConflictError,
+    WorkbenchRepository,
+    _verified_file_publication_receipt,
+)
 from parsing_core.workbench.schema import apply_workbench_schema
 
 
@@ -18,16 +27,530 @@ def repo(tmp_path):
     return WorkbenchRepository(conn)
 
 
+def test_workbench_schema_upgrades_candidate_checkpoints_and_partial_publication_tokens(
+    tmp_path,
+):
+    conn = sqlite3.connect(tmp_path / "legacy.db")
+    conn.executescript(
+        """
+        CREATE TABLE wb_chapter_generation_candidates (
+          run_id TEXT PRIMARY KEY,
+          chapter_id TEXT NOT NULL,
+          owner_id TEXT NOT NULL,
+          round_key TEXT NOT NULL,
+          output TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE TABLE wb_chapter_generation_publications (
+          chapter_id TEXT PRIMARY KEY,
+          publication_id TEXT NOT NULL DEFAULT '',
+          owner_id TEXT NOT NULL,
+          review_run_id TEXT NOT NULL,
+          input_fingerprint TEXT NOT NULL,
+          output_fingerprint TEXT NOT NULL,
+          status TEXT NOT NULL,
+          error TEXT NOT NULL DEFAULT '',
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO wb_chapter_generation_publications VALUES
+          ('chapter-a', '', 'owner-a', 'review-a', 'input-a', 'output-a',
+           'SYNC_PENDING', '', 1),
+          ('chapter-b', '', 'owner-b', 'review-b', 'input-b', 'output-b',
+           'SYNC_PENDING', '', 2);
+        """
+    )
+
+    apply_workbench_schema(conn)
+    apply_workbench_schema(conn)
+
+    candidate_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(wb_chapter_generation_candidates)")
+    }
+    assert {
+        "input_fingerprint",
+        "citation_ids_json",
+        "configuration_fingerprint",
+        "output_fingerprint",
+    } <= candidate_columns
+    tokens = [
+        row[0]
+        for row in conn.execute(
+            "SELECT publication_id FROM wb_chapter_generation_publications ORDER BY chapter_id"
+        ).fetchall()
+    ]
+    assert all(len(token) == 32 for token in tokens)
+    assert len(set(tokens)) == 2
+
+
 def test_create_course_source_and_chapter(tmp_path):
     r = repo(tmp_path)
     course = r.create_course("战略管理", "MBA 课程", str(tmp_path / "out"))
     source = r.create_source(course.id, "main", "/tmp/book.pdf", "战略教材")
-    chapter = r.create_chapter(course.id, source.id, 0, "第一章 战略是什么", "/tmp/ch1.md")
+    r.create_chapter(course.id, source.id, 0, "第一章 战略是什么", "/tmp/ch1.md")
 
     assert r.get_course(course.id).title == "战略管理"
     assert r.list_sources(course.id)[0].title == "战略教材"
     assert r.list_chapters(source.id)[0].title == "第一章 战略是什么"
+
+
+def test_markdown_publication_fingerprint_fails_closed_on_unbounded_course_sources(
+    tmp_path,
+    monkeypatch,
+):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    r.create_source(course.id, "main", "/tmp/first.pdf", "教材")
+    target = r.create_source(course.id, "main", "/tmp/target.pdf", "教材")
+    source_md = tmp_path / "target.md"
+    source_md.write_text("战略是选择。", encoding="utf-8")
+    chapter = r.create_chapter(course.id, target.id, 0, "第一章", str(source_md))
+    monkeypatch.setattr(
+        repository_module,
+        "MAX_PUBLICATION_COURSE_SOURCES",
+        1,
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="course source limit"):
+        r.markdown_publication_state_fingerprint("chapter", chapter.id)
+
+
+def test_markdown_publication_fingerprint_fails_closed_on_oversized_source_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    source_md = tmp_path / "chapter.md"
+    source_md.write_text("战略是选择。", encoding="utf-8")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", str(source_md))
+    monkeypatch.setattr(
+        repository_module,
+        "MAX_PUBLICATION_SOURCE_METADATA_BYTES",
+        4,
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="course source metadata limit"):
+        r.markdown_publication_state_fingerprint("chapter", chapter.id)
     assert chapter.status == "DRAFT"
+
+
+def test_markdown_publication_revision_tracks_commits_not_reads_or_rollbacks(tmp_path):
+    db_path = tmp_path / "workbench.db"
+    conn = init_db(str(db_path))
+    apply_workbench_schema(conn)
+    r = WorkbenchRepository(conn)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    raw = tmp_path / "chapter.md"
+    raw.write_text("战略是选择。", encoding="utf-8")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", str(raw))
+    r.upsert_note_block(chapter.id, "summary", "本章概要", "STATE-A", 0)
+
+    baseline = r.markdown_publication_revision()
+    r.get_chapter(chapter.id)
+    r.list_note_blocks(chapter.id)
+    assert r.markdown_publication_revision() == baseline
+
+    conn.execute(
+        "UPDATE wb_note_blocks SET body = 'STATE-B' WHERE chapter_id = ? AND kind = 'summary'",
+        (chapter.id,),
+    )
+    conn.commit()
+    committed = r.markdown_publication_revision()
+    assert committed > baseline
+
+    conn.execute(
+        "UPDATE wb_note_blocks SET body = 'ROLLED-BACK' WHERE chapter_id = ? AND kind = 'summary'",
+        (chapter.id,),
+    )
+    conn.rollback()
+    assert r.markdown_publication_revision() == committed
+
+    second_conn = init_db(str(db_path))
+    apply_workbench_schema(second_conn)
+    second_conn.execute(
+        "UPDATE wb_note_blocks SET body = 'STATE-C' WHERE chapter_id = ? AND kind = 'summary'",
+        (chapter.id,),
+    )
+    second_conn.commit()
+    cross_connection = r.markdown_publication_revision()
+    assert cross_connection > committed
+    second_conn.close()
+    conn.close()
+
+    reopened_conn = init_db(str(db_path))
+    apply_workbench_schema(reopened_conn)
+    reopened = WorkbenchRepository(reopened_conn)
+    assert reopened.markdown_publication_revision() == cross_connection
+    reopened_conn.close()
+
+
+def test_confirm_chapter_atomically_transitions_draft_and_is_idempotent(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", "/tmp/1.md")
+
+    confirmed = r.confirm_chapter(chapter.id)
+    repeated = r.confirm_chapter(chapter.id)
+
+    assert confirmed.status == "CONFIRMED"
+    assert repeated == confirmed
+
+
+@pytest.mark.parametrize("reopenable_status", ["COMPLETED", "FAILED"])
+def test_confirm_chapter_reopens_terminal_states(tmp_path, reopenable_status):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", "/tmp/1.md")
+    r.update_chapter_status(chapter.id, reopenable_status)
+
+    confirmed = r.confirm_chapter(chapter.id)
+
+    assert confirmed.status == "CONFIRMED"
+    assert r.get_chapter(chapter.id).status == "CONFIRMED"
+
+
+def test_confirm_chapter_rejects_sync_pending_state_without_changing_it(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", "/tmp/1.md")
+    r.update_chapter_status(chapter.id, "SYNC_PENDING")
+
+    with pytest.raises(ValueError, match="cannot be confirmed"):
+        r.confirm_chapter(chapter.id)
+
+    assert r.get_chapter(chapter.id).status == "SYNC_PENDING"
+
+
+def test_confirm_chapter_rejects_running_state_and_preserves_generation_lease(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", "/tmp/1.md")
+    r.update_chapter_status(chapter.id, "CONFIRMED")
+    started = r.start_chapter_generation(chapter.id, now=100, lease_ttl=60)
+    lease_before = r.get_chapter_generation_lease(chapter.id)
+
+    with pytest.raises(ValueError, match="cannot be confirmed"):
+        r.confirm_chapter(chapter.id)
+
+    assert r.get_chapter(chapter.id).status == "RUNNING"
+    assert r.get_chapter_generation_lease(chapter.id) == lease_before
+    assert lease_before is not None and lease_before.owner_id == started.owner_id
+
+
+def _finalize_with_test_file_receipt(r, chapter_id, owner_id, review_id, *, now):
+    pending = r.pending_chapter_markdown_sync(chapter_id)
+    assert pending is not None
+    with r.fence_chapter_markdown_publication(
+        chapter_id,
+        owner_id,
+        review_id,
+        pending["publication_id"],
+        clock=lambda: now,
+    ) as publication:
+        publication.bind_file_publication(
+            _verified_file_publication_receipt(pending["publication_id"], "f" * 64)
+        )
+    completed = r.get_chapter(chapter_id)
+    assert completed is not None
+    return completed
+
+
+def test_publish_chapter_generation_stages_retryable_sync_and_requires_owner_safe_finalize(
+    tmp_path,
+):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    source_md = tmp_path / "chapter.md"
+    source_md.write_text("战略是选择。", encoding="utf-8")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", str(source_md))
+    r.update_chapter_status(chapter.id, "CONFIRMED")
+    start = r.start_chapter_generation(chapter.id, now=100, lease_ttl=10_000_000_000)
+    structure = r.create_chapter_generation_run(chapter.id, start.owner_id, "structure", now=101)
+    r.finish_chapter_generation_run(
+        structure.id, start.owner_id, "COMPLETED", output="候选结构", now=102
+    )
+    review = r.create_chapter_generation_run(chapter.id, start.owner_id, "review", now=103)
+    fingerprint = r.chapter_input_snapshot(chapter.id)[1]
+
+    staged = r.publish_chapter_generation(
+        chapter.id,
+        start.owner_id,
+        {"summary": ("本章概要", "已暂存摘要", 0)},
+        ("第一章 写作选题", "已暂存卡片"),
+        review.id,
+        '{"passed": true, "issues": [], "revised_blocks": {}}',
+        {"structure": ("task.md", "output.md")},
+        {
+            "structure": (fingerprint, ("src:a",)),
+            "review": (fingerprint, ("src:a",)),
+        },
+        fingerprint,
+    )
+
+    assert staged.status == "SYNC_PENDING"
+    assert r.get_chapter_generation_lease(chapter.id) is not None
+    pending = r.pending_chapter_markdown_sync(chapter.id)
+    assert pending is not None
+    assert pending["owner_id"] == start.owner_id
+    assert pending["review_run_id"] == review.id
+    assert pending["input_fingerprint"] == fingerprint
+    assert len(pending["output_fingerprint"]) == 64
+    assert pending["error"] == ""
+    assert r.list_note_blocks(chapter.id)[0].body == "已暂存摘要"
+    assert r.list_cards_by_chapter(chapter.id)[0].title == "第一章 写作选题"
+
+    with pytest.raises(ChapterGenerationConflictError) as start_conflict:
+        r.start_chapter_generation(chapter.id, now=104, lease_ttl=60)
+    assert start_conflict.value.cause == "active_lease"
+
+    with pytest.raises(ChapterGenerationConflictError) as finalize_conflict:
+        r.finalize_chapter_generation(chapter.id, "wrong-owner", review.id, now=105)
+    assert finalize_conflict.value.cause == "lease_lost"
+    assert r.list_note_blocks(chapter.id)[0].body == "已暂存摘要"
+    assert r.get_chapter_generation_run(review.id).status == "SYNC_PENDING"
+
+    completed = _finalize_with_test_file_receipt(
+        r,
+        chapter.id,
+        start.owner_id,
+        review.id,
+        now=106,
+    )
+
+    assert completed.status == "COMPLETED"
+    assert r.get_chapter_generation_lease(chapter.id) is None
+    assert r.get_chapter_generation_run(review.id).status == "COMPLETED"
+
+
+def _stage_pending_chapter(r, chapter, *, now=None, lease_ttl=10):
+    now = int(time.time()) if now is None else now
+    start = r.start_chapter_generation(chapter.id, now=now, lease_ttl=lease_ttl)
+    structure = r.create_chapter_generation_run(
+        chapter.id, start.owner_id, "structure", now=now + 1
+    )
+    r.finish_chapter_generation_run(
+        structure.id,
+        start.owner_id,
+        "COMPLETED",
+        output="候选结构",
+        now=now + 2,
+    )
+    review = r.create_chapter_generation_run(chapter.id, start.owner_id, "review", now=now + 3)
+    fingerprint = r.chapter_input_snapshot(chapter.id)[1]
+    r.publish_chapter_generation(
+        chapter.id,
+        start.owner_id,
+        {"summary": ("本章概要", "已暂存摘要", 0)},
+        ("第一章 写作选题", "已暂存卡片"),
+        review.id,
+        '{"passed": true, "issues": [], "revised_blocks": {}}',
+        {"structure": ("task.md", "output.md")},
+        {
+            "structure": (fingerprint, ("src:a",)),
+            "review": (fingerprint, ("src:a",)),
+        },
+        fingerprint,
+        now=now + 4,
+    )
+    return start, structure, review
+
+
+def test_chapter_publication_fence_rejects_empty_context_without_receipt(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    source_md = tmp_path / "chapter.md"
+    source_md.write_text("战略是选择。", encoding="utf-8")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", str(source_md))
+    r.update_chapter_status(chapter.id, "CONFIRMED")
+    start, _structure, review = _stage_pending_chapter(
+        r,
+        chapter,
+        now=100,
+        lease_ttl=100,
+    )
+    pending = r.pending_chapter_markdown_sync(chapter.id)
+    assert pending is not None
+
+    with pytest.raises(RuntimeError, match="file publication receipt"):
+        with r.fence_chapter_markdown_publication(
+            chapter.id,
+            start.owner_id,
+            review.id,
+            pending["publication_id"],
+            clock=lambda: 105,
+        ):
+            pass
+
+    assert r.get_chapter(chapter.id).status == "SYNC_PENDING"
+    assert not r.chapter_publication_committed(chapter.id, pending["publication_id"])
+
+    with pytest.raises(TypeError, match="verified file publication receipt"):
+        with r.fence_chapter_markdown_publication(
+            chapter.id,
+            start.owner_id,
+            review.id,
+            pending["publication_id"],
+            clock=lambda: 105,
+        ) as publication:
+            publication.bind_file_publication(
+                pending["publication_id"],
+                "f" * 64,
+            )
+
+    forged_receipt = replace(
+        _verified_file_publication_receipt(pending["publication_id"], "f" * 64),
+        file_fingerprint="e" * 64,
+    )
+    with pytest.raises(TypeError, match="verified file publication receipt"):
+        with r.fence_chapter_markdown_publication(
+            chapter.id,
+            start.owner_id,
+            review.id,
+            pending["publication_id"],
+            clock=lambda: 105,
+        ) as publication:
+            publication.bind_file_publication(forged_receipt)
+
+
+def test_start_generation_atomically_recovers_expired_lease_without_candidate(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    source_md = tmp_path / "chapter.md"
+    source_md.write_text("战略是选择。", encoding="utf-8")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", str(source_md))
+    r.update_chapter_status(chapter.id, "CONFIRMED")
+    old = r.start_chapter_generation(chapter.id, now=100, lease_ttl=10)
+    old_run = r.create_chapter_generation_run(chapter.id, old.owner_id, "structure", now=101)
+
+    replacement = r.start_chapter_generation(
+        chapter.id,
+        now=r.get_chapter_generation_lease(chapter.id).expires_at + 1,
+        lease_ttl=60,
+    )
+
+    assert replacement.owner_id != old.owner_id
+    assert replacement.chapter.status == "RUNNING"
+    assert r.get_chapter_generation_lease(chapter.id).owner_id == replacement.owner_id
+    interrupted = r.get_chapter_generation_run(old_run.id)
+    assert interrupted is not None
+    assert interrupted.status == "FAILED"
+    assert interrupted.error == "chapter generation interrupted"
+    assert interrupted.error_code == "CHAPTER_GENERATION_INTERRUPTED"
+
+
+def test_start_generation_takes_over_expired_staged_candidate_without_rerun(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    source_md = tmp_path / "chapter.md"
+    source_md.write_text("战略是选择。", encoding="utf-8")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", str(source_md))
+    r.update_chapter_status(chapter.id, "CONFIRMED")
+    old, _structure, review = _stage_pending_chapter(r, chapter)
+
+    replacement = r.start_chapter_generation(
+        chapter.id,
+        now=r.get_chapter_generation_lease(chapter.id).expires_at + 1,
+        lease_ttl=60,
+    )
+
+    assert replacement.owner_id != old.owner_id
+    assert replacement.chapter.status == "SYNC_PENDING"
+    pending = r.pending_chapter_markdown_sync(chapter.id)
+    assert pending is not None
+    assert pending["owner_id"] == replacement.owner_id
+    assert pending["review_run_id"] == review.id
+    assert r.get_chapter_generation_run(review.id).owner_id == replacement.owner_id
+    assert set(r.chapter_generation_candidates(chapter.id, replacement.owner_id)) == {"structure"}
+
+
+def test_start_generation_discards_changed_staged_candidate_before_new_claim(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    source_md = tmp_path / "chapter.md"
+    source_md.write_text("战略是选择。", encoding="utf-8")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", str(source_md))
+    r.update_chapter_status(chapter.id, "CONFIRMED")
+    old, _structure, review = _stage_pending_chapter(r, chapter)
+    source_md.write_text("战略输入已经变化。", encoding="utf-8")
+
+    replacement = r.start_chapter_generation(
+        chapter.id,
+        now=r.get_chapter_generation_lease(chapter.id).expires_at + 1,
+        lease_ttl=60,
+    )
+
+    assert replacement.owner_id != old.owner_id
+    assert replacement.chapter.status == "RUNNING"
+    assert r.pending_chapter_markdown_sync(chapter.id) is None
+    assert r.chapter_generation_candidates(chapter.id, old.owner_id) == {}
+    discarded_review = r.get_chapter_generation_run(review.id)
+    assert discarded_review is not None
+    assert discarded_review.status == "FAILED"
+    assert discarded_review.error == "chapter input changed"
+    assert discarded_review.error_code == "CHAPTER_INPUT_CHANGED"
+    public_review = next(run for run in r.list_runs(chapter.id) if run.round_key == "review")
+    assert public_review.status == "FAILED"
+    assert public_review.stale is True
+
+
+def test_finalize_chapter_and_topic_readiness_are_one_transaction(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    source_md = tmp_path / "chapter.md"
+    source_md.write_text("战略是选择。", encoding="utf-8")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", str(source_md))
+    r.update_chapter_status(chapter.id, "CONFIRMED")
+    topic = r.create_topic(course.id, 0, "竞争优势")
+    r.update_topic(topic.id, confirmed=True)
+    r.replace_topic_chapters(topic.id, [chapter.id])
+    start, _structure, review = _stage_pending_chapter(r, chapter, lease_ttl=60)
+    r.conn.execute(
+        "CREATE TRIGGER fail_topic_ready BEFORE UPDATE ON wb_topics "
+        "WHEN NEW.status = 'READY' BEGIN SELECT RAISE(ABORT, 'topic failed'); END"
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="topic failed"):
+        _finalize_with_test_file_receipt(
+            r,
+            chapter.id,
+            start.owner_id,
+            review.id,
+            now=r.get_chapter_generation_lease(chapter.id).heartbeat_at + 1,
+        )
+
+    assert r.get_chapter(chapter.id).status == "SYNC_PENDING"
+    assert r.get_chapter_generation_run(review.id).status == "SYNC_PENDING"
+    assert next(run for run in r.list_runs(chapter.id) if run.round_key == "review").status == (
+        "SYNC_PENDING"
+    )
+    assert r.get_chapter_generation_lease(chapter.id) is not None
+    assert r.get_topic(topic.id).status != "READY"
+
+    r.conn.execute("DROP TRIGGER fail_topic_ready")
+    completed = _finalize_with_test_file_receipt(
+        r,
+        chapter.id,
+        start.owner_id,
+        review.id,
+        now=r.get_chapter_generation_lease(chapter.id).heartbeat_at + 2,
+    )
+
+    assert completed.status == "COMPLETED"
+    assert r.get_topic(topic.id).status == "READY"
 
 
 def test_chapter_drafts_can_be_replaced_and_confirmed_as_atomic_snapshot(tmp_path):
@@ -63,7 +586,9 @@ def test_attachment_is_related_and_changes_chapter_input_fingerprint(tmp_path):
     r = repo(tmp_path)
     course = r.create_course("战略管理", "", str(tmp_path / "out"))
     source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
-    chapter = r.create_chapter(course.id, source.id, 0, "第一章", "/tmp/1.md")
+    source_md = tmp_path / "1.md"
+    source_md.write_text("战略是选择。", encoding="utf-8")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", str(source_md))
     before = r.chapter_input_snapshot(chapter.id)[1]
     attachment = r.create_attachment(
         course.id,
@@ -463,6 +988,35 @@ def test_connection_lock_registry_releases_entries_with_repository_lifetime(tmp_
     conn.close()
 
 
+def test_connection_lock_import_and_finalizer_construction_in_fresh_interpreter():
+    script = """
+import sqlite3
+from parsing_core.storage.connection_lock import register_connection_lock
+
+class Owner:
+    pass
+
+owner = Owner()
+connection = sqlite3.connect(":memory:")
+lock, finalizer = register_connection_lock(owner, connection)
+with lock:
+    connection.execute("SELECT 1").fetchone()
+assert finalizer.alive
+finalizer()
+assert not finalizer.alive
+connection.close()
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("a_fails", [False, True])
 def test_shared_connection_serializes_topic_transactions_and_releases_after_failure(
     tmp_path,
@@ -849,7 +1403,8 @@ def test_topic_run_history_and_finish_status_semantics(tmp_path):
     assert completed.finished_at is not None
     assert failed.status == "FAILED"
     assert failed.output == ""
-    assert failed.error == "模型超时"
+    assert failed.error == "topic generation failed"
+    assert failed.error_code == "TOPIC_GENERATION_FAILED"
     assert failed.finished_at is not None
     assert [run.id for run in r.list_topic_runs(topic.id)] == [first.id, second.id]
 
@@ -863,6 +1418,96 @@ def test_topic_run_history_and_finish_status_semantics(tmp_path):
 
     with pytest.raises(ValueError, match="COMPLETED or FAILED"):
         r.finish_topic_run(first.id, "RUNNING")
+
+
+@pytest.mark.parametrize(
+    "raw_error",
+    [
+        "教材正文：战略就是决定不做什么",
+        "Authorization: Bearer very-secret-access-token",
+        "API_KEY=super-secret-key token=session-secret",
+        "/Users/private/course/chapter.md",
+    ],
+)
+def test_chapter_generation_error_is_structured_and_never_persists_raw_text(
+    tmp_path,
+    raw_error,
+):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    source = r.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    chapter = r.create_chapter(course.id, source.id, 0, "第一章", "/tmp/1.md")
+    r.update_chapter_status(chapter.id, "CONFIRMED")
+    start = r.start_chapter_generation(chapter.id)
+    run = r.create_chapter_generation_run(chapter.id, start.owner_id, "structure")
+
+    r.finish_chapter_generation_run(
+        run.id,
+        start.owner_id,
+        "FAILED",
+        error=raw_error,
+    )
+
+    stored = r.conn.execute(
+        "SELECT error, error_code, error_message FROM wb_chapter_generation_runs WHERE id = ?",
+        (run.id,),
+    ).fetchone()
+    assert tuple(stored) == (
+        "chapter generation failed",
+        "CHAPTER_GENERATION_FAILED",
+        "chapter generation failed",
+    )
+    assert raw_error not in json.dumps(tuple(stored), ensure_ascii=False)
+
+
+def test_topic_generation_and_publication_errors_are_structured_and_secret_safe(tmp_path):
+    r = repo(tmp_path)
+    course = r.create_course("战略管理", "", str(tmp_path / "out"))
+    topic = r.create_topic(course.id, 0, "竞争优势", "")
+    raw_error = (
+        "教材正文：战略是选择 Authorization: Bearer access-secret "
+        "api_key=api-secret token=session-secret /Users/private/chapter.md"
+    )
+    run = r.create_topic_run(topic.id, "synthesis", "fingerprint")
+    r.finish_topic_run(run.id, "FAILED", error=raw_error)
+    r.set_topic_markdown_sync_state(topic.id, "PENDING")
+    claim = r.claim_topic_markdown_sync(topic.id, now=101, lease_ttl=60)
+    r.finish_topic_markdown_sync(
+        topic.id,
+        claim.owner_id,
+        "FAILED",
+        raw_error,
+        now=102,
+    )
+
+    generation = r.conn.execute(
+        "SELECT error, error_code, error_message FROM wb_topic_runs WHERE id = ?",
+        (run.id,),
+    ).fetchone()
+    publication = r.conn.execute(
+        "SELECT error, error_code, error_message FROM wb_topic_markdown_sync WHERE topic_id = ?",
+        (topic.id,),
+    ).fetchone()
+    assert tuple(generation) == (
+        "topic generation failed",
+        "TOPIC_GENERATION_FAILED",
+        "topic generation failed",
+    )
+    assert tuple(publication) == (
+        "topic Markdown publication failed",
+        "TOPIC_MARKDOWN_PUBLICATION_FAILED",
+        "topic Markdown publication failed",
+    )
+    persisted = json.dumps((tuple(generation), tuple(publication)), ensure_ascii=False)
+    for forbidden in (
+        "战略是选择",
+        "Bearer",
+        "access-secret",
+        "api-secret",
+        "session-secret",
+        "/Users/private",
+    ):
+        assert forbidden not in persisted
 
 
 @pytest.mark.parametrize("confirmed", [0, 1, "true"])

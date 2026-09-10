@@ -12,6 +12,16 @@ TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
 AUTH_HEADERS = {"Origin": "http://localhost:1420", "X-PDF2MD-Session": TEST_SESSION_TOKEN}
 
 
+def _token_pipe(token: str) -> int:
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(read_fd, True)
+    try:
+        os.write(write_fd, token.encode("ascii"))
+    finally:
+        os.close(write_fd)
+    return read_fd
+
+
 def _unused_loopback_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -22,22 +32,29 @@ def _start_server(data_root: Path) -> tuple[subprocess.Popen[str], httpx.Client]
     port = _unused_loopback_port()
     env = os.environ.copy()
     env["XDG_DATA_HOME"] = str(data_root)
-    env["PDF2MD_SESSION_TOKEN"] = TEST_SESSION_TOKEN
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "parsing_core.serving.serve",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    env.pop("PDF2MD_SESSION_TOKEN", None)
+    token_fd = _token_pipe(TEST_SESSION_TOKEN)
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "parsing_core.serving.serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--session-token-fd",
+                str(token_fd),
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            pass_fds=(token_fd,),
+        )
+    finally:
+        os.close(token_fd)
     client = httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=20, headers=AUTH_HEADERS)
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:

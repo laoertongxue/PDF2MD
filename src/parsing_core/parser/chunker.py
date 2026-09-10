@@ -36,7 +36,7 @@ def _split_by_structure(markdown: str) -> list[str]:
     lines = markdown.splitlines(keepends=True)
     current: list[str] = []
 
-    def flush():
+    def flush() -> None:
         nonlocal current
         if current:
             parts.append("".join(current))

@@ -1,7 +1,9 @@
+import asyncio
+
 from fastapi import WebSocket
 
 from parsing_core.serving.models.api import WSEvent
-from parsing_core.serving.scheduler import Scheduler
+from parsing_core.serving.scheduler import Scheduler, SchedulerCapacityError
 
 
 class WsManager:
@@ -18,8 +20,20 @@ class WsManager:
             await ws.close(code=4410, reason="batch_gone")
             return None
         events: list[WSEvent] = self.scheduler.replay_events(batch_id, since)
-        self.scheduler.add_subscriber(batch_id, ws)
+        try:
+            self.scheduler.add_subscriber(batch_id, ws)
+        except SchedulerCapacityError:
+            await ws.close(code=4429, reason="subscriber_limit")
+            return None
         return events
 
-    def unsubscribe(self, batch_id: str, ws: WebSocket) -> None:
-        self.scheduler.remove_subscriber(batch_id, ws)
+    def start_sender(
+        self,
+        batch_id: str,
+        ws: WebSocket,
+        replay_events: list[WSEvent],
+    ) -> tuple[asyncio.Task[None], asyncio.Event]:
+        return self.scheduler.start_subscriber(batch_id, ws, replay_events)
+
+    def unsubscribe(self, batch_id: str, ws: WebSocket) -> asyncio.Task[None] | None:
+        return self.scheduler.remove_subscriber(batch_id, ws)

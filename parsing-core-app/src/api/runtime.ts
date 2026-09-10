@@ -8,6 +8,44 @@ export interface ApiConfig {
   sessionToken: string;
 }
 
+const MAX_PENDING_API_CONFIG_INVOCATIONS = 2;
+const MAX_API_CONFIG_WAITERS = 128;
+
+export class ApiConfigBusyError extends Error {
+  constructor() {
+    super("API configuration is busy");
+    this.name = "BusyError";
+  }
+}
+
+interface ApiConfigWaiter {
+  resolve: (config: ApiConfig) => void;
+  reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+interface ApiConfigInvocation {
+  sequence: number;
+  waiters: Set<ApiConfigWaiter>;
+  orphaned: boolean;
+  settled: boolean;
+}
+
+interface ApiConfigSlotWaiter {
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+const pendingApiConfigInvocations: ApiConfigInvocation[] = [];
+const apiConfigSlotWaiters = new Set<ApiConfigSlotWaiter>();
+let nextApiConfigInvocationSequence = 0;
+let latestSuccessfulInvocationSequence = 0;
+let latestSuccessfulApiConfig: ApiConfig | null = null;
+let activeApiConfigWaiters = 0;
+
 export function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in globalThis;
 }
@@ -19,6 +57,7 @@ export interface ServiceStatus {
   error?: { category: string; message: string } | null;
   logPath?: string | null;
   logs?: string[];
+  forceExitAvailable?: boolean;
 }
 
 function browserApiConfig(): ApiConfig {
@@ -61,18 +100,171 @@ function parseApiConfig(value: unknown): ApiConfig {
   return { apiBase: endpoint.origin, sessionToken: candidate.sessionToken };
 }
 
-export async function getApiConfig(): Promise<ApiConfig> {
+function signalReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+}
+
+function acquireApiConfigWaiter(): void {
+  if (activeApiConfigWaiters >= MAX_API_CONFIG_WAITERS) throw new ApiConfigBusyError();
+  activeApiConfigWaiters += 1;
+}
+
+function releaseApiConfigWaiter(): void {
+  activeApiConfigWaiters -= 1;
+}
+
+function removePendingInvocation(invocation: ApiConfigInvocation): void {
+  const index = pendingApiConfigInvocations.indexOf(invocation);
+  if (index >= 0) pendingApiConfigInvocations.splice(index, 1);
+}
+
+function removeWaiter(invocation: ApiConfigInvocation, waiter: ApiConfigWaiter): boolean {
+  if (!invocation.waiters.delete(waiter)) return false;
+  releaseApiConfigWaiter();
+  if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+  if (!invocation.settled && invocation.waiters.size === 0) invocation.orphaned = true;
+  return true;
+}
+
+function settleWaiters(invocation: ApiConfigInvocation, config?: ApiConfig, error?: unknown): void {
+  for (const waiter of [...invocation.waiters]) {
+    removeWaiter(invocation, waiter);
+    if (config) waiter.resolve(config);
+    else waiter.reject(error);
+  }
+}
+
+function releaseSlotWaiters(): void {
+  for (const waiter of [...apiConfigSlotWaiters]) {
+    apiConfigSlotWaiters.delete(waiter);
+    releaseApiConfigWaiter();
+    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+    waiter.resolve();
+  }
+}
+
+function waitForApiConfigSlot(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signalReason(signal));
+  try {
+    acquireApiConfigWaiter();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return new Promise<void>((resolve, reject) => {
+    const waiter: ApiConfigSlotWaiter = {
+      resolve,
+      reject,
+      ...(signal ? { signal } : {}),
+    };
+    if (signal) {
+      waiter.onAbort = () => {
+        if (!apiConfigSlotWaiters.delete(waiter)) return;
+        releaseApiConfigWaiter();
+        if (waiter.onAbort) signal.removeEventListener("abort", waiter.onAbort);
+        reject(signalReason(signal));
+      };
+      signal.addEventListener("abort", waiter.onAbort, { once: true });
+    }
+    apiConfigSlotWaiters.add(waiter);
+  });
+}
+
+function startApiConfigInvocation(): ApiConfigInvocation {
+  const invocation: ApiConfigInvocation = {
+    sequence: ++nextApiConfigInvocationSequence,
+    waiters: new Set(),
+    orphaned: false,
+    settled: false,
+  };
+  const rawConfig = import("@tauri-apps/api/core")
+    .then(({ invoke }) => invoke<ApiConfig>("get_api_config"))
+    .then(parseApiConfig);
+  pendingApiConfigInvocations.push(invocation);
+  void rawConfig.then(
+    (config) => {
+      invocation.settled = true;
+      removePendingInvocation(invocation);
+      if (invocation.sequence >= latestSuccessfulInvocationSequence) {
+        latestSuccessfulInvocationSequence = invocation.sequence;
+        latestSuccessfulApiConfig = config;
+        for (const older of pendingApiConfigInvocations) {
+          if (older.sequence >= invocation.sequence) continue;
+          older.orphaned = true;
+          settleWaiters(older, config);
+        }
+        settleWaiters(invocation, config);
+      } else {
+        settleWaiters(invocation, latestSuccessfulApiConfig ?? undefined, new Error("configuration superseded"));
+      }
+      releaseSlotWaiters();
+    },
+    (error: unknown) => {
+      invocation.settled = true;
+      removePendingInvocation(invocation);
+      if (invocation.sequence < latestSuccessfulInvocationSequence && latestSuccessfulApiConfig) {
+        settleWaiters(invocation, latestSuccessfulApiConfig);
+      } else {
+        settleWaiters(invocation, undefined, error);
+      }
+      releaseSlotWaiters();
+    },
+  );
+  return invocation;
+}
+
+function waitForInvocation(invocation: ApiConfigInvocation, signal?: AbortSignal): Promise<ApiConfig> {
+  if (signal?.aborted) return Promise.reject(signalReason(signal));
+  try {
+    acquireApiConfigWaiter();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return new Promise<ApiConfig>((resolve, reject) => {
+    const waiter: ApiConfigWaiter = { resolve, reject, ...(signal ? { signal } : {}) };
+    if (signal) {
+      waiter.onAbort = () => {
+        if (!removeWaiter(invocation, waiter)) return;
+        reject(signalReason(signal));
+      };
+      signal.addEventListener("abort", waiter.onAbort, { once: true });
+    }
+    invocation.waiters.add(waiter);
+  });
+}
+
+async function getTauriApiConfig(signal?: AbortSignal): Promise<ApiConfig> {
+  if (signal?.aborted) throw signalReason(signal);
+  while (pendingApiConfigInvocations.length >= MAX_PENDING_API_CONFIG_INVOCATIONS) {
+    const latest = pendingApiConfigInvocations.reduce<ApiConfigInvocation | null>(
+      (current, invocation) => (current && current.sequence > invocation.sequence ? current : invocation),
+      null,
+    );
+    if (latest && !latest.orphaned) return waitForInvocation(latest, signal);
+
+    await waitForApiConfigSlot(signal);
+  }
+  return waitForInvocation(startApiConfigInvocation(), signal);
+}
+
+export function __getApiConfigWaiterSnapshotForTests(): { active: number; invocation: number; slot: number } {
+  return {
+    active: activeApiConfigWaiters,
+    invocation: pendingApiConfigInvocations.reduce((total, invocation) => total + invocation.waiters.size, 0),
+    slot: apiConfigSlotWaiters.size,
+  };
+}
+
+export async function getApiConfig(signal?: AbortSignal): Promise<ApiConfig> {
   if (!isTauriRuntime()) return parseApiConfig(browserApiConfig());
-  const { invoke } = await import("@tauri-apps/api/core");
-  return parseApiConfig(await invoke<ApiConfig>("get_api_config"));
+  return getTauriApiConfig(signal);
 }
 
 export async function getApiBase(): Promise<string> {
   return (await getApiConfig()).apiBase;
 }
 
-export async function getWsConfig(): Promise<{ wsBase: string; sessionToken: string }> {
-  const { apiBase, sessionToken } = await getApiConfig();
+export async function getWsConfig(signal?: AbortSignal): Promise<{ wsBase: string; sessionToken: string }> {
+  const { apiBase, sessionToken } = await getApiConfig(signal);
   return { wsBase: apiBase.replace(/^http/, "ws"), sessionToken };
 }
 
@@ -115,4 +307,16 @@ export async function retryService(): Promise<void> {
   if (!isTauriRuntime()) return;
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("retry_service");
+}
+
+export async function retryExitCleanup(): Promise<string | undefined> {
+  if (!isTauriRuntime()) return undefined;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<string>("retry_exit_cleanup");
+}
+
+export async function requestForceExitConfirmation(): Promise<string | undefined> {
+  if (!isTauriRuntime()) return undefined;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<string>("request_force_exit_confirmation");
 }

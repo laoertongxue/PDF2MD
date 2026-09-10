@@ -8,6 +8,8 @@ import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
+from typing import NoReturn, Protocol, Self, TypedDict, TypeGuard
 
 SUPPORTED_TEXTBOOK_EXTENSIONS = {
     ".pdf",
@@ -46,6 +48,17 @@ class AtomicImportUnsupportedError(CourseStorageError):
 
 class CourseStorageChangedError(CourseStorageError):
     pass
+
+
+class SourceParser(Protocol):
+    def parse(self, file_path: str) -> str: ...
+
+
+class SourceAnchor(TypedDict):
+    citation_id: str
+    page: int
+    paragraph: int
+    text: str
 
 
 @dataclass(frozen=True)
@@ -103,7 +116,7 @@ def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
-def _raise_storage_error(error: OSError, *, hardlink: bool = False) -> None:
+def _raise_storage_error(error: OSError, *, hardlink: bool = False) -> NoReturn:
     unsupported = {
         errno.EXDEV,
         errno.EPERM,
@@ -157,10 +170,15 @@ class TextbookImportBatch:
     def directory_fd(self) -> int:
         return self._directory_fd
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         try:
             if not self._committed:
                 self.rollback(exc_value)
@@ -370,23 +388,25 @@ class TextbookImportBatch:
             temporary_name = None
         except SourceImportInputError:
             raise
-        except CourseStorageError as error:
-            self.rollback(error)
+        except CourseStorageError as course_storage_error:
+            self.rollback(course_storage_error)
             if record is None and temporary_name is not None:
-                self._unlink(temporary_name, error)
+                self._unlink(temporary_name, course_storage_error)
             raise
         except OSError as exc:
-            error = CourseStorageError("course storage could not complete import")
+            storage_error = CourseStorageError("course storage could not complete import")
             if descriptor is not None:
                 try:
                     os.close(descriptor)
                 except OSError as cleanup_error:
-                    error.add_note(f"temporary close failed: {cleanup_error!r}")
-            self.rollback(error)
+                    storage_error.add_note(f"temporary close failed: {cleanup_error!r}")
+            self.rollback(storage_error)
             if record is None and temporary_name is not None:
-                self._unlink(temporary_name, error)
-            raise error from exc
+                self._unlink(temporary_name, storage_error)
+            raise storage_error from exc
 
+        if record is None:
+            raise CourseStorageError("course storage could not complete import")
         return ImportedTextbook(
             title=resolved_source.stem,
             source_path=resolved_source,
@@ -426,7 +446,7 @@ class TextbookImportBatch:
     def finalize(self) -> None:
         self._records.clear()
 
-    def _valid_name(self, name: object) -> bool:
+    def _valid_name(self, name: object) -> TypeGuard[str]:
         return (
             isinstance(name, str)
             and name not in {"", ".", ".."}
@@ -451,7 +471,7 @@ class TextbookImportBatch:
             content = os.read(descriptor, MAX_JOURNAL_BYTES + 1)
             if len(content) > MAX_JOURNAL_BYTES:
                 raise ValueError("journal is too large")
-            payload = json.loads(content)
+            payload: object = json.loads(content)
             expected_keys = {
                 "version",
                 "final_name",
@@ -462,24 +482,33 @@ class TextbookImportBatch:
             }
             if not isinstance(payload, dict) or set(payload) != expected_keys:
                 raise ValueError("journal shape is invalid")
-            if payload["version"] != 1:
+            version: object = payload["version"]
+            final_name: object = payload["final_name"]
+            temporary_name: object = payload["temporary_name"]
+            device: object = payload["device"]
+            inode: object = payload["inode"]
+            published: object = payload["published"]
+            if version != 1:
                 raise ValueError("journal version is invalid")
-            if not self._valid_name(payload["final_name"]) or not self._valid_name(
-                payload["temporary_name"]
-            ):
+            if not self._valid_name(final_name) or not self._valid_name(temporary_name):
                 raise ValueError("journal path is invalid")
-            if type(payload["device"]) is not int or type(payload["inode"]) is not int:
+            if (
+                not isinstance(device, int)
+                or isinstance(device, bool)
+                or not isinstance(inode, int)
+                or isinstance(inode, bool)
+            ):
                 raise ValueError("journal identity is invalid")
-            if type(payload["published"]) is not bool:
+            if not isinstance(published, bool):
                 raise ValueError("journal state is invalid")
             return _PublishedRecord(
-                final_name=payload["final_name"],
-                temporary_name=payload["temporary_name"],
+                final_name=final_name,
+                temporary_name=temporary_name,
                 journal_name=journal_name,
                 journal_fd=descriptor,
-                device=payload["device"],
-                inode=payload["inode"],
-                published=payload["published"],
+                device=device,
+                inode=inode,
+                published=published,
             )
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             if descriptor is not None:
@@ -547,8 +576,8 @@ def import_textbook_file(course_root: Path, source_path: Path) -> ImportedTextbo
         return imported
 
 
-def source_anchors(text: str, namespace: str, prefix: str = "att") -> list[dict]:
-    anchors = []
+def source_anchors(text: str, namespace: str, prefix: str = "att") -> list[SourceAnchor]:
+    anchors: list[SourceAnchor] = []
     paragraph = 0
     page = 1
     for block in (part.strip() for part in text.replace("\f", "\n\n\f\n\n").split("\n\n")):
@@ -566,7 +595,7 @@ def source_anchors(text: str, namespace: str, prefix: str = "att") -> list[dict]
     return anchors
 
 
-def parse_imported_source(path: Path, parser) -> tuple[str, str, list[dict]]:
+def parse_imported_source(path: Path, parser: SourceParser) -> tuple[str, str, list[SourceAnchor]]:
     parsed_text = parser.parse(str(path))
     content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     return parsed_text, content_hash, source_anchors(parsed_text, content_hash[:12])

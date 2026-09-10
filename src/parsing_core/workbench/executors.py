@@ -1,4 +1,6 @@
-from typing import Protocol
+from __future__ import annotations
+
+from typing import Protocol, cast
 
 
 class IntensiveReadingExecutor(Protocol):
@@ -11,7 +13,7 @@ class TextExecutor(Protocol):
 
 class StubIntensiveReadingExecutor:
     def run(self, round_key: str, task_package: str) -> str:
-        topic_package = None
+        topic_package: dict[str, object] | None = None
         if round_key in {
             "alignment",
             "comparison",
@@ -24,20 +26,23 @@ class StubIntensiveReadingExecutor:
             import json
 
             try:
-                candidate = json.loads(task_package)
+                candidate: object = json.loads(task_package)
                 if isinstance(candidate, dict):
-                    if "topic_id" in candidate:
-                        topic_package = candidate
-                    elif isinstance(candidate.get("task_package"), dict):
-                        topic_package = candidate["task_package"]
+                    typed_candidate = cast(dict[str, object], candidate)
+                    if "topic_id" in typed_candidate:
+                        topic_package = typed_candidate
+                    elif isinstance(typed_candidate.get("task_package"), dict):
+                        topic_package = cast(dict[str, object], typed_candidate["task_package"])
             except json.JSONDecodeError:
                 pass
         if topic_package is not None:
             import json
 
             package = topic_package
-            labels = [chapter["source_label"] for chapter in package["source_chapters"]]
+            source_chapters = cast(list[dict[str, str]], package["source_chapters"])
+            labels = [chapter["source_label"] for chapter in source_chapters]
             refs = " ".join(labels)
+            value: dict[str, object]
             if round_key == "alignment":
                 value = {
                     "overview": f"主题总览 {refs}",
@@ -86,10 +91,14 @@ class StubIntensiveReadingExecutor:
             import json
 
             try:
-                package = json.loads(task_package)
+                decoded: object = json.loads(task_package)
+                package = cast(dict[str, object], decoded) if isinstance(decoded, dict) else {}
             except json.JSONDecodeError:
                 package = {}
-            candidates = package.get("candidates", {})
+            candidate_value = package.get("candidates", {})
+            candidates = (
+                cast(dict[str, str], candidate_value) if isinstance(candidate_value, dict) else {}
+            )
             if candidates:
                 diagrams = []
                 import re

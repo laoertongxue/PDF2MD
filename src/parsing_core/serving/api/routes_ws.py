@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from parsing_core.serving.api.deps import (
@@ -43,13 +45,37 @@ async def ws_batch(websocket: WebSocket, batch_id: str) -> None:
     events = await mgr.replay_and_subscribe(batch_id, websocket, since=since)
     if events is None:
         return
-    for ev in events:
-        await websocket.send_text(ev.model_dump_json())
 
+    receive_task: asyncio.Task[str] | None = None
     try:
-        while True:
-            await websocket.receive_text()
+        try:
+            sender_task, replay_done = mgr.start_sender(batch_id, websocket, events)
+            await replay_done.wait()
+            if sender_task.done():
+                await asyncio.gather(sender_task, return_exceptions=True)
+                return
+
+            while True:
+                receive_task = asyncio.create_task(
+                    websocket.receive_text(),
+                    name=f"pdf2md-ws-receive-{batch_id}",
+                )
+                done, _ = await asyncio.wait(
+                    {receive_task, sender_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if sender_task in done:
+                    receive_task.cancel()
+                    await asyncio.gather(receive_task, sender_task, return_exceptions=True)
+                    return
+                receive_task.result()
+        finally:
+            if receive_task is not None:
+                if not receive_task.done():
+                    receive_task.cancel()
+                await asyncio.gather(receive_task, return_exceptions=True)
+            removed_sender = mgr.unsubscribe(batch_id, websocket)
+            if removed_sender is not None:
+                await asyncio.gather(removed_sender, return_exceptions=True)
     except WebSocketDisconnect:
         pass
-    finally:
-        mgr.unsubscribe(batch_id, websocket)

@@ -3,6 +3,7 @@ import time
 
 from parsing_core.serving.models.api import WSEvent
 from parsing_core.serving.ring_buffer import EventRingBuffer
+from parsing_core.serving.scheduler import SchedulerCapacityError
 from parsing_core.serving.ws_manager import WsManager
 
 
@@ -89,3 +90,15 @@ def test_batch_gone_returns_valid_application_close_code():
     events = asyncio.run(mgr.replay_and_subscribe("b1", ws, since=-1))
     assert events is None
     assert ws.closed == (4410, "batch_gone")
+
+
+def test_subscriber_capacity_returns_stable_application_close_code():
+    class FullScheduler(StubScheduler):
+        def add_subscriber(self, batch_id, ws):
+            raise SchedulerCapacityError("SUBSCRIBER_LIMIT", "subscriber limit reached")
+
+    mgr = WsManager(FullScheduler())
+    ws = FakeWS()
+    events = asyncio.run(mgr.replay_and_subscribe("b1", ws, since=-1))
+    assert events is None
+    assert ws.closed == (4429, "subscriber_limit")

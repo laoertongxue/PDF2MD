@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import stat
@@ -139,6 +140,36 @@ def test_builds_stable_note_with_citations_slots_and_previewable_mermaid():
     validate_intensive_reading_note(first)
 
 
+def test_edit_confirmation_builds_note_from_concrete_edited_chapter_and_bound_evidence():
+    tree, confirmation, pages = _inputs()
+    edited = copy.deepcopy(confirmation["chapter"])
+    edited["title"] = "战略管理：修订版"
+    edited["page_end"] = 2
+    confirmation.update(
+        revision=2,
+        action="edit",
+        chapter=edited,
+        chapter_fingerprint=_chapter_fingerprint(edited),
+    )
+
+    note = build_intensive_reading_note(tree, confirmation, pages, source_id="source-1")
+
+    assert note["metadata"]["chapter_title"] == "战略管理：修订版"
+    assert note["metadata"]["page_start"] == 2
+    assert note["metadata"]["page_end"] == 2
+    assert "[src:source-1:p2:p2-b1]" in note["markdown"]
+    assert "[src:source-1:p3:" not in note["markdown"]
+
+
+@pytest.mark.parametrize("action", ["reject", "edit"])
+def test_note_build_rejects_reject_action_or_edit_without_concrete_chapter(action):
+    tree, confirmation, pages = _inputs()
+    confirmation.update(action=action, chapter=None, chapter_fingerprint=None)
+
+    with pytest.raises(MarkdownNoteError, match="chapter"):
+        build_intensive_reading_note(tree, confirmation, pages, source_id="source-1")
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -161,6 +192,27 @@ def test_mermaid_whitelist_is_renderable(source):
 )
 def test_mermaid_rejects_unsupported_or_dangerous_syntax(source):
     with pytest.raises(MarkdownNoteError):
+        validate_mermaid_block(source)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "UrL \t ( https://evil.example/payload )",
+        "JaVaScRiPt \t : alert(1)",
+        "DaTa \t : text/html,active-content",
+        "VbScRiPt \t : msgbox(1)",
+        "< ScRiPt >alert(1)</ sCrIpT >",
+        "< IFRAME src=evil.example >",
+        "< ObJeCt data=evil.example >",
+        "< EMBED src=evil.example >",
+        "< A href=javascript:alert(1) >open</ A >",
+    ],
+)
+def test_mermaid_rejects_active_content_case_and_whitespace_variants(payload):
+    source = f'flowchart TD\n  A["{payload}"] --> B["safe"]'
+
+    with pytest.raises(MarkdownNoteError, match="unsafe"):
         validate_mermaid_block(source)
 
 

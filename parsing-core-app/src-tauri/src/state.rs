@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 pub const MAX_STATUS_LOGS: usize = 200;
 
@@ -14,6 +15,11 @@ pub struct AppState {
     pub port: u16,
     pub session_token: String,
     pub starting: bool,
+    pub stopping: bool,
+    pub exit_stop_requested: bool,
+    pub application_exiting: bool,
+    pub exit_cleanup_in_flight: bool,
+    pub approved_exit_code: Option<i32>,
     pub running: bool,
     pub desired_running: bool,
     pub manual_stopped: bool,
@@ -23,9 +29,15 @@ pub struct AppState {
     pub logs: Vec<String>,
     pub health_failures: u8,
     pub generation: u64,
+    pub sidecar_owner_generation: Option<u64>,
     pub sidecar_child: Option<std::process::Child>,
+    pub sidecar_session_id: Option<i32>,
     pub sidecar_process_group: Option<i32>,
+    pub stopping_session_id: Option<i32>,
+    pub stopping_process_group: Option<i32>,
+    pub stop_completed: Arc<Condvar>,
     pub sidecar_log_threads: Vec<std::thread::JoinHandle<()>>,
+    pub logging_cleanup_scheduled: bool,
     pub reserved_listener: Option<std::net::TcpListener>,
 }
 
@@ -36,6 +48,21 @@ impl AppState {
             self.logs.drain(..remove);
         }
         self.logs.push(message.into());
+    }
+
+    pub fn force_exit_available(&self) -> bool {
+        self.application_exiting
+            && self
+                .error
+                .as_ref()
+                .is_some_and(|error| error.category == "shutdown")
+    }
+}
+
+pub fn lock_state(state: &Arc<Mutex<AppState>>) -> MutexGuard<'_, AppState> {
+    match state.lock() {
+        Ok(state) => state,
+        Err(error) => error.into_inner(),
     }
 }
 
@@ -49,6 +76,7 @@ pub struct StatusPayload {
     pub logs: Vec<String>,
     pub desired_running: bool,
     pub manual_stopped: bool,
+    pub force_exit_available: bool,
 }
 
 #[derive(Serialize)]

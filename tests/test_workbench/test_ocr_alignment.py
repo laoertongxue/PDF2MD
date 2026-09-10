@@ -105,6 +105,23 @@ def test_compare_observations_detects_formula_latex_conflict():
     assert {item.reason for item in result.conflicts} == {"formula_conflict"}
 
 
+@pytest.mark.parametrize("structural_type", ["formula", "table", "equation", "figure"])
+def test_compare_observations_detects_same_text_region_with_different_structure_type(
+    structural_type,
+):
+    result = compare_observations(
+        observation([block("净现值", block_type="paragraph")]),
+        observation(
+            [block("净现值", block_type=structural_type)],
+            observation_id="codex",
+            engine="codex_vision",
+        ),
+    )
+
+    assert result.status == AlignmentDecision.CONFLICT
+    assert {item.reason for item in result.conflicts} == {"structure_type_conflict"}
+
+
 def test_compare_observations_detects_table_cell_content_conflict():
     result = compare_observations(
         observation([block("表", block_type="table", table={"matrix": [["收入", "10"]]})]),
@@ -167,6 +184,33 @@ def test_page_classification_marks_complex_pages_for_upgrade():
     )
 
     assert result == AlignmentDecision.COMPLEX
+
+
+@pytest.mark.parametrize(
+    "uncertain_block",
+    [
+        block("低置信度文本", confidence=0.0),
+        block(""),
+        block("[illegible]"),
+        block("待裁决", uncertainty_reason="字符边界无法确认"),
+    ],
+)
+def test_page_classification_uses_block_uncertainty_without_uncertain_items(
+    uncertain_block,
+):
+    apple = observation([uncertain_block])
+    codex = observation(
+        [block(uncertain_block["text"], confidence=0.99)],
+        observation_id="codex",
+        engine="codex_vision",
+    )
+
+    assert classify_page(apple, codex) == AlignmentDecision.COMPLEX
+    assert needs_baidu("book-sha", 1, "complex", sample_rate=0) is True
+
+
+def test_page_classification_treats_empty_block_sets_as_uncertain():
+    assert classify_page(observation([]), observation([])) == AlignmentDecision.COMPLEX
 
 
 def test_baidu_sampling_is_stable_and_exactly_hash_based():

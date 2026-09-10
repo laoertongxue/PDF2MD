@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 
@@ -156,6 +158,8 @@ class TopicRunRecord:
     error: str
     started_at: int
     finished_at: int | None
+    error_code: str = ""
+    error_message: str = ""
 
 
 @dataclass(frozen=True)
@@ -182,6 +186,8 @@ class TopicMarkdownSyncState:
     updated_at: int
     owner_id: str
     lease_expires_at: int
+    error_code: str = ""
+    error_message: str = ""
 
 
 @dataclass(frozen=True)
@@ -209,3 +215,5 @@ class ChapterGenerationRun:
     error: str
     started_at: int
     finished_at: int | None
+    error_code: str = ""
+    error_message: str = ""

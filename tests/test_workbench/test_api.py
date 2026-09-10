@@ -66,6 +66,48 @@ def course_root(tmp_path):
     return root
 
 
+def _block_until_released(started: threading.Event, release: threading.Event) -> None:
+    started.set()
+    assert release.wait(timeout=8), "test did not release the blocking operation"
+
+
+async def _request_with_responsive_health(
+    async_client: AsyncClient,
+    request,
+    started: threading.Event,
+    release: threading.Event,
+):
+    health_responded = threading.Event()
+    watchdog_unlocked = threading.Event()
+
+    async def probe_health():
+        assert await asyncio.to_thread(started.wait, 5), "blocking operation did not start"
+        response = await async_client.get("/health")
+        health_responded.set()
+        return response
+
+    def release_if_health_cannot_respond() -> None:
+        if started.wait(timeout=5) and not health_responded.wait(timeout=5):
+            watchdog_unlocked.set()
+            release.set()
+
+    watchdog = threading.Thread(target=release_if_health_cannot_respond)
+    watchdog.start()
+    request_task = asyncio.create_task(request)
+    health_task = asyncio.create_task(probe_health())
+    try:
+        health = await asyncio.wait_for(health_task, timeout=10)
+    finally:
+        release.set()
+    response = await asyncio.wait_for(request_task, timeout=10)
+    await asyncio.to_thread(watchdog.join, 10)
+
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
+    assert not watchdog_unlocked.is_set(), "health responded only after watchdog unblocked work"
+    return response
+
+
 def confirmed_chapter(client, root):
     course = client.post(
         "/api/workbench/courses",
@@ -342,6 +384,89 @@ def test_concurrent_generate_routes_remain_publishable_across_workflow_instances
     assert (
         Path(second_response.json()["markdown_path"]).read_text(encoding="utf-8") == second_markdown
     )
+
+
+def test_ocr_workflow_first_init_constructs_single_instance_under_concurrency(
+    tmp_path, monkeypatch
+):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf_path = root / "book.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\n")
+    course, source = _registered_pdf_source(c, root, pdf_path)
+    repo = routes_workbench._repo(get_scheduler())
+    source_model = repo.get_source(source["id"])
+    course_model = repo.get_course(course["id"])
+    assert source_model is not None and course_model is not None
+    routes_workbench._OCR_WORKFLOWS.clear()
+    init_started = threading.Event()
+    release_init = threading.Event()
+    init_calls = {"count": 0}
+    created: list[object] = []
+
+    class FakeWorkflow:
+        def __init__(self, *, source_path, state_root, orchestrator_factory):
+            assert source_path == pdf_path
+            assert state_root == routes_workbench._ocr_state_root(course_model, source_model)
+            assert callable(orchestrator_factory)
+            init_calls["count"] += 1
+            created.append(self)
+            if init_calls["count"] == 1:
+                init_started.set()
+                assert release_init.wait(timeout=5)
+
+    monkeypatch.setattr(routes_workbench, "OcrWorkflow", FakeWorkflow)
+    results: list[object] = []
+
+    def load_workflow():
+        results.append(routes_workbench._ocr_workflow(source_model, course_model))
+
+    first = threading.Thread(target=load_workflow)
+    second = threading.Thread(target=load_workflow)
+    first.start()
+    assert init_started.wait(timeout=3)
+    second.start()
+    time.sleep(0.2)
+    release_init.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert init_calls["count"] == 1
+    assert len(results) == 2
+    assert results[0] is results[1] is created[0]
+
+
+def test_ocr_workflow_failed_first_construction_does_not_poison_cache(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf_path = root / "book.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\n")
+    course, source = _registered_pdf_source(c, root, pdf_path)
+    repo = routes_workbench._repo(get_scheduler())
+    source_model = repo.get_source(source["id"])
+    course_model = repo.get_course(course["id"])
+    assert source_model is not None and course_model is not None
+    routes_workbench._OCR_WORKFLOWS.clear()
+    attempts = {"count": 0}
+
+    class FailOnceWorkflow:
+        def __init__(self, *, source_path, state_root, orchestrator_factory):
+            assert source_path == pdf_path
+            assert state_root == routes_workbench._ocr_state_root(course_model, source_model)
+            assert callable(orchestrator_factory)
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError("first construction failed")
+
+    monkeypatch.setattr(routes_workbench, "OcrWorkflow", FailOnceWorkflow)
+
+    with pytest.raises(RuntimeError, match="first construction failed"):
+        routes_workbench._ocr_workflow(source_model, course_model)
+
+    assert source_model.id not in routes_workbench._OCR_WORKFLOWS
+    recovered = routes_workbench._ocr_workflow(source_model, course_model)
+    assert attempts["count"] == 2
+    assert routes_workbench._OCR_WORKFLOWS[source_model.id] is recovered
 
 
 @pytest.mark.parametrize("tree_kind", ["symlink", "foreign-ocr"])
@@ -926,6 +1051,820 @@ async def test_import_copy_does_not_block_health_on_same_event_loop(tmp_path, mo
         import_response = await import_request
 
     assert import_response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_course_creation_transaction_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    real_mkdir = Path.mkdir
+
+    def blocking_mkdir(path, *args, **kwargs):
+        if path == root:
+            _block_until_released(started, release)
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", blocking_mkdir)
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.post(
+                "/api/workbench/courses",
+                json={"title": "战略管理", "description": "", "root_dir": str(root)},
+            ),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "suffix", "expected"),
+    [
+        ("post", "/ocr", {"status": "queued"}),
+        ("get", "/ocr/status", {"status": "idle"}),
+        ("post", "/ocr/cancel", {"status": "cancelled"}),
+    ],
+)
+async def test_ocr_management_routes_do_not_block_health(
+    tmp_path, monkeypatch, method, suffix, expected
+):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf_path = root / "book.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\n")
+    _course, source = _registered_pdf_source(test_client, root, pdf_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    class FakeWorkflow:
+        def start(self):
+            return None
+
+        def status(self):
+            return expected
+
+        def cancel(self):
+            return None
+
+    def blocking_workflow(_source, _course):
+        _block_until_released(started, release)
+        return FakeWorkflow()
+
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", blocking_workflow)
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.request(method, f"/api/workbench/sources/{source['id']}{suffix}"),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
+@pytest.mark.asyncio
+async def test_ocr_chapter_confirmation_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf_path = root / "book.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\n")
+    _course, source = _registered_pdf_source(test_client, root, pdf_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingWorkflow:
+        def confirm_chapter(self, chapter_id):
+            _block_until_released(started, release)
+            return {"chapter_id": chapter_id}
+
+    monkeypatch.setattr(
+        routes_workbench,
+        "_ocr_workflow",
+        lambda _source, _course: BlockingWorkflow(),
+    )
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.post(
+                f"/api/workbench/sources/{source['id']}/ocr/chapters/confirm",
+                json={"chapter_id": "chapter-1"},
+            ),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"chapter_id": "chapter-1"}
+
+
+@pytest.mark.asyncio
+async def test_deepseek_connection_test_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    monkeypatch.setattr(routes_workbench, "_read_configured_deepseek_key", lambda: "key")
+    monkeypatch.setattr(
+        routes_workbench,
+        "load_settings",
+        lambda _path: SimpleNamespace(deepseek_model="deepseek-v4-pro"),
+    )
+
+    class BlockingDeepSeekClient:
+        def __init__(self, _api_key, _model):
+            pass
+
+        def complete(self, _prompt, *, timeout):
+            assert timeout == 30
+            _block_until_released(started, release)
+            return "ok"
+
+    monkeypatch.setattr(routes_workbench, "DeepSeekClient", BlockingDeepSeekClient)
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.post("/api/workbench/settings/deepseek/test"),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_hybrid_intensive_reading_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    _course, _source, chapter = confirmed_chapter(test_client, root)
+    started = threading.Event()
+    release = threading.Event()
+
+    monkeypatch.setattr(routes_workbench, "_read_configured_deepseek_key", lambda: "key")
+    monkeypatch.setattr(
+        routes_workbench,
+        "load_settings",
+        lambda _path: SimpleNamespace(deepseek_model="deepseek-v4-pro"),
+    )
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+    monkeypatch.setattr(routes_workbench, "CodexCliExecutor", lambda *_args: object())
+
+    stub = routes_workbench.StubIntensiveReadingExecutor()
+    blocked = {"value": False}
+
+    def blocking_hybrid_run(_executor, round_key, content):
+        if not blocked["value"]:
+            blocked["value"] = True
+            _block_until_released(started, release)
+        return stub.run(round_key, content)
+
+    monkeypatch.setattr(
+        routes_workbench.HybridIntensiveReadingExecutor,
+        "run",
+        blocking_hybrid_run,
+    )
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid"),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_ocr_note_generation_transaction_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    fixture_root = root / "blocking-ocr-fixture"
+    fixture_root.mkdir()
+    _engines, state_root, final = _complete_workflow_fixture(fixture_root, publish_note=False)
+    _pages, _tree, confirmation = _prepare_chapter_context(state_root, final)
+    _course, source = _registered_pdf_source(test_client, root, fixture_root / "book.pdf")
+    workflow = OcrWorkflow(
+        source_path=fixture_root / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_confirmation_load(_path):
+        _block_until_released(started, release)
+        raise ValueError("stop after responsiveness probe")
+
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda *_args: workflow)
+    monkeypatch.setattr(routes_workbench, "load_chapter_confirmation", blocking_confirmation_load)
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.post(
+                f"/api/workbench/sources/{source['id']}/ocr/generate",
+                json={"chapter_id": confirmation["chapter_id"]},
+            ),
+            started,
+            release,
+        )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_detect_chapters_transaction_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    course = test_client.post(
+        "/api/workbench/courses", json={"title": "战略", "root_dir": str(root)}
+    ).json()
+    source_path = root / "book.md"
+    source_path.write_text("## 第一章\n正文", encoding="utf-8")
+    source = test_client.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"file_path": str(source_path), "title": "教材", "kind": "main"},
+    ).json()
+    started = threading.Event()
+    release = threading.Event()
+    real_detect = routes_workbench.detect_chapters
+
+    def blocking_detect(markdown):
+        _block_until_released(started, release)
+        return real_detect(markdown)
+
+    monkeypatch.setattr(routes_workbench, "detect_chapters", blocking_detect)
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.post(f"/api/workbench/sources/{source['id']}/detect-chapters"),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_replace_chapter_drafts_transaction_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    course = test_client.post(
+        "/api/workbench/courses", json={"title": "战略", "root_dir": str(root)}
+    ).json()
+    source_path = root / "book.md"
+    source_path.write_text("## 第一章\n正文", encoding="utf-8")
+    source = test_client.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"file_path": str(source_path), "title": "教材", "kind": "main"},
+    ).json()
+    test_client.post(f"/api/workbench/sources/{source['id']}/detect-chapters")
+    state = test_client.get(f"/api/workbench/sources/{source['id']}/chapter-drafts").json()
+    started = threading.Event()
+    release = threading.Event()
+    real_replace = routes_workbench.WorkbenchRepository.replace_chapter_drafts
+
+    def blocking_replace(self, *args, **kwargs):
+        _block_until_released(started, release)
+        return real_replace(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        routes_workbench.WorkbenchRepository,
+        "replace_chapter_drafts",
+        blocking_replace,
+    )
+    payload = {
+        "expected_fingerprint": state["fingerprint"],
+        "chapters": [
+            {
+                "id": item["id"],
+                "title": item["title"],
+                "start": item["start"],
+                "end": item["end"],
+            }
+            for item in state["chapters"]
+        ],
+    }
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.put(f"/api/workbench/sources/{source['id']}/chapter-drafts", json=payload),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_confirm_chapter_drafts_transaction_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    course = test_client.post(
+        "/api/workbench/courses", json={"title": "战略", "root_dir": str(root)}
+    ).json()
+    source_path = root / "book.md"
+    source_path.write_text("## 第一章\n正文", encoding="utf-8")
+    source = test_client.post(
+        f"/api/workbench/courses/{course['id']}/sources",
+        json={"file_path": str(source_path), "title": "教材", "kind": "main"},
+    ).json()
+    test_client.post(f"/api/workbench/sources/{source['id']}/detect-chapters")
+    state = test_client.get(f"/api/workbench/sources/{source['id']}/chapter-drafts").json()
+    started = threading.Event()
+    release = threading.Event()
+    real_repo = routes_workbench._repo
+
+    def blocking_repo(sch):
+        _block_until_released(started, release)
+        return real_repo(sch)
+
+    monkeypatch.setattr(routes_workbench, "_repo", blocking_repo)
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.post(
+                f"/api/workbench/sources/{source['id']}/chapter-drafts/confirm",
+                json={"expected_fingerprint": state["fingerprint"]},
+            ),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_attachment_import_transaction_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    _course, _source, chapter = confirmed_chapter(test_client, root)
+    attachment = tmp_path / "case.pdf"
+    attachment.write_bytes(b"case")
+    started = threading.Event()
+    release = threading.Event()
+    real_copyfileobj = __import__("shutil").copyfileobj
+
+    def blocking_copy(source_file, target_file, *args, **kwargs):
+        _block_until_released(started, release)
+        return real_copyfileobj(source_file, target_file, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "parsing_core.workbench.source_import.shutil.copyfileobj",
+        blocking_copy,
+    )
+    monkeypatch.setattr(routes_workbench.MarkItDownAdapter, "parse", lambda *_args: "case")
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.post(
+                f"/api/workbench/chapters/{chapter['id']}/attachments/import",
+                json={"paths": [str(attachment)]},
+            ),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["get", "save"])
+async def test_settings_file_and_keychain_operations_do_not_block_health(
+    tmp_path, monkeypatch, operation
+):
+    test_client = client(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    if operation == "get":
+        real_operation = routes_workbench.load_settings
+
+        def blocking_operation(*args, **kwargs):
+            _block_until_released(started, release)
+            return real_operation(*args, **kwargs)
+
+        monkeypatch.setattr(routes_workbench, "load_settings", blocking_operation)
+        monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "sk-existing")
+        request_method = "get"
+        request_path = "/api/workbench/settings"
+        request_json = None
+    else:
+        real_operation = routes_workbench.save_settings
+
+        def blocking_operation(*args, **kwargs):
+            _block_until_released(started, release)
+            return real_operation(*args, **kwargs)
+
+        monkeypatch.setattr(routes_workbench, "save_settings", blocking_operation)
+        monkeypatch.setattr(routes_workbench, "save_secret", lambda *_args: None)
+        request_method = "post"
+        request_path = "/api/workbench/settings/deepseek"
+        request_json = {"api_key": "sk-test", "model": "deepseek-v4-pro"}
+
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        request = async_client.request(request_method, request_path, json=request_json)
+        response = await _request_with_responsive_health(
+            async_client,
+            request,
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_stub_intensive_reading_transaction_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    _course, _source, chapter = confirmed_chapter(test_client, root)
+    started = threading.Event()
+    release = threading.Event()
+
+    real_run = routes_workbench.StubIntensiveReadingExecutor.run
+    blocked = {"value": False}
+
+    def blocking_stub_run(executor, round_key, content):
+        if not blocked["value"]:
+            blocked["value"] = True
+            _block_until_released(started, release)
+        return real_run(executor, round_key, content)
+
+    monkeypatch.setattr(
+        routes_workbench.StubIntensiveReadingExecutor,
+        "run",
+        blocking_stub_run,
+    )
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.post(
+                f"/api/workbench/chapters/{chapter['id']}/run",
+                json={"executor": "stub"},
+            ),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_chapter_markdown_patch_transaction_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    _course, _source, chapter = confirmed_chapter(test_client, root)
+    test_client.post(f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"})
+    block = next(
+        item
+        for item in test_client.get(f"/api/workbench/chapters/{chapter['id']}/note-blocks").json()
+        if item["kind"] == "summary"
+    )
+    started = threading.Event()
+    release = threading.Event()
+    real_patch = routes_workbench.WorkbenchRepository.patch_chapter_note_block
+
+    def blocking_patch(self, *args, **kwargs):
+        _block_until_released(started, release)
+        return real_patch(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        routes_workbench.WorkbenchRepository,
+        "patch_chapter_note_block",
+        blocking_patch,
+    )
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.patch(
+                f"/api/workbench/chapters/{chapter['id']}/note-blocks/summary",
+                json={"body": "更新后的摘要", "expected_body": block["body"]},
+            ),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_topic_markdown_patch_transaction_does_not_block_health(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    course, _source, chapter = confirmed_chapter(test_client, root)
+    test_client.post(f"/api/workbench/chapters/{chapter['id']}/run", json={"executor": "stub"})
+    topic = test_client.post(
+        f"/api/workbench/courses/{course['id']}/topics",
+        json={"title": "战略融合", "chapter_ids": [chapter["id"]]},
+    ).json()
+    test_client.post(f"/api/workbench/courses/{course['id']}/topics/confirm")
+    test_client.post(f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"})
+    block = next(
+        item
+        for item in test_client.get(f"/api/workbench/topics/{topic['id']}/note-blocks").json()
+        if item["kind"] == "knowledge_mermaid"
+    )
+    started = threading.Event()
+    release = threading.Event()
+    real_prepare = routes_workbench.WorkbenchRepository.prepare_topic_note_block_update
+
+    def blocking_prepare(self, *args, **kwargs):
+        _block_until_released(started, release)
+        return real_prepare(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        routes_workbench.WorkbenchRepository,
+        "prepare_topic_note_block_update",
+        blocking_prepare,
+    )
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.patch(
+                f"/api/workbench/topics/{topic['id']}/note-blocks/knowledge_mermaid",
+                json={
+                    "content": "flowchart LR\nA[更新] --> B[发布]",
+                    "expected_content": block["content"],
+                },
+            ),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path_factory", "payload_factory"),
+    [
+        (
+            "get",
+            lambda course, _card: f"/api/workbench/courses/{course['id']}/cards",
+            lambda card: None,
+        ),
+        (
+            "patch",
+            lambda _course, card: f"/api/workbench/cards/{card['id']}",
+            lambda card: {
+                "title": "更新卡片",
+                "content": "更新内容",
+                "tags": ["战略"],
+                "status": "ACTIVE",
+                "expected_updated_at": card["updated_at"],
+            },
+        ),
+        (
+            "patch",
+            lambda _course, card: f"/api/workbench/cards/{card['id']}/favorite",
+            lambda card: {"favorite": True, "expected_updated_at": card["updated_at"]},
+        ),
+    ],
+)
+async def test_course_card_routes_do_not_block_health(
+    tmp_path, monkeypatch, method, path_factory, payload_factory
+):
+    test_client = client(tmp_path)
+    course, _source, chapter = confirmed_chapter(test_client, course_root(tmp_path))
+    repo = routes_workbench._repo(get_scheduler())
+    created = repo.create_card(course["id"], chapter["id"], "viewpoint", "定位", "定位是选择。")
+    card = test_client.get(f"/api/workbench/courses/{course['id']}/cards").json()[0]
+    assert card["id"] == created.id
+    started = threading.Event()
+    release = threading.Event()
+    real_repo = routes_workbench._repo
+
+    def blocking_repo(sch):
+        _block_until_released(started, release)
+        return real_repo(sch)
+
+    monkeypatch.setattr(routes_workbench, "_repo", blocking_repo)
+    transport = ASGITransport(app=test_client.app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=AUTH_HEADERS
+    ) as async_client:
+        response = await _request_with_responsive_health(
+            async_client,
+            async_client.request(
+                method,
+                path_factory(course, card),
+                json=payload_factory(card),
+            ),
+            started,
+            release,
+        )
+
+    assert response.status_code == 200
+
+
+def test_running_pipeline_rejects_confirm_and_hybrid_without_changing_lease(tmp_path):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    _course, _source, chapter = confirmed_chapter(test_client, root)
+    conn = init_db(str(tmp_path / "serve.db"))
+    apply_workbench_schema(conn)
+    repo = WorkbenchRepository(conn)
+    started = threading.Event()
+    release = threading.Event()
+    stub = routes_workbench.StubIntensiveReadingExecutor()
+
+    class BlockingExecutor:
+        def run(self, round_key, task_package):
+            if not started.is_set():
+                _block_until_released(started, release)
+            return stub.run(round_key, task_package)
+
+    pipeline = workbench_pipeline.IntensiveReadingPipeline(
+        repo,
+        BlockingExecutor(),
+        tmp_path / "real-pipeline-runs",
+        heartbeat_interval=30,
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(pipeline.run_all, chapter["id"])
+        try:
+            assert started.wait(timeout=3), "real pipeline did not acquire its RUNNING lease"
+            lease_before = repo.get_chapter_generation_lease(chapter["id"])
+
+            confirm = test_client.post(f"/api/workbench/chapters/{chapter['id']}/confirm")
+            hybrid = test_client.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+
+            assert confirm.status_code == 409
+            assert confirm.json() == {"detail": "chapter cannot be confirmed in current state"}
+            assert hybrid.status_code == 409
+            assert hybrid.json() == {
+                "detail": "chapter hybrid reading conflicts with current state"
+            }
+            assert repo.get_chapter(chapter["id"]).status == "RUNNING"
+            assert repo.get_chapter_generation_lease(chapter["id"]) == lease_before
+        finally:
+            release.set()
+        future.result(timeout=10)
+    conn.close()
+
+
+def test_run_hybrid_maps_concurrent_completion_to_safe_conflict(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    _course, _source, chapter = confirmed_chapter(test_client, root)
+    conn = init_db(str(tmp_path / "serve.db"))
+    apply_workbench_schema(conn)
+    competing_repo = WorkbenchRepository(conn)
+
+    monkeypatch.setattr(routes_workbench, "_read_configured_deepseek_key", lambda: "key")
+    monkeypatch.setattr(
+        routes_workbench,
+        "load_settings",
+        lambda _path: SimpleNamespace(deepseek_model="deepseek-v4-pro"),
+    )
+    resolution_started = threading.Event()
+    release_resolution = threading.Event()
+
+    def pause_before_pipeline_start():
+        _block_until_released(resolution_started, release_resolution)
+        return "/usr/bin/codex"
+
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", pause_before_pipeline_start)
+    monkeypatch.setattr(routes_workbench, "CodexCliExecutor", lambda *_args: object())
+    stub = routes_workbench.StubIntensiveReadingExecutor()
+    monkeypatch.setattr(
+        routes_workbench.HybridIntensiveReadingExecutor,
+        "run",
+        lambda _executor, round_key, content: stub.run(round_key, content),
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            test_client.post,
+            f"/api/workbench/chapters/{chapter['id']}/run-hybrid",
+        )
+        try:
+            assert resolution_started.wait(timeout=3)
+            competing_repo.update_chapter_status(chapter["id"], "COMPLETED")
+        finally:
+            release_resolution.set()
+        response = future.result(timeout=10)
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "chapter hybrid reading conflicts with current state"}
+    assert "CONFIRMED" not in response.text and "FAILED" not in response.text
+    assert competing_repo.get_chapter(chapter["id"]).status == "COMPLETED"
+    conn.close()
+
+
+def test_hybrid_failure_does_not_overwrite_concurrently_completed_chapter(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    _course, _source, chapter = confirmed_chapter(test_client, root)
+    conn = init_db(str(tmp_path / "serve.db"))
+    apply_workbench_schema(conn)
+    competing_repo = WorkbenchRepository(conn)
+
+    monkeypatch.setattr(routes_workbench, "_read_configured_deepseek_key", lambda: "key")
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+    monkeypatch.setattr(routes_workbench, "CodexCliExecutor", lambda *_args: object())
+
+    def complete_then_fail(_pipeline, chapter_id):
+        competing_repo.update_chapter_status(chapter_id, "COMPLETED")
+        raise routes_workbench.ChapterMarkdownSyncError()
+
+    monkeypatch.setattr(
+        routes_workbench.IntensiveReadingPipeline,
+        "run_all",
+        complete_then_fail,
+    )
+
+    response = test_client.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "course directory cannot be written"}
+    assert "private output path" not in response.text
+    assert competing_repo.get_chapter(chapter["id"]).status == "COMPLETED"
+    conn.close()
+
+
+def test_hybrid_pipeline_conflict_releases_its_owned_claim(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    _course, _source, chapter = confirmed_chapter(test_client, root)
+    conn = init_db(str(tmp_path / "serve.db"))
+    apply_workbench_schema(conn)
+    competing_repo = WorkbenchRepository(conn)
+
+    monkeypatch.setattr(routes_workbench, "_read_configured_deepseek_key", lambda: "key")
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+    monkeypatch.setattr(routes_workbench, "CodexCliExecutor", lambda *_args: object())
+
+    def start_competing_run_then_fail(_pipeline, chapter_id):
+        competing_repo.start_chapter_generation(chapter_id)
+        raise routes_workbench.ChapterGenerationConflictError(
+            "active_lease",
+            "chapter is already running",
+        )
+
+    monkeypatch.setattr(
+        routes_workbench.IntensiveReadingPipeline,
+        "run_all",
+        start_competing_run_then_fail,
+    )
+
+    response = test_client.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "chapter hybrid reading conflicts with current state"}
+    assert "private output path" not in response.text
+    assert competing_repo.get_chapter(chapter["id"]).status == "FAILED"
+    assert competing_repo.get_chapter_generation_lease(chapter["id"]) is None
+    conn.close()
 
 
 def test_import_textbooks_maps_invalid_input_to_400_without_leaking_path(tmp_path):
@@ -1867,7 +2806,14 @@ def test_topic_block_patch_sync_failure_retains_edit_and_retry_publishes(tmp_pat
     c.post(f"/api/workbench/topics/{topic['id']}/run", json={"executor": "stub"})
     source = "flowchart LR\nA[新源码] --> B[已保留]"
 
-    def fail_sync(*_args, **_kwargs):
+    def fail_sync(current_repo, current_topic_id, *, owner_id, clock, lease_ttl):
+        current_repo.finish_topic_markdown_sync(
+            current_topic_id,
+            owner_id,
+            "FAILED",
+            "/private/key sk-secret",
+            now=clock(),
+        )
         raise OSError("/private/key sk-secret")
 
     monkeypatch.setattr("parsing_core.workbench.topic_pipeline.sync_topic_markdown", fail_sync)
@@ -2060,6 +3006,10 @@ def test_run_hybrid_requires_deepseek_settings(tmp_path, monkeypatch):
 
     assert res.status_code == 400
     assert res.json()["detail"] == "deepseek api key not configured"
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
+    repo = WorkbenchRepository(init_db(str(tmp_path / "serve.db")))
+    assert repo.get_chapter_generation_lease(chapter["id"]) is None
+    repo.conn.close()
 
 
 def test_save_deepseek_settings_rejects_empty_api_key_without_writing(tmp_path, monkeypatch):
@@ -2077,14 +3027,14 @@ def test_save_deepseek_settings_rejects_empty_api_key_without_writing(tmp_path, 
         json={"api_key": "", "model": "deepseek-chat"},
     )
 
-    assert res.status_code == 400
-    assert res.json()["detail"] == "deepseek api key cannot be empty"
+    assert res.status_code == 422
     assert save_calls["count"] == 0
     assert not settings_path.exists()
 
 
 def test_save_deepseek_settings_allows_model_only_update_with_existing_key(tmp_path, monkeypatch):
     c = client(tmp_path)
+    monkeypatch.delenv("PDF2MD_BAIDU_API_KEY", raising=False)
     save_calls = {"count": 0}
     settings_path = tmp_path / "fs" / "workbench-settings.json"
 
@@ -2104,10 +3054,13 @@ def test_save_deepseek_settings_allows_model_only_update_with_existing_key(tmp_p
     assert res.json() == {
         "deepseek_model": "deepseek-v4-pro",
         "deepseek_key_masked": "sk-****-key",
+        "codex_cli_path": None,
+        "baidu_key_masked": None,
     }
     assert save_calls["count"] == 0
     assert json.loads(settings_path.read_text(encoding="utf-8")) == {
-        "deepseek_model": "deepseek-v4-pro"
+        "deepseek_model": "deepseek-v4-pro",
+        "codex_cli_path": None,
     }
 
 
@@ -2129,6 +3082,7 @@ def test_run_hybrid_rejects_blank_deepseek_key_without_running_pipeline(tmp_path
     assert res.status_code == 400
     assert res.json()["detail"] == "deepseek api key not configured"
     assert calls["run_all"] == 0
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
 
 
 def test_run_hybrid_missing_codex_returns_400_without_running_pipeline(tmp_path, monkeypatch):
@@ -2152,9 +3106,59 @@ def test_run_hybrid_missing_codex_returns_400_without_running_pipeline(tmp_path,
     res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
 
     assert res.status_code == 400
-    assert res.json()["detail"] == "codex cli not found"
+    assert res.json()["detail"] == "codex cli is not available"
     assert calls["run_all"] == 0
-    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "CONFIRMED"
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
+    repo = WorkbenchRepository(init_db(str(tmp_path / "serve.db")))
+    assert repo.get_chapter_generation_lease(chapter["id"]) is None
+    repo.conn.close()
+
+
+def test_hybrid_claim_precedes_configuration_and_loser_stays_conflict(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "sk-test")
+    started = threading.Event()
+    release = threading.Event()
+    calls = {"count": 0}
+
+    def resolve_after_claim():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            _block_until_released(started, release)
+            raise routes_workbench.CodexCliError(f"missing {tmp_path}/private/codex")
+        return "/usr/bin/codex"
+
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", resolve_after_claim)
+    monkeypatch.setattr(routes_workbench, "CodexCliExecutor", lambda *_args: object())
+    stub = routes_workbench.StubIntensiveReadingExecutor()
+    monkeypatch.setattr(
+        routes_workbench.HybridIntensiveReadingExecutor,
+        "run",
+        lambda _executor, round_key, content: stub.run(round_key, content),
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        winner = executor.submit(
+            c.post,
+            f"/api/workbench/chapters/{chapter['id']}/run-hybrid",
+        )
+        assert started.wait(timeout=3)
+        loser = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
+        release.set()
+        failed_winner = winner.result(timeout=10)
+
+    assert loser.status_code == 409
+    assert loser.json() == {"detail": "chapter hybrid reading conflicts with current state"}
+    assert failed_winner.status_code == 400
+    assert failed_winner.json() == {"detail": "codex cli is not available"}
+    assert str(tmp_path) not in failed_winner.text
+    assert calls["count"] == 1
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
+    repo = WorkbenchRepository(init_db(str(tmp_path / "serve.db")))
+    assert repo.get_chapter_generation_lease(chapter["id"]) is None
+    repo.conn.close()
 
 
 @pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
@@ -2165,6 +3169,7 @@ def test_run_hybrid_pipeline_failure_marks_chapter_failed(tmp_path, monkeypatch,
 
     monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
     monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+    monkeypatch.setattr(routes_workbench, "CodexCliExecutor", lambda *_args: object())
 
     def fake_run_all(self, chapter_id):
         raise error_type("boom")
@@ -2174,7 +3179,8 @@ def test_run_hybrid_pipeline_failure_marks_chapter_failed(tmp_path, monkeypatch,
     res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
 
     assert res.status_code == 500
-    assert res.json()["detail"] == "boom"
+    assert res.json()["detail"] == "hybrid intensive reading failed"
+    assert "boom" not in res.text
     assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
 
 
@@ -2186,7 +3192,7 @@ def test_run_hybrid_pipeline_failure_marks_chapter_failed(tmp_path, monkeypatch,
         ("run-hybrid", None, "FAILED"),
     ],
 )
-def test_chapter_run_maps_markdown_sync_errors_to_safe_400(
+def test_chapter_run_sync_failure_is_retryable_without_rerunning_executor(
     tmp_path,
     monkeypatch,
     endpoint,
@@ -2203,26 +3209,102 @@ def test_chapter_run_maps_markdown_sync_errors_to_safe_400(
 
     monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
     monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
-    stub = routes_workbench.StubIntensiveReadingExecutor()
-    monkeypatch.setattr(
-        routes_workbench.HybridIntensiveReadingExecutor,
-        "run",
-        lambda self, round_key, content: stub.run(round_key, content),
-    )
+    monkeypatch.setattr(routes_workbench, "CodexCliExecutor", lambda *_args: object())
+    run_calls = {"count": 0}
+    real_stub_run = routes_workbench.StubIntensiveReadingExecutor.run
+
+    def counting_stub_run(self, round_key, content):
+        run_calls["count"] += 1
+        return real_stub_run(self, round_key, content)
+
+    monkeypatch.setattr(routes_workbench.StubIntensiveReadingExecutor, "run", counting_stub_run)
+    if endpoint == "run-hybrid":
+        stub = routes_workbench.StubIntensiveReadingExecutor()
+
+        def counting_hybrid_run(self, round_key, content):
+            run_calls["count"] += 1
+            return stub.run(round_key, content)
+
+        monkeypatch.setattr(
+            routes_workbench.HybridIntensiveReadingExecutor,
+            "run",
+            counting_hybrid_run,
+        )
 
     leaked_path = root / "private" / "intensive-note.md"
+    attempts = {"count": 0}
+    real_publish = workbench_pipeline.publish_chapter_markdown
 
-    def fail_sync(repo, chapter_id):
-        raise OSError(f"cannot write {leaked_path}")
+    def fail_sync(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise OSError(f"cannot write {leaked_path}")
+        return real_publish(*args, **kwargs)
 
-    monkeypatch.setattr(workbench_pipeline, "sync_chapter_markdown", fail_sync)
+    monkeypatch.setattr(workbench_pipeline, "publish_chapter_markdown", fail_sync)
 
-    res = c.post(f"/api/workbench/chapters/{chapter['id']}/{endpoint}", json=payload)
+    first = c.post(f"/api/workbench/chapters/{chapter['id']}/{endpoint}", json=payload)
 
-    assert res.status_code == 400
-    assert res.json()["detail"] == "course directory cannot be written"
-    assert str(root) not in res.text
-    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
+    assert first.status_code == 400
+    assert first.json()["detail"] == "course directory cannot be written"
+    assert str(root) not in first.text
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "SYNC_PENDING"
+
+    conn = init_db(str(tmp_path / "serve.db"))
+    apply_workbench_schema(conn)
+    repo = WorkbenchRepository(conn)
+    try:
+        assert repo.get_chapter_generation_lease(chapter["id"]) is None
+        assert repo.pending_chapter_markdown_sync(chapter["id"]) is not None
+    finally:
+        conn.close()
+
+    first_call_count = run_calls["count"]
+    second = c.post(f"/api/workbench/chapters/{chapter['id']}/{endpoint}", json=payload)
+
+    assert second.status_code == 200
+    assert second.json()["status"] == "COMPLETED"
+    assert run_calls["count"] == first_call_count
+    assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "COMPLETED"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "detail"),
+    [
+        ("run", {"executor": "stub"}, "chapter reading conflicts with current state"),
+        ("run-hybrid", None, "chapter hybrid reading conflicts with current state"),
+    ],
+)
+def test_generation_conflicts_map_to_409_even_after_winner_fails(
+    tmp_path, monkeypatch, endpoint, payload, detail
+):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    conn = init_db(str(tmp_path / "serve.db"))
+    apply_workbench_schema(conn)
+    competing_repo = WorkbenchRepository(conn)
+
+    if endpoint == "run-hybrid":
+        monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "sk-test")
+        monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+        monkeypatch.setattr(routes_workbench, "CodexCliExecutor", lambda *_args: object())
+
+    def lose_to_failed_winner(_pipeline, chapter_id):
+        competing_repo.update_chapter_status(chapter_id, "FAILED")
+        raise routes_workbench.ChapterGenerationConflictError(
+            "active_lease",
+            "chapter generation already has an active lease",
+        )
+
+    monkeypatch.setattr(routes_workbench.IntensiveReadingPipeline, "run_all", lose_to_failed_winner)
+
+    response = c.post(f"/api/workbench/chapters/{chapter['id']}/{endpoint}", json=payload)
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": detail}
+    assert competing_repo.get_chapter(chapter["id"]).status == "FAILED"
+    conn.close()
 
 
 def test_run_hybrid_failed_chapter_can_rerun_to_completed(tmp_path, monkeypatch):
@@ -2233,12 +3315,22 @@ def test_run_hybrid_failed_chapter_can_rerun_to_completed(tmp_path, monkeypatch)
 
     monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
     monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+    monkeypatch.setattr(routes_workbench, "CodexCliExecutor", lambda *_args: object())
+    stub = routes_workbench.StubIntensiveReadingExecutor()
+    monkeypatch.setattr(
+        routes_workbench.HybridIntensiveReadingExecutor,
+        "run",
+        lambda _executor, round_key, content: stub.run(round_key, content),
+    )
+
+    real_run_all = routes_workbench.IntensiveReadingPipeline.run_all
 
     def fake_run_all(self, chapter_id):
         calls["count"] += 1
         if calls["count"] == 1:
             raise RuntimeError("boom")
         assert chapter_id == chapter["id"]
+        return real_run_all(self, chapter_id)
 
     monkeypatch.setattr(routes_workbench.IntensiveReadingPipeline, "run_all", fake_run_all)
 
@@ -2259,10 +3351,12 @@ def test_run_hybrid_completed_chapter_returns_conflict(tmp_path, monkeypatch):
 
     monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-test")
     monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda: "/usr/bin/codex")
+    monkeypatch.setattr(routes_workbench, "CodexCliExecutor", lambda *_args: object())
+    stub = routes_workbench.StubIntensiveReadingExecutor()
     monkeypatch.setattr(
-        routes_workbench.IntensiveReadingPipeline,
-        "run_all",
-        lambda self, chapter_id: None,
+        routes_workbench.HybridIntensiveReadingExecutor,
+        "run",
+        lambda _executor, round_key, content: stub.run(round_key, content),
     )
 
     first = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
@@ -2270,7 +3364,37 @@ def test_run_hybrid_completed_chapter_returns_conflict(tmp_path, monkeypatch):
 
     assert first.status_code == 200
     assert second.status_code == 409
-    assert second.json()["detail"] == "chapter must be CONFIRMED or FAILED before hybrid reading"
+    assert second.json()["detail"] == "chapter hybrid reading conflicts with current state"
+
+
+def test_run_stub_failed_chapter_can_retry_to_completed(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    _, _, chapter = confirmed_chapter(c, root)
+    real_run = routes_workbench.StubIntensiveReadingExecutor.run
+    calls = {"count": 0}
+
+    def fail_once(executor, round_key, content):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("first stub run failed")
+        return real_run(executor, round_key, content)
+
+    monkeypatch.setattr(routes_workbench.StubIntensiveReadingExecutor, "run", fail_once)
+
+    first = c.post(
+        f"/api/workbench/chapters/{chapter['id']}/run",
+        json={"executor": "stub"},
+    )
+    second = c.post(
+        f"/api/workbench/chapters/{chapter['id']}/run",
+        json={"executor": "stub"},
+    )
+
+    assert first.status_code == 500
+    assert first.json() == {"detail": "intensive reading failed"}
+    assert second.status_code == 200
+    assert second.json()["status"] == "COMPLETED"
 
 
 def test_detect_chapters_replaces_old_chapters_after_source_changes(tmp_path):
@@ -2365,6 +3489,7 @@ def test_detect_chapters_falls_back_for_dot_dot_source_dir(tmp_path):
 
 def test_workbench_settings_save_and_get(tmp_path, monkeypatch):
     c = client(tmp_path)
+    monkeypatch.delenv("PDF2MD_BAIDU_API_KEY", raising=False)
     saved = {}
 
     def fake_save_secret(service, account, secret):
@@ -2389,6 +3514,8 @@ def test_workbench_settings_save_and_get(tmp_path, monkeypatch):
     assert post_res.json() == {
         "deepseek_model": "deepseek-v4-pro",
         "deepseek_key_masked": "sk-****wxyz",
+        "codex_cli_path": None,
+        "baidu_key_masked": None,
     }
 
     get_res = c.get("/api/workbench/settings")
@@ -2397,17 +3524,23 @@ def test_workbench_settings_save_and_get(tmp_path, monkeypatch):
     assert get_res.json() == {
         "deepseek_model": "deepseek-v4-pro",
         "deepseek_key_masked": "sk-****wxyz",
+        "codex_cli_path": None,
+        "baidu_key_masked": None,
     }
 
     settings_path = tmp_path / "fs" / "workbench-settings.json"
     settings_text = settings_path.read_text(encoding="utf-8")
     assert "api_key" not in settings_text
     assert "abcdefghijklmnopqrstuvwxyz" not in settings_text
-    assert json.loads(settings_text) == {"deepseek_model": "deepseek-v4-pro"}
+    assert json.loads(settings_text) == {
+        "deepseek_model": "deepseek-v4-pro",
+        "codex_cli_path": None,
+    }
 
 
 def test_workbench_settings_get_without_key_returns_none(tmp_path, monkeypatch):
     c = client(tmp_path)
+    monkeypatch.delenv("PDF2MD_BAIDU_API_KEY", raising=False)
 
     def fake_read_secret(service, account):
         raise KeychainError("missing")
@@ -2420,6 +3553,8 @@ def test_workbench_settings_get_without_key_returns_none(tmp_path, monkeypatch):
     assert res.json() == {
         "deepseek_model": "deepseek-v4-pro",
         "deepseek_key_masked": None,
+        "codex_cli_path": None,
+        "baidu_key_masked": None,
     }
 
 
@@ -2453,6 +3588,7 @@ def test_workbench_settings_test_connection(tmp_path, monkeypatch):
     settings_path = tmp_path / "fs" / "workbench-settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps({"deepseek_model": "deepseek-v4-pro"}), encoding="utf-8")
+    settings_path.chmod(0o600)
 
     monkeypatch.setattr(
         routes_workbench,

@@ -1,11 +1,32 @@
+from __future__ import annotations
+
 import sqlite3
 import threading
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
+from typing import Concatenate, Protocol, cast
 from uuid import uuid4
+
+
+class _LockedRepository(Protocol):
+    _connection_lock: threading.RLock
+
+
+class _AtomicRepository(_LockedRepository, Protocol):
+    conn: sqlite3.Connection
+
+
+class _ConnectionFinalizer(Protocol):
+    @property
+    def alive(self) -> bool: ...
+
+    def __call__(self, _info: object = None) -> object | None: ...
+
+
+type _SqliteValue = str | bytes | int | float | None
 
 
 @dataclass
@@ -22,7 +43,7 @@ _connection_locks: dict[int, _ConnectionLockEntry] = {}
 def register_connection_lock(
     owner: object,
     conn: sqlite3.Connection,
-) -> tuple[threading.RLock, weakref.finalize]:
+) -> tuple[threading.RLock, _ConnectionFinalizer]:
     key = id(conn)
     with _connection_locks_guard:
         entry = _connection_locks.get(key)
@@ -34,7 +55,7 @@ def register_connection_lock(
         entry.users += 1
 
     finalizer = weakref.finalize(owner, _unregister_connection_lock, key)
-    return entry.lock, finalizer
+    return entry.lock, cast(_ConnectionFinalizer, finalizer)
 
 
 def _unregister_connection_lock(key: int) -> None:
@@ -49,18 +70,21 @@ def _unregister_connection_lock(key: int) -> None:
             del _connection_locks[key]
 
 
-def lock_repository_methods(cls):
+def lock_repository_methods[C](cls: type[C]) -> type[C]:
     for name, method in vars(cls).items():
         if name.startswith("_") or not callable(method):
             continue
-        setattr(cls, name, _locked_method(method))
+        setattr(cls, name, _locked_method(cast(Callable[..., object], method)))
     return cls
 
 
-def atomic_repository_methods(method_names: tuple[str, ...]):
-    def decorate(cls):
+def atomic_repository_methods[C](
+    method_names: tuple[str, ...],
+) -> Callable[[type[C]], type[C]]:
+    def decorate(cls: type[C]) -> type[C]:
         for name in method_names:
-            setattr(cls, name, _atomic_method(getattr(cls, name)))
+            method = cast(Callable[..., object], getattr(cls, name))
+            setattr(cls, name, _atomic_method(method))
         return cls
 
     return decorate
@@ -72,7 +96,7 @@ def atomic_connection(
     lock: threading.RLock,
     *,
     immediate: bool = False,
-    nested_write: tuple[str, tuple] | None = None,
+    nested_write: tuple[str, tuple[_SqliteValue, ...]] | None = None,
 ) -> Iterator[None]:
     with lock:
         nested = conn.in_transaction
@@ -105,7 +129,7 @@ def atomic_connection(
 
 
 def _rollback_savepoint(conn: sqlite3.Connection, savepoint: str) -> None:
-    errors = []
+    errors: list[BaseException] = []
     try:
         conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
     except BaseException as error:
@@ -120,19 +144,24 @@ def _rollback_savepoint(conn: sqlite3.Connection, savepoint: str) -> None:
         raise BaseExceptionGroup("savepoint cleanup failed", errors)
 
 
-def _locked_method(method):
+def _locked_method[**P, R](
+    method: Callable[Concatenate[_LockedRepository, P], R],
+) -> Callable[Concatenate[_LockedRepository, P], R]:
     @wraps(method)
-    def locked(self, *args, **kwargs):
+    def locked(self: _LockedRepository, /, *args: P.args, **kwargs: P.kwargs) -> R:
         with self._connection_lock:
             return method(self, *args, **kwargs)
 
     return locked
 
 
-def _atomic_method(method):
+def _atomic_method[**P, R](
+    method: Callable[Concatenate[_AtomicRepository, P], R],
+) -> Callable[Concatenate[_AtomicRepository, P], R]:
     @wraps(method)
-    def atomic(self, *args, **kwargs):
-        with atomic_connection(self.conn, self._connection_lock):
+    def atomic(self: _AtomicRepository, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        immediate = not self.conn.in_transaction
+        with atomic_connection(self.conn, self._connection_lock, immediate=immediate):
             return method(self, *args, **kwargs)
 
     return atomic

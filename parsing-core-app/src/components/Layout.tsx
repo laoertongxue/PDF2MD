@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   BookOpen,
@@ -11,11 +11,19 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  Power,
+  RefreshCw,
   Search,
   Settings as SettingsIcon,
   Sparkles,
 } from "lucide-react";
-import { getServiceStatus, retryService, type ServiceStatus } from "../api/runtime";
+import {
+  getServiceStatus,
+  requestForceExitConfirmation,
+  retryExitCleanup,
+  retryService,
+  type ServiceStatus,
+} from "../api/runtime";
 import { useWorkbenchStore } from "../store/useWorkbenchStore";
 import SourceChapterTree from "./workbench/SourceChapterTree";
 import { createSourceChapterGroups } from "./workbench/sourceChapterGroups";
@@ -28,7 +36,77 @@ const nav = [
   { to: "/workbench/settings", label: "精读设置", icon: SettingsIcon },
 ];
 
-export function ServiceStatusView({ service, onRetry }: { service: ServiceStatus; onRetry: () => void }) {
+const SERVICE_STATUS_POLL_MS = 1500;
+const SERVICE_STATUS_TIMEOUT_MS = 5000;
+const SERVICE_STATUS_IN_FLIGHT_LIMIT = 2;
+const SERVICE_STATUS_LIMIT_MESSAGE = "服务状态查询持续无响应；已有后台查询仍在执行，请重启应用";
+const SERVICE_RETRY_UI_TIMEOUT_MS = 10_000;
+const SERVICE_RETRY_PENDING_MESSAGE = "重试仍在执行；若长时间无响应，请重启应用";
+
+export interface WorkbenchOutletContext {
+  coursesLoading: boolean;
+  coursesError: string | null;
+  serviceUnavailable: boolean;
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message;
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string" &&
+    error.message
+  )
+    return error.message;
+  if (typeof error === "string" && error) return error;
+  return fallback;
+}
+
+function withTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error("服务状态查询超时")), timeoutMs);
+    request.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+}
+
+export function ServiceStatusView({
+  service,
+  onRetry,
+  retrying = false,
+  onRetryExitCleanup,
+  onForceQuit,
+  exitCleanupRetrying = false,
+  forceQuitting = false,
+  exitCleanupError = null,
+  forceQuitError = null,
+}: {
+  service: ServiceStatus;
+  onRetry: () => void;
+  retrying?: boolean;
+  onRetryExitCleanup?: () => void;
+  onForceQuit?: () => void;
+  exitCleanupRetrying?: boolean;
+  forceQuitting?: boolean;
+  exitCleanupError?: string | null;
+  forceQuitError?: string | null;
+}) {
+  const forceExitAvailable = service.forceExitAvailable === true;
+  const exitActionPending = exitCleanupRetrying || forceQuitting;
   return (
     <div className="flex items-start gap-2 text-xs text-zinc-500" aria-live="polite">
       <span className="relative flex h-2 w-2">
@@ -36,35 +114,78 @@ export function ServiceStatusView({ service, onRetry }: { service: ServiceStatus
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
         )}
         <span
-          className={`relative inline-flex h-2 w-2 rounded-full ${service.state === "running" ? "bg-emerald-500" : service.state === "failed" || service.state === "offline" ? "bg-red-500" : "bg-amber-500"}`}
+          className={`relative inline-flex h-2 w-2 rounded-full ${service.state === "running" && !forceExitAvailable ? "bg-emerald-500" : forceExitAvailable || service.state === "failed" || service.state === "offline" ? "bg-red-500" : "bg-amber-500"}`}
         />
       </span>
       <div className="min-w-0">
         <p>
-          {service.state === "running"
-            ? `服务运行中 :${service.port}`
-            : service.state === "offline"
-              ? "本地服务不可用"
-              : service.state === "failed"
-                ? "服务启动失败"
-                : service.state === "restarting"
-                  ? "服务正在重启"
-                  : "服务正在启动"}
+          {forceExitAvailable
+            ? "退出清理失败 / Shutdown Cleanup Failed"
+            : service.state === "running"
+              ? `服务运行中 :${service.port}`
+              : service.state === "offline"
+                ? "本地服务不可用"
+                : service.state === "failed"
+                  ? "服务启动失败"
+                  : service.state === "restarting"
+                    ? "服务正在重启"
+                    : "服务正在启动"}
         </p>
-        {service.state === "offline" && (
+        {service.state === "offline" && !forceExitAvailable && (
           <p className="mt-1 break-words text-red-600">{service.error?.message ?? "请启动本地服务后重试"}</p>
         )}
-        {service.state === "failed" && (
+        {(service.state === "failed" || forceExitAvailable) && (
           <>
             <p className="mt-1 break-words text-red-600">{service.error?.message ?? "请查看运行日志"}</p>
             {service.logPath && <p className="mt-1 break-all text-zinc-400">日志：{service.logPath}</p>}
-            <button
-              type="button"
-              onClick={onRetry}
-              className="mt-2 font-medium text-emerald-700 hover:text-emerald-800"
-            >
-              重试启动
-            </button>
+            {forceExitAvailable ? (
+              <>
+                <p className="mt-1 break-words text-zinc-500">
+                  本地服务未完全退出，请先重试清理；强制退出仍需确认。 / Cleanup is incomplete; force quit requires
+                  confirmation.
+                </p>
+                <div className="mt-2 flex flex-col items-start gap-2">
+                  <button
+                    type="button"
+                    onClick={onRetryExitCleanup}
+                    disabled={exitActionPending || !onRetryExitCleanup}
+                    className="inline-flex items-center gap-1 font-medium text-emerald-700 hover:text-emerald-800 disabled:cursor-wait disabled:text-zinc-400"
+                  >
+                    <RefreshCw size={12} className={exitCleanupRetrying ? "animate-spin" : undefined} />
+                    {exitCleanupRetrying ? "正在清理 / Cleaning Up" : "再次清理并退出 / Retry Cleanup & Exit"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onForceQuit}
+                    disabled={exitActionPending || !onForceQuit}
+                    className="inline-flex items-center gap-1 font-medium text-red-700 hover:text-red-800 disabled:cursor-wait disabled:text-zinc-400"
+                  >
+                    <Power size={12} className={forceQuitting ? "animate-pulse" : undefined} />
+                    {forceQuitting ? "等待确认 / Awaiting Confirmation" : "强制退出 / Force Quit"}
+                  </button>
+                </div>
+                {exitCleanupError && (
+                  <p role="alert" className="mt-2 break-words text-red-600">
+                    {exitCleanupError}
+                  </p>
+                )}
+                {forceQuitError && (
+                  <p role="alert" className="mt-2 break-words text-red-600">
+                    {forceQuitError}
+                  </p>
+                )}
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={onRetry}
+                disabled={retrying}
+                className="mt-2 inline-flex items-center gap-1 font-medium text-emerald-700 hover:text-emerald-800 disabled:cursor-wait disabled:text-zinc-400"
+              >
+                <RefreshCw size={12} className={retrying ? "animate-spin" : undefined} />
+                {retrying ? "正在重试" : "重试启动"}
+              </button>
+            )}
           </>
         )}
       </div>
@@ -74,6 +195,35 @@ export function ServiceStatusView({ service, onRetry }: { service: ServiceStatus
 
 export default function Layout() {
   const [service, setService] = useState<ServiceStatus>({ state: "starting", port: 0 });
+  const [courseLoad, setCourseLoad] = useState<WorkbenchOutletContext>({
+    coursesLoading: true,
+    coursesError: null,
+    serviceUnavailable: false,
+  });
+  const [courseLoadAttempt, setCourseLoadAttempt] = useState(0);
+  const [serviceRetrying, setServiceRetrying] = useState(false);
+  const [exitCleanupRetrying, setExitCleanupRetrying] = useState(false);
+  const [forceQuitting, setForceQuitting] = useState(false);
+  const [exitCleanupError, setExitCleanupError] = useState<string | null>(null);
+  const [forceQuitError, setForceQuitError] = useState<string | null>(null);
+  const [courseDataError, setCourseDataError] = useState<{ courseId: string; message: string } | null>(null);
+  const [courseDataLoadAttempt, setCourseDataLoadAttempt] = useState(0);
+  const mounted = useRef(false);
+  const serviceStatusAttempt = useRef<{ request: Promise<ServiceStatus>; generation: number } | null>(null);
+  const serviceStatusRawRequests = useRef(new Set<Promise<ServiceStatus>>());
+  const serviceStatusSequence = useRef(0);
+  const latestAppliedServiceStatus = useRef(0);
+  const serviceStatusGeneration = useRef(0);
+  const serviceRetryRequest = useRef<Promise<void> | null>(null);
+  const serviceRetryTimedOut = useRef(false);
+  const exitActionInFlight = useRef<"cleanup" | "force-quit" | null>(null);
+  const serviceDataSession = useRef<{
+    state: ServiceStatus["state"];
+    generation: number;
+    controller: AbortController | null;
+  }>({ state: "starting", generation: 0, controller: null });
+  const courseLoadRequest = useRef<{ generation: number; request: Promise<void> } | null>(null);
+  const courseDataLoadRequest = useRef<{ courseId: string; generation: number; request: Promise<void> } | null>(null);
   const [primaryOpen, setPrimaryOpen] = useState(() => window.innerWidth >= 1280);
   const [libraryOpen, setLibraryOpen] = useState(() => window.innerWidth >= 1024);
   const [search, setSearch] = useState("");
@@ -81,16 +231,96 @@ export default function Layout() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    const refresh = () =>
-      void getServiceStatus()
-        .then(setService)
-        .catch((error) =>
-          setService({ state: "failed", port: 0, error: { category: "status", message: String(error) } }),
-        );
-    refresh();
-    const timer = window.setInterval(refresh, 1500);
-    return () => window.clearInterval(timer);
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    let refreshing = false;
+    const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      let attempt = serviceStatusAttempt.current;
+      try {
+        if (!attempt) {
+          if (serviceStatusRawRequests.current.size >= SERVICE_STATUS_IN_FLIGHT_LIMIT) {
+            throw new Error(SERVICE_STATUS_LIMIT_MESSAGE);
+          }
+
+          const generation = serviceStatusGeneration.current;
+          const sequence = ++serviceStatusSequence.current;
+          const rawRequest = getServiceStatus();
+          serviceStatusRawRequests.current.add(rawRequest);
+          void rawRequest.then(
+            (status) => {
+              serviceStatusRawRequests.current.delete(rawRequest);
+              if (
+                mounted.current &&
+                serviceRetryRequest.current === null &&
+                generation === serviceStatusGeneration.current &&
+                sequence >= latestAppliedServiceStatus.current
+              ) {
+                latestAppliedServiceStatus.current = sequence;
+                setService(status);
+              }
+            },
+            () => {
+              serviceStatusRawRequests.current.delete(rawRequest);
+            },
+          );
+          attempt = {
+            request: withTimeout(rawRequest, SERVICE_STATUS_TIMEOUT_MS),
+            generation,
+          };
+          serviceStatusAttempt.current = attempt;
+        }
+        await attempt.request;
+      } catch (error) {
+        if (
+          active &&
+          serviceRetryRequest.current === null &&
+          (attempt?.generation ?? serviceStatusGeneration.current) === serviceStatusGeneration.current
+        ) {
+          setService({
+            state: "failed",
+            port: 0,
+            error: { category: "status", message: errorMessage(error, "服务状态查询失败") },
+          });
+        }
+      } finally {
+        if (attempt && serviceStatusAttempt.current === attempt) serviceStatusAttempt.current = null;
+        refreshing = false;
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, SERVICE_STATUS_POLL_MS);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const current = serviceDataSession.current;
+    if (
+      current.state === service.state &&
+      (service.state !== "running" || (current.controller !== null && !current.controller.signal.aborted))
+    ) {
+      return;
+    }
+
+    current.controller?.abort(new DOMException("Service generation replaced", "AbortError"));
+    const next = {
+      state: service.state,
+      generation: current.generation + 1,
+      controller: service.state === "running" ? new AbortController() : null,
+    };
+    serviceDataSession.current = next;
+  }, [service.state]);
+
   const { pathname } = useLocation();
   const isWorkbench = pathname.startsWith("/workbench");
   const {
@@ -112,16 +342,237 @@ export default function Layout() {
   const searchResults = buildSearchResults({ courses, sources, chapters, cardsByCourse }, search);
 
   useEffect(() => {
-    loadCourses().catch(() => undefined);
-  }, [loadCourses]);
+    if (service.state !== "running") {
+      const serviceUnavailable = service.state === "failed" || service.state === "offline";
+      setCourseLoad({
+        coursesLoading: !serviceUnavailable,
+        coursesError: null,
+        serviceUnavailable,
+      });
+      return;
+    }
+    const session = serviceDataSession.current;
+    if (session.state !== "running" || !session.controller) return;
+    const generation = session.generation;
+    const signal = session.controller.signal;
+    let active = true;
+    setCourseLoad({ coursesLoading: true, coursesError: null, serviceUnavailable: false });
+
+    const refreshCourses = async () => {
+      const pending = courseLoadRequest.current;
+      const entry =
+        pending?.generation === generation
+          ? pending
+          : {
+              generation,
+              request: Promise.resolve().then(() => loadCourses(signal)),
+            };
+      courseLoadRequest.current = entry;
+      try {
+        await entry.request;
+        if (active && serviceDataSession.current.generation === generation && !signal.aborted) {
+          setCourseLoad({ coursesLoading: false, coursesError: null, serviceUnavailable: false });
+        }
+      } catch (error) {
+        if (active && serviceDataSession.current.generation === generation && !signal.aborted) {
+          setCourseLoad({
+            coursesLoading: false,
+            coursesError: errorMessage(error, "加载课程失败"),
+            serviceUnavailable: false,
+          });
+        }
+      } finally {
+        if (courseLoadRequest.current === entry) courseLoadRequest.current = null;
+      }
+    };
+
+    void refreshCourses();
+    return () => {
+      active = false;
+    };
+  }, [courseLoadAttempt, loadCourses, service.state]);
 
   useEffect(() => {
-    if (!selectedCourseId) return;
-    Promise.all([
-      loadSources(selectedCourseId).then((items) => Promise.all(items.map((source) => loadChapters(source.id)))),
-      loadCourseCards(selectedCourseId),
-    ]).catch(() => undefined);
-  }, [loadChapters, loadCourseCards, loadSources, selectedCourseId]);
+    if (!selectedCourseId || service.state !== "running") {
+      setCourseDataError(null);
+      return;
+    }
+    const session = serviceDataSession.current;
+    if (session.state !== "running" || !session.controller) return;
+    const generation = session.generation;
+    const signal = session.controller.signal;
+    let active = true;
+    setCourseDataError(null);
+
+    const refreshCourseData = async () => {
+      const pending = courseDataLoadRequest.current;
+      const entry =
+        pending?.courseId === selectedCourseId && pending.generation === generation
+          ? pending
+          : {
+              courseId: selectedCourseId,
+              generation,
+              request: Promise.resolve()
+                .then(() =>
+                  Promise.all([
+                    loadSources(selectedCourseId, signal).then((items) => {
+                      throwIfAborted(signal);
+                      return Promise.all(items.map((source) => loadChapters(source.id, signal)));
+                    }),
+                    loadCourseCards(selectedCourseId, signal),
+                  ]),
+                )
+                .then(() => undefined),
+            };
+      courseDataLoadRequest.current = entry;
+
+      try {
+        await entry.request;
+        if (active && serviceDataSession.current.generation === generation && !signal.aborted) {
+          setCourseDataError(null);
+        }
+      } catch (error) {
+        if (active && serviceDataSession.current.generation === generation && !signal.aborted) {
+          setCourseDataError({
+            courseId: selectedCourseId,
+            message: errorMessage(error, "课程资料加载失败"),
+          });
+        }
+      } finally {
+        if (courseDataLoadRequest.current?.request === entry.request) courseDataLoadRequest.current = null;
+      }
+    };
+
+    void refreshCourseData();
+    return () => {
+      active = false;
+    };
+  }, [courseDataLoadAttempt, loadChapters, loadCourseCards, loadSources, selectedCourseId, service.state]);
+
+  const handleServiceRetry = () => {
+    if (serviceRetryRequest.current) {
+      serviceRetryTimedOut.current = true;
+      setServiceRetrying(false);
+      setService((current) => ({
+        ...current,
+        state: "failed",
+        error: { category: "retry", message: SERVICE_RETRY_PENDING_MESSAGE },
+      }));
+      return;
+    }
+    serviceStatusGeneration.current += 1;
+    serviceRetryTimedOut.current = false;
+    setServiceRetrying(true);
+
+    let request: Promise<void>;
+    try {
+      request = retryService();
+    } catch (error) {
+      serviceStatusGeneration.current += 1;
+      serviceRetryTimedOut.current = false;
+      setServiceRetrying(false);
+      setService((current) => ({
+        ...current,
+        state: "failed",
+        error: { category: "retry", message: errorMessage(error, "服务重试失败") },
+      }));
+      return;
+    }
+    serviceRetryRequest.current = request;
+    const uiTimer = window.setTimeout(() => {
+      if (serviceRetryRequest.current !== request || !mounted.current) return;
+      serviceRetryTimedOut.current = true;
+      setServiceRetrying(false);
+      setService((current) => ({
+        ...current,
+        state: "failed",
+        error: { category: "retry", message: SERVICE_RETRY_PENDING_MESSAGE },
+      }));
+    }, SERVICE_RETRY_UI_TIMEOUT_MS);
+
+    void request
+      .then(
+        () => {
+          serviceStatusGeneration.current += 1;
+          serviceRetryTimedOut.current = false;
+          if (mounted.current) {
+            setService((current) => ({ ...current, state: "restarting", error: null }));
+          }
+        },
+        (error: unknown) => {
+          serviceStatusGeneration.current += 1;
+          serviceRetryTimedOut.current = false;
+          if (mounted.current) {
+            setService((current) => ({
+              ...current,
+              state: "failed",
+              error: { category: "retry", message: errorMessage(error, "服务重试失败") },
+            }));
+          }
+        },
+      )
+      .finally(() => {
+        window.clearTimeout(uiTimer);
+        if (serviceRetryRequest.current === request) serviceRetryRequest.current = null;
+        if (mounted.current) setServiceRetrying(false);
+      });
+  };
+
+  const handleRetryExitCleanup = () => {
+    if (exitActionInFlight.current) return;
+    exitActionInFlight.current = "cleanup";
+    setExitCleanupError(null);
+    setExitCleanupRetrying(true);
+
+    let request: Promise<string | undefined>;
+    try {
+      request = Promise.resolve(retryExitCleanup());
+    } catch (error) {
+      exitActionInFlight.current = null;
+      setExitCleanupRetrying(false);
+      setExitCleanupError(errorMessage(error, "退出清理重试失败 / Exit cleanup retry failed"));
+      return;
+    }
+
+    void request
+      .catch((error: unknown) => {
+        if (mounted.current) {
+          setExitCleanupError(errorMessage(error, "退出清理重试失败 / Exit cleanup retry failed"));
+        }
+      })
+      .finally(() => {
+        if (exitActionInFlight.current === "cleanup") exitActionInFlight.current = null;
+        if (mounted.current) setExitCleanupRetrying(false);
+      });
+  };
+
+  const handleForceQuit = () => {
+    if (exitActionInFlight.current) return;
+    exitActionInFlight.current = "force-quit";
+    setForceQuitError(null);
+    setForceQuitting(true);
+
+    let request: Promise<string | undefined>;
+    try {
+      request = Promise.resolve(requestForceExitConfirmation());
+    } catch (error) {
+      exitActionInFlight.current = null;
+      setForceQuitting(false);
+      setForceQuitError(errorMessage(error, "强制退出请求失败 / Force quit request failed"));
+      return;
+    }
+
+    void request
+      .catch((error: unknown) => {
+        if (mounted.current) {
+          setForceQuitError(errorMessage(error, "强制退出请求失败 / Force quit request failed"));
+        }
+      })
+      .finally(() => {
+        if (exitActionInFlight.current === "force-quit") exitActionInFlight.current = null;
+        if (mounted.current) setForceQuitting(false);
+      });
+  };
 
   const openResult = (result: SearchResult) => {
     if (result.courseId) selectCourse(result.courseId);
@@ -266,16 +717,29 @@ export default function Layout() {
               ))
             )}
           </div>
+          {courseLoad.coursesError && (
+            <button
+              type="button"
+              onClick={() => setCourseLoadAttempt((attempt) => attempt + 1)}
+              className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-red-700 hover:text-red-900"
+            >
+              <RefreshCw size={12} />
+              重试课程列表
+            </button>
+          )}
         </div>
 
         <div className="mt-auto px-4 py-3">
           <ServiceStatusView
             service={service}
-            onRetry={() =>
-              void retryService().then(() =>
-                setService((current) => ({ ...current, state: "restarting", error: null })),
-              )
-            }
+            onRetry={handleServiceRetry}
+            retrying={serviceRetrying}
+            onRetryExitCleanup={handleRetryExitCleanup}
+            onForceQuit={handleForceQuit}
+            exitCleanupRetrying={exitCleanupRetrying}
+            forceQuitting={forceQuitting}
+            exitCleanupError={exitCleanupError}
+            forceQuitError={forceQuitError}
           />
         </div>
       </aside>
@@ -300,6 +764,19 @@ export default function Layout() {
           </div>
 
           <div className="flex-1 overflow-y-auto px-4 py-4">
+            {courseDataError?.courseId === selectedCourseId && (
+              <div role="alert" className="mb-4 border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-700">
+                <p className="break-words">{courseDataError.message}</p>
+                <button
+                  type="button"
+                  onClick={() => setCourseDataLoadAttempt((attempt) => attempt + 1)}
+                  className="mt-2 inline-flex items-center gap-1 font-medium text-red-700 hover:text-red-900"
+                >
+                  <RefreshCw size={12} />
+                  重试课程资料
+                </button>
+              </div>
+            )}
             <div className="mb-5 space-y-1">
               <Link
                 to="/workbench"
@@ -446,7 +923,7 @@ export default function Layout() {
           <div
             className={`${isWorkbench ? "mx-auto w-full max-w-[1500px] px-4 py-5 sm:px-6 xl:px-8 xl:py-8" : "mx-auto max-w-4xl px-8 py-8"}`}
           >
-            <Outlet />
+            <Outlet context={courseLoad} />
           </div>
         </main>
       </div>

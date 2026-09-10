@@ -1,3 +1,5 @@
+from parsing_core.workbench.executors import IntensiveReadingExecutor
+
 DEEPSEEK_ROUNDS = {
     "structure",
     "concepts",
@@ -14,7 +16,11 @@ CODEX_ROUNDS = {"mermaid", "review"}
 
 
 class HybridIntensiveReadingExecutor:
-    def __init__(self, deepseek_executor, codex_executor):
+    def __init__(
+        self,
+        deepseek_executor: IntensiveReadingExecutor,
+        codex_executor: IntensiveReadingExecutor,
+    ) -> None:
         self.deepseek_executor = deepseek_executor
         self.codex_executor = codex_executor
 

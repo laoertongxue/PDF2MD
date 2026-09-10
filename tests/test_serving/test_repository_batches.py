@@ -87,6 +87,98 @@ def test_finish_batch(tmp_path):
     conn.close()
 
 
+def test_set_batch_progress_is_absolute_idempotent_and_preserves_terminal_priority(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    apply_serve_schema(conn)
+    repo = Repository(conn)
+    repo.create_batch(make_batch("b1", "RUNNING"))
+
+    repo.set_batch_progress("b1", completed=1)
+    repo.set_batch_progress("b1", completed=1)
+    repo.set_batch_progress("b1", completed=2, status="COMPLETED")
+    repo.set_batch_progress("b1", completed=2, status="FAILED")
+    repo.set_batch_progress("b1", completed=2, status="CANCELLED")
+    repo.set_batch_progress("b1", completed=2, status="COMPLETED")
+
+    batch = repo.get_batch("b1")
+    assert batch is not None
+    assert batch["completed_tasks"] == 2
+    assert batch["status"] == "CANCELLED"
+    assert batch["finished_at"] is not None
+    conn.close()
+
+
+def test_create_batch_with_tasks_is_atomic_and_preregisters_every_task(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    apply_serve_schema(conn)
+    repo = Repository(conn)
+    batch = make_batch("b1", "RUNNING")
+    tasks = [
+        Task(
+            id=f"t{index}",
+            file_path=f"/{index}.pdf",
+            snapshot_path="",
+            file_sha256="",
+            status="WAITING",
+            created_at=1,
+            updated_at=1,
+            batch_id="b1",
+        )
+        for index in range(2)
+    ]
+
+    repo.create_batch_with_tasks(batch, tasks)
+
+    assert repo.get_batch("b1") is not None
+    assert [(task.id, task.status, task.batch_id) for task in repo.list_all_tasks()] == [
+        ("t0", "WAITING", "b1"),
+        ("t1", "WAITING", "b1"),
+    ]
+    conn.close()
+
+
+def test_create_task_promotes_matching_preregistered_waiting_task(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    apply_serve_schema(conn)
+    repo = Repository(conn)
+    repo.create_batch_with_tasks(
+        make_batch("b1", "RUNNING"),
+        [
+            Task(
+                id="t1",
+                file_path="/book.pdf",
+                snapshot_path="",
+                file_sha256="",
+                status="WAITING",
+                created_at=1,
+                updated_at=1,
+                batch_id="b1",
+            )
+        ],
+    )
+
+    repo.create_task(
+        Task(
+            id="t1",
+            file_path="/book.pdf",
+            snapshot_path="/snapshot.pdf",
+            file_sha256="abc",
+            status="PARSING",
+            created_at=2,
+            updated_at=2,
+            batch_id="b1",
+        )
+    )
+
+    task = repo.get_task("t1")
+    assert task is not None
+    assert task.status == "PARSING"
+    assert task.snapshot_path == "/snapshot.pdf"
+    assert task.file_sha256 == "abc"
+    assert len(repo.list_all_tasks()) == 1
+    conn.close()
+
+
 def test_set_task_batch_id(tmp_path):
     conn = init_db(str(tmp_path / "x.db"))
     apply_serve_schema(conn)

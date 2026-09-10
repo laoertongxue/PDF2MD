@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api/workbench";
-import type { CourseTopic, TopicCard, TopicNoteBlock, TopicRun } from "../api/workbenchTypes";
+import type {
+  Card,
+  Chapter,
+  Course,
+  CourseTopic,
+  Source,
+  TopicCard,
+  TopicNoteBlock,
+  TopicRun,
+} from "../api/workbenchTypes";
 import { requireAt, requireValue } from "../test/requireValue";
 import { useWorkbenchStore } from "./useWorkbenchStore";
 
@@ -8,6 +17,10 @@ vi.mock("../api/workbench", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/workbench")>();
   return {
     ...actual,
+    listCourses: vi.fn(),
+    listSources: vi.fn(),
+    listChapters: vi.fn(),
+    listCourseCards: vi.fn(),
     listTopics: vi.fn(),
     generateTopics: vi.fn(),
     mergeTopics: vi.fn(),
@@ -115,6 +128,71 @@ beforeEach(() => {
 });
 
 describe("主题工作流 Store", () => {
+  it("does not commit course resources that resolve after their service generation is aborted", async () => {
+    const courseRequest = deferred<Course[]>();
+    const sourceRequest = deferred<Source[]>();
+    const chapterRequest = deferred<Chapter[]>();
+    const cardRequest = deferred<Card[]>();
+    mocked.listCourses.mockReturnValueOnce(courseRequest.promise);
+    mocked.listSources.mockReturnValueOnce(sourceRequest.promise);
+    mocked.listChapters.mockReturnValueOnce(chapterRequest.promise);
+    mocked.listCourseCards.mockReturnValueOnce(cardRequest.promise);
+    const controller = new AbortController();
+    const reason = new DOMException("service generation replaced", "AbortError");
+
+    const requests = [
+      useWorkbenchStore.getState().loadCourses(controller.signal),
+      useWorkbenchStore.getState().loadSources("course-1", controller.signal),
+      useWorkbenchStore.getState().loadChapters("source-1", controller.signal),
+      useWorkbenchStore.getState().loadCourseCards("course-1", controller.signal),
+    ];
+    controller.abort(reason);
+    courseRequest.resolve([{ id: "course-old", title: "old", description: "", root_dir: "/old" }]);
+    sourceRequest.resolve([
+      {
+        id: "source-old",
+        course_id: "course-1",
+        kind: "main",
+        file_path: "/old.pdf",
+        title: "old",
+        status: "READY",
+      },
+    ]);
+    chapterRequest.resolve([
+      { id: "chapter-old", source_id: "source-1", course_id: "course-1", seq: 0, title: "old", status: "READY" },
+    ]);
+    cardRequest.resolve([
+      {
+        id: "card-old",
+        origin_type: "chapter",
+        origin_id: "chapter-old",
+        origin_title: "old",
+        card_type: "insight",
+        title: "old",
+        content: "old",
+        source_refs: [],
+        tags: [],
+        status: "ACTIVE",
+        favorite: false,
+        updated_at: 1,
+      },
+    ]);
+
+    const results = await Promise.allSettled(requests);
+    expect(results.every((result) => result.status === "rejected" && result.reason === reason)).toBe(true);
+    expect(mocked.listCourses).toHaveBeenCalledWith(controller.signal);
+    expect(mocked.listSources).toHaveBeenCalledWith("course-1", controller.signal);
+    expect(mocked.listChapters).toHaveBeenCalledWith("source-1", controller.signal);
+    expect(mocked.listCourseCards).toHaveBeenCalledWith("course-1", controller.signal);
+    expect(useWorkbenchStore.getState()).toMatchObject({
+      courses: [],
+      sources: {},
+      chapters: {},
+      cardsByCourse: {},
+      selectedCourseId: null,
+    });
+  });
+
   it("恢复检查遇到有效租约时保留任务仍在运行安全文案", async () => {
     mocked.recoverTopic.mockRejectedValueOnce(new api.SafeApiError("task_running"));
     useWorkbenchStore.setState({ topicsByCourse: { "course-1": [topic({ status: "RUNNING" })] } });

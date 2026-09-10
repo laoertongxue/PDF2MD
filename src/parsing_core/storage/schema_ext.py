@@ -1,5 +1,7 @@
 import sqlite3
 
+from parsing_core.storage.schema import TASK_RECOVERY_TABLE_SQL
+
 BATCHES_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS batches (
   id              TEXT PRIMARY KEY,
@@ -23,6 +25,7 @@ INDEX_TASK_BATCH_SQL = "CREATE INDEX IF NOT EXISTS idx_task_batch ON tasks(batch
 
 def apply_serve_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(BATCHES_TABLE_SQL)
+    conn.executescript(TASK_RECOVERY_TABLE_SQL)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
     if "batch_id" not in cols:
         conn.execute(ALTER_TASKS_SQL)

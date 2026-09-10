@@ -52,6 +52,7 @@ def test_replay_empty_buffer():
 def test_is_expired_default_false():
     buf = EventRingBuffer(maxlen=10, ttl_sec=1800)
     assert not buf.is_expired()
+    assert buf._clock is time.monotonic
 
 
 def test_is_expired_after_ttl():

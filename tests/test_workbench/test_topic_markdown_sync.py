@@ -7,12 +7,13 @@ from pathlib import Path
 import pytest
 
 from parsing_core.storage.schema import init_db
-from parsing_core.workbench import topic_markdown_sync
+from parsing_core.workbench import markdown_sync, topic_markdown_sync
 from parsing_core.workbench.markdown_sync import recover_atomic_bundle
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
 from parsing_core.workbench.topic_markdown_sync import (
     TopicMarkdownDeleteError,
+    TopicMarkdownSyncError,
     delete_unpublished_topic,
     sync_topic_map_markdown,
     sync_topic_markdown,
@@ -36,6 +37,19 @@ TITLES = [
     "14. Mermaid 应用流程图",
     "15. 写作卡片",
 ]
+
+
+def test_protected_topic_file_read_is_bounded(tmp_path, monkeypatch):
+    directory = tmp_path / "topic"
+    directory.mkdir()
+    (directory / "topic-map.md").write_bytes(b"12345")
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    monkeypatch.setattr(topic_markdown_sync, "MAX_PROTECTED_TOPIC_FILE_BYTES", 4, raising=False)
+    try:
+        with pytest.raises(ValueError, match="size limit"):
+            topic_markdown_sync._read_regular_file_at(directory_fd, "topic-map.md")
+    finally:
+        os.close(directory_fd)
 
 
 def setup_published(tmp_path):
@@ -103,6 +117,237 @@ def test_topic_sync_writes_fixed_sections_diagrams_cards_and_relative_link(tmp_p
     )
     assert "../教材/教材/01-章节/intensive-note.md" in topic_map
     assert "<!-- topic-id:" in topic_map
+
+
+def test_topic_publication_removes_bearer_tokens_from_every_markdown_file(tmp_path):
+    repo, topic, _ = setup_published(tmp_path)
+    tokens = (
+        "topic-note-token",
+        "topic_card_token",
+        "topic.run.token",
+        "topic-run-token",
+    )
+    repo.conn.execute(
+        "UPDATE wb_topic_note_blocks SET content = ? WHERE topic_id = ? AND kind = 'overview'",
+        (f"普通主题内容 Authorization: Bearer {tokens[0]}", topic.id),
+    )
+    repo.conn.execute(
+        "UPDATE wb_topic_cards SET content = ? WHERE rowid = "
+        "(SELECT rowid FROM wb_topic_cards WHERE topic_id = ? ORDER BY rowid LIMIT 1)",
+        (f"普通卡片内容 authorization=bearer {tokens[1]}", topic.id),
+    )
+    repo.conn.commit()
+    run = repo.create_topic_run(topic.id, "review", "fingerprint")
+    repo.finish_topic_run(
+        run.id,
+        "COMPLETED",
+        output=" ".join(
+            [
+                f'"AUTHORIZATION": "BEARER {tokens[2]}"',
+                f"Proxy-Authorization: Bearer {tokens[3]}",
+            ]
+        ),
+    )
+
+    sync_topic_markdown(repo, topic.id)
+
+    published = "\n".join(
+        path.read_text(encoding="utf-8") for path in (tmp_path / "out").rglob("*.md")
+    )
+    for token in tokens:
+        assert token not in published
+    assert "普通主题内容" in published
+    assert "普通卡片内容" in published
+    assert "```mermaid" in published
+
+
+def test_topic_fence_rejects_cross_connection_aba_during_render(tmp_path, monkeypatch):
+    repo, topic, _ = setup_published(tmp_path)
+    note_path = Path(sync_topic_markdown(repo, topic.id)["note"])
+    db_path = tmp_path / "db.sqlite"
+    other_conn = init_db(str(db_path))
+    apply_workbench_schema(other_conn)
+    original = repo.list_topic_note_blocks
+    calls = 0
+
+    def render_transient_state(entity_id):
+        nonlocal calls
+        calls += 1
+        if calls != 2:
+            return original(entity_id)
+        other_conn.execute(
+            "UPDATE wb_topic_note_blocks SET content = 'TRANSIENT-B' "
+            "WHERE topic_id = ? AND kind = 'overview'",
+            (topic.id,),
+        )
+        other_conn.commit()
+        transient = original(entity_id)
+        other_conn.execute(
+            "UPDATE wb_topic_note_blocks SET content = '内容 overview' "
+            "WHERE topic_id = ? AND kind = 'overview'",
+            (topic.id,),
+        )
+        other_conn.commit()
+        return transient
+
+    monkeypatch.setattr(repo, "list_topic_note_blocks", render_transient_state)
+    try:
+        with pytest.raises(Exception) as captured:
+            sync_topic_markdown(repo, topic.id)
+    finally:
+        other_conn.close()
+
+    assert type(captured.value).__name__ == "TopicMarkdownSyncError"
+    published = note_path.read_text(encoding="utf-8")
+    assert "内容 overview" in published
+    assert "TRANSIENT-B" not in published
+
+
+def test_topic_sync_exposes_only_stable_error_and_preserves_control_signals(
+    tmp_path,
+    monkeypatch,
+):
+    repo, topic, _ = setup_published(tmp_path)
+    token = "topic-sensitive-error-token"
+
+    rich_error = None
+    try:
+        cause = UnicodeDecodeError("utf-8", b"secret topic bytes", 0, 1, token)
+        cause.add_note(f"/Users/private/{token}")
+        raise ValueError(f"Authorization: Bearer {token}") from cause
+    except ValueError as exc:
+        rich_error = exc
+    assert rich_error is not None
+
+    def fail_render(*_args, **_kwargs):
+        raise rich_error
+
+    monkeypatch.setattr(topic_markdown_sync, "_sync_topic_markdown", fail_render)
+    with pytest.raises(Exception) as captured:
+        sync_topic_markdown(repo, topic.id)
+
+    error = captured.value
+    assert type(error).__name__ == "TopicMarkdownSyncError"
+    assert error.code == "TOPIC_MARKDOWN_PUBLICATION_FAILED"
+    assert error.args == ("topic Markdown publication failed",)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert getattr(error, "__notes__", []) == []
+    assert token not in repr(error)
+
+    for signal in (KeyboardInterrupt(), SystemExit(19)):
+        repo.set_topic_markdown_sync_state(topic.id, "PENDING")
+        monkeypatch.setattr(
+            topic_markdown_sync,
+            "_sync_topic_markdown",
+            lambda *_args, _signal=signal, **_kwargs: (_ for _ in ()).throw(_signal),
+        )
+        with pytest.raises(type(signal)) as control:
+            sync_topic_markdown(repo, topic.id)
+        assert control.value is signal
+
+
+@pytest.mark.parametrize("signal", [KeyboardInterrupt(), SystemExit(23)])
+def test_topic_cleanup_failure_does_not_mask_control_signal(tmp_path, monkeypatch, signal):
+    repo, topic, _ = setup_published(tmp_path)
+
+    monkeypatch.setattr(
+        topic_markdown_sync,
+        "_sync_topic_markdown",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(signal),
+    )
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise OSError("sensitive cleanup failure")
+
+    monkeypatch.setattr(repo, "finish_topic_markdown_sync", fail_cleanup)
+
+    with pytest.raises(type(signal)) as control:
+        sync_topic_markdown(repo, topic.id)
+
+    assert control.value is signal
+
+
+def test_plain_topic_sync_cannot_overwrite_a_newer_publication(tmp_path, monkeypatch):
+    repo, topic, _ = setup_published(tmp_path)
+    db_path = tmp_path / "db.sqlite"
+    winner_conn = init_db(str(db_path))
+    apply_workbench_schema(winner_conn)
+    winner_repo = WorkbenchRepository(winner_conn)
+    raced = False
+
+    def publish_winner_before_old_write(entity_type, entity_id):
+        nonlocal raced
+        if not raced and (entity_type, entity_id) == ("topic", topic.id):
+            raced = True
+            blocks = {
+                item.kind: item.content for item in winner_repo.list_topic_note_blocks(topic.id)
+            }
+            blocks["overview"] = "winner 主题内容"
+            winner_repo.replace_topic_note_blocks(topic.id, blocks)
+            sync_topic_markdown(winner_repo, topic.id)
+
+    monkeypatch.setattr(
+        markdown_sync,
+        "_publication_race_hook",
+        publish_winner_before_old_write,
+        raising=False,
+    )
+
+    with pytest.raises(TopicMarkdownSyncError):
+        sync_topic_markdown(repo, topic.id)
+
+    note_path = tmp_path / "out" / "课程主题" / "01-主题" / "intensive-note.md"
+    note = note_path.read_text(encoding="utf-8")
+    assert "winner 主题内容" in note
+    assert "内容 overview" not in note
+    winner_conn.close()
+    repo.conn.close()
+
+
+def test_topic_fence_rejects_sibling_textbook_rename_that_changes_display_name(
+    tmp_path,
+    monkeypatch,
+):
+    repo, topic, chapter = setup_published(tmp_path)
+    target = repo.get_source(chapter.source_id)
+    assert target is not None
+    sibling = repo.create_source(topic.course_id, "main", "/tmp/sibling.pdf", "教材")
+    repo.conn.execute(
+        "UPDATE wb_sources SET created_at = ? WHERE id = ?",
+        (target.created_at - 1, sibling.id),
+    )
+    repo.conn.execute(
+        "UPDATE wb_topic_cards SET source_refs_json = ? WHERE topic_id = ?",
+        (json.dumps(["[《教材（2）》·第 1 章]"], ensure_ascii=False), topic.id),
+    )
+    repo.conn.commit()
+    markdown_sync.sync_chapter_markdown(repo, chapter.id)
+
+    assert markdown_sync.textbook_dir(repo, target).name == "教材（2）"
+
+    def rename_sibling_after_snapshot(entity_type, entity_id):
+        assert (entity_type, entity_id) == ("topic", topic.id)
+        repo.conn.execute(
+            "UPDATE wb_sources SET title = ? WHERE id = ?",
+            ("第一教材", sibling.id),
+        )
+        repo.conn.commit()
+
+    monkeypatch.setattr(
+        markdown_sync,
+        "_publication_race_hook",
+        rename_sibling_after_snapshot,
+    )
+
+    with pytest.raises(TopicMarkdownSyncError):
+        sync_topic_markdown(repo, topic.id)
+
+    assert markdown_sync.textbook_dir(repo, target).name == "教材"
+    topic_dir = tmp_path / "out" / "课程主题" / "01-主题"
+    assert not (topic_dir / "topic-map.md").exists()
+    assert not (topic_dir / "intensive-note.md").exists()
+    assert not (topic_dir / "cards.md").exists()
 
 
 def test_real_topic_sync_and_delete_complete_without_abba_deadlock(tmp_path, monkeypatch):
@@ -299,7 +544,7 @@ def test_invalid_blocks_or_refs_do_not_overwrite_existing_topic_note(tmp_path):
         "DELETE FROM wb_topic_note_blocks WHERE topic_id = ? AND kind = ?", (topic.id, "overview")
     )
     repo.conn.commit()
-    with pytest.raises(ValueError, match="fourteen"):
+    with pytest.raises(TopicMarkdownSyncError):
         sync_topic_markdown(repo, topic.id)
     assert note.read_text(encoding="utf-8") == old
 
@@ -315,7 +560,7 @@ def test_invalid_blocks_or_refs_do_not_overwrite_existing_topic_note(tmp_path):
         (json.dumps("bad"), topic.id),
     )
     repo.conn.commit()
-    with pytest.raises(ValueError, match="source refs"):
+    with pytest.raises(TopicMarkdownSyncError):
         sync_topic_markdown(repo, topic.id)
     assert note.read_text(encoding="utf-8") == old
 
@@ -354,7 +599,7 @@ def test_topic_card_refs_must_match_current_mapping_with_duplicate_title_suffixe
             (json.dumps([invalid], ensure_ascii=False), topic.id),
         )
         repo.conn.commit()
-        with pytest.raises(ValueError, match="unknown source ref"):
+        with pytest.raises(TopicMarkdownSyncError):
             sync_topic_markdown(repo, topic.id)
         assert cards_path.read_text(encoding="utf-8") == old
 
@@ -369,7 +614,7 @@ def test_preexisting_desired_topic_directory_is_never_overwritten(tmp_path, fore
     user_file = desired / "topic-map.md"
     user_file.write_text(f"{foreign_marker}\n用户内容", encoding="utf-8")
 
-    with pytest.raises(FileExistsError, match="target directory already exists"):
+    with pytest.raises(TopicMarkdownSyncError):
         sync_topic_markdown(repo, topic.id)
     assert user_file.read_text(encoding="utf-8") == f"{foreign_marker}\n用户内容"
 
@@ -390,7 +635,7 @@ def test_topic_bundle_rolls_back_all_files_on_second_replace_failure(tmp_path, m
         return original(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(topic_markdown_sync.os, "replace", fail_second_target)
-    with pytest.raises(OSError, match="second replace failed"):
+    with pytest.raises(TopicMarkdownSyncError):
         sync_topic_markdown(repo, topic.id)
     assert {key: Path(path).read_text(encoding="utf-8") for key, path in paths.items()} == old
 
@@ -417,7 +662,8 @@ def test_topic_bundle_recovers_keyboard_interrupt_and_redacts_runs(tmp_path, mon
         sync_topic_markdown(repo, topic.id)
     assert {key: Path(path).read_text(encoding="utf-8") for key, path in paths.items()} == old
     run_text = next((Path(paths["note"]).parent / "runs").glob("*.md")).read_text(encoding="utf-8")
-    assert "正常中文" in run_text and "/Users/" not in run_text and "sk-" not in run_text
+    assert "topic generation failed" in run_text
+    assert "正常中文" not in run_text and "/Users/" not in run_text and "sk-" not in run_text
 
 
 @pytest.mark.parametrize("level", ["课程主题", "topic"])
@@ -431,7 +677,7 @@ def test_topic_sync_rejects_symlink_escape(tmp_path, level):
     else:
         (root / "课程主题").mkdir()
         (root / "课程主题" / "01-主题").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(OSError):
+    with pytest.raises(TopicMarkdownSyncError):
         sync_topic_markdown(repo, topic.id)
     assert not list(outside.iterdir())
 
@@ -464,7 +710,7 @@ def test_bundle_journal_recovers_crash_and_cleans_secret_backup(tmp_path, phase)
 
 def test_topic_first_bundle_failure_keeps_owner_and_retry_succeeds(tmp_path, monkeypatch):
     repo, topic, _ = setup_published(tmp_path)
-    original = topic_markdown_sync.atomic_write_bundle_fd
+    original = markdown_sync._locked_atomic_write_bundles_fd
     calls = 0
 
     def fail_once(*args, **kwargs):
@@ -474,8 +720,8 @@ def test_topic_first_bundle_failure_keeps_owner_and_retry_succeeds(tmp_path, mon
             raise OSError("disk full")
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(topic_markdown_sync, "atomic_write_bundle_fd", fail_once)
-    with pytest.raises(OSError, match="disk full"):
+    monkeypatch.setattr(markdown_sync, "_locked_atomic_write_bundles_fd", fail_once)
+    with pytest.raises(TopicMarkdownSyncError):
         sync_topic_markdown(repo, topic.id)
     topic_dir = tmp_path / "out" / "课程主题" / "01-主题"
     assert (topic_dir / ".pdf2md-owner").read_text(encoding="utf-8") == (f"topic:{topic.id}\n")
@@ -488,7 +734,7 @@ def test_fake_owner_never_authorizes_topic_directory(tmp_path, kind, entity_id):
     desired = tmp_path / "out" / "课程主题" / "01-主题"
     desired.mkdir(parents=True)
     (desired / ".pdf2md-owner").write_text(f"{kind}:{entity_id}\n", encoding="utf-8")
-    with pytest.raises(FileExistsError):
+    with pytest.raises(TopicMarkdownSyncError):
         sync_topic_markdown(repo, topic.id)
 
 
@@ -507,20 +753,15 @@ def test_topic_failures_do_not_leak_file_descriptors(tmp_path, monkeypatch, fail
             kwargs["fence"]()
         raise OSError("disk full")
 
-    monkeypatch.setattr(topic_markdown_sync, "atomic_write_bundle_fd", fail)
+    if failure != "fence":
+        monkeypatch.setattr(markdown_sync, "_locked_atomic_write_bundles_fd", fail)
     for _ in range(40):
         fence = (
             (lambda: (_ for _ in ()).throw(ValueError("owner lost")))
             if failure == "fence"
             else None
         )
-        expected = (
-            ValueError
-            if failure == "fence"
-            else KeyboardInterrupt
-            if failure == "interrupt"
-            else OSError
-        )
+        expected = KeyboardInterrupt if failure == "interrupt" else TopicMarkdownSyncError
         with pytest.raises(expected):
             sync_topic_markdown(repo, topic.id, fence=fence)
     gc.collect()

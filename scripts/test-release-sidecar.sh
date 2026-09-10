@@ -1,45 +1,65 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S -i PATH=/usr/bin:/bin HOME=/var/empty TMPDIR=/tmp LC_ALL=C LANG=C /bin/bash
 set -euo pipefail
 
-source_app="${1:?usage: test-release-sidecar.sh /path/to/PDF2MD.app}"
-temporary="$(mktemp -d /tmp/pdf2md-release-test.XXXXXX)"
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 1
+}
+
+[[ "$#" -eq 1 ]] || fail "PDF2MD_RELEASE_TEST_E_USAGE"
+source_app="$1"
+[[ "$source_app" != *$'\n'* && "$source_app" != *$'\r'* ]] || {
+  fail "PDF2MD_RELEASE_TEST_E_CONTROL_CHAR"
+}
+[[ -d "$source_app" && ! -L "$source_app" ]] || {
+  fail "PDF2MD_RELEASE_TEST_E_REQUIRED_PATH"
+}
+
+case "${BASH_SOURCE[0]}" in
+  */*) script_parent=${BASH_SOURCE[0]%/*} ;;
+  *) script_parent=. ;;
+esac
+script_dir="$(cd "$script_parent" && pwd -P)" || fail "PDF2MD_RELEASE_TEST_E_INSPECTION"
+temporary="$(/usr/bin/mktemp -d /tmp/pdf2md-release-test.XXXXXX)" || {
+  fail "PDF2MD_RELEASE_TEST_E_TEMPORARY"
+}
 app="$temporary/PDF2MD.app"
 home="$temporary/home"
 log="$temporary/sidecar.log"
-mkdir -p "$home"
-trap '[[ -n "${pid:-}" ]] && kill "$pid" 2>/dev/null || true; rm -rf "$temporary"' EXIT
+/bin/mkdir -p "$home" || fail "PDF2MD_RELEASE_TEST_E_TEMPORARY"
+cleanup() {
+  /bin/rm -rf -- "$temporary"
+}
+trap cleanup EXIT INT TERM HUP
 
-ditto "$source_app" "$app"
-bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-release-sidecar.sh" "$app"
+/usr/bin/ditto "$source_app" "$app" || fail "PDF2MD_RELEASE_TEST_E_COPY"
+"$script_dir/check-release-sidecar.sh" "$app" >/dev/null || {
+  fail "PDF2MD_RELEASE_TEST_E_BUNDLE_CHECK"
+}
 
-port="$(PYTHONDONTWRITEBYTECODE=1 "$app/Contents/Resources/python-runtime/bin/python3" - <<'PY'
-import socket
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
-PY
-)"
-
-env -i \
+/usr/bin/env -i \
   HOME="$home" \
   PATH="/usr/bin:/bin" \
-  "$app/Contents/MacOS/python3" --host 127.0.0.1 --port "$port" >"$log" 2>&1 &
-pid=$!
+  TMPDIR="$temporary" \
+  LC_ALL="C" \
+  LANG="C" \
+  PYTHONDONTWRITEBYTECODE=1 \
+  "$app/Contents/Resources/python-runtime/bin/python3.12" \
+  "$script_dir/release_sidecar_harness.py" \
+  "$app" --home "$home" >"$log" 2>&1 || {
+    /bin/cat "$log" >&2
+    fail "PDF2MD_RELEASE_TEST_E_COLD_START"
+  }
 
-for _ in $(seq 1 100); do
-  if curl --fail --silent "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
-    break
-  fi
-  if ! kill -0 "$pid" 2>/dev/null; then
-    cat "$log" >&2
-    exit 1
-  fi
-  sleep 0.1
-done
-curl --fail --silent "http://127.0.0.1:$port/health"
+bytecode="$(
+  /usr/bin/find "$app/Contents" -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit
+)" || fail "PDF2MD_RELEASE_TEST_E_SCAN"
+[[ -z "$bytecode" ]] || fail "PDF2MD_RELEASE_TEST_E_BYTECODE"
 
-if find "$app/Contents" -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit | grep -q .; then
-  echo "cold start wrote Python bytecode into signed bundle" >&2
-  exit 1
-fi
-codesign --verify --deep --strict --verbose=2 "$app"
+"$script_dir/check-release-sidecar.sh" "$app" >/dev/null || {
+  fail "PDF2MD_RELEASE_TEST_E_POST_BUNDLE_CHECK"
+}
+
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$app" >/dev/null 2>&1 || {
+  fail "PDF2MD_RELEASE_TEST_E_CODESIGN"
+}

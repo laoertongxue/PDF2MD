@@ -5,8 +5,10 @@ from urllib.error import HTTPError
 import pytest
 
 from parsing_core.workbench.deepseek import (
+    DEFAULT_MAX_TOKENS,
     MAX_HTTP_RESPONSE_BYTES,
     MODEL_NAME,
+    SYSTEM_PROMPT,
     TOPIC_OUTLINE_MAX_TOKENS,
     DeepSeekClient,
     DeepSeekError,
@@ -26,6 +28,50 @@ class FakeResponse:
 
     def read(self, size=-1):
         return json.dumps(self.payload).encode()
+
+
+def test_deepseek_checkpoint_identity_binds_endpoint_prompt_and_output_configuration():
+    secret = "sk-checkpoint-secret"
+    identity = DeepSeekExecutor(
+        DeepSeekClient(secret, MODEL_NAME, "https://api.deepseek.com/chat/completions")
+    ).checkpoint_identity()
+
+    assert identity["executor"] == "deepseek"
+    assert identity["model"] == MODEL_NAME
+    assert identity["endpoint"] == "https://api.deepseek.com/chat/completions"
+    assert identity["system_prompt"] == SYSTEM_PROMPT
+    assert identity["output_budgets"] == {
+        "default": DEFAULT_MAX_TOKENS,
+        "topic_outline": TOPIC_OUTLINE_MAX_TOKENS,
+    }
+    assert secret not in json.dumps(identity, ensure_ascii=False)
+
+
+def test_deepseek_checkpoint_identity_uses_canonical_endpoint():
+    key = "sk-checkpoint-identity"
+    canonical = DeepSeekExecutor(
+        DeepSeekClient(key, MODEL_NAME, "https://api.deepseek.com/chat/completions")
+    ).checkpoint_identity()
+    equivalent = DeepSeekExecutor(
+        DeepSeekClient(key, MODEL_NAME, "https://API.DEEPSEEK.COM:443/chat/completions")
+    ).checkpoint_identity()
+    different = DeepSeekExecutor(
+        DeepSeekClient(key, MODEL_NAME, "https://api.deepseek.com/v2/chat/completions")
+    ).checkpoint_identity()
+
+    assert equivalent == canonical
+    assert different != canonical
+
+
+def test_deepseek_checkpoint_identity_binds_credential():
+    first = DeepSeekExecutor(
+        DeepSeekClient("sk-first", MODEL_NAME, "https://api.deepseek.com/chat/completions")
+    ).checkpoint_identity()
+    second = DeepSeekExecutor(
+        DeepSeekClient("sk-second", MODEL_NAME, "https://api.deepseek.com/chat/completions")
+    ).checkpoint_identity()
+
+    assert first["auth_binding"] != second["auth_binding"]
 
 
 def test_deepseek_client_returns_message(monkeypatch):

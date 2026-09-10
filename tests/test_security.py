@@ -30,6 +30,16 @@ AUTH_HEADERS = {
 MAX_REQUEST_BODY_BYTES = 1_048_576
 
 
+def _token_pipe(token: str) -> int:
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(read_fd, True)
+    try:
+        os.write(write_fd, token.encode("ascii"))
+    finally:
+        os.close(write_fd)
+    return read_fd
+
+
 def _client(tmp_path: Path) -> TestClient:
     db_path = tmp_path / "serve.db"
 
@@ -322,14 +332,27 @@ def test_two_production_starts_use_distinct_random_loopback_endpoints(tmp_path):
     def start(instance: str, token: str) -> tuple[subprocess.Popen[str], dict]:
         env = os.environ.copy()
         env["XDG_DATA_HOME"] = str(tmp_path / instance)
-        env["PDF2MD_SESSION_TOKEN"] = token
-        process = subprocess.Popen(
-            [sys.executable, "-m", "parsing_core.serving.serve", "--port", "0"],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        env.pop("PDF2MD_SESSION_TOKEN", None)
+        token_fd = _token_pipe(token)
+        try:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "parsing_core.serving.serve",
+                    "--port",
+                    "0",
+                    "--session-token-fd",
+                    str(token_fd),
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                pass_fds=(token_fd,),
+            )
+        finally:
+            os.close(token_fd)
         processes.append(process)
         assert process.stdout is not None
         ready, _, _ = select.select([process.stdout], [], [], 15)

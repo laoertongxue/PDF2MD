@@ -1,154 +1,64 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+
+CDPATH=""
+IFS=$' \t\n'
+umask 077
 
 readonly PYTHON_RELEASE="20260510"
 readonly PYTHON_VERSION="3.12.13"
+readonly UV_VERSION="0.12.3"
 readonly PYTHON_ARCHIVE="cpython-${PYTHON_VERSION}+${PYTHON_RELEASE}-aarch64-apple-darwin-install_only.tar.gz"
 readonly PYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_RELEASE}/cpython-${PYTHON_VERSION}%2B${PYTHON_RELEASE}-aarch64-apple-darwin-install_only.tar.gz"
-readonly PYTHON_SHA256="${PDF2MD_TEST_PYTHON_SHA256:-5a30271f8d345a5b02b0c9e4e31e0f1e1455a8e4a04fba95cd9762472abc3b17}"
+readonly PYTHON_SHA256="5a30271f8d345a5b02b0c9e4e31e0f1e1455a8e4a04fba95cd9762472abc3b17"
+readonly CACHE_DIR="${HOME}/Library/Caches/PDF2MD-build"
+readonly SYSTEM_PYTHON="/usr/bin/python3"
+readonly SYSTEM_UNAME="/usr/bin/uname"
+readonly SYSTEM_DIRNAME="/usr/bin/dirname"
 
-machine="${PDF2MD_MACHINE:-$(uname -m)}"
-if [[ "$machine" != "arm64" ]]; then
-  echo "embedded Python runtime requires arm64, got: $machine" >&2
+export PATH="/usr/bin:/bin"
+export LC_ALL="C"
+
+if [[ "$($SYSTEM_UNAME -m)" != "arm64" ]]; then
+  printf 'embedded Python runtime requires arm64, got: %s\n' "$($SYSTEM_UNAME -m)" >&2
   exit 64
 fi
 
-app_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-repo_dir="$(cd "$app_dir/.." && pwd)"
-cache_dir="${PDF2MD_BUILD_CACHE:-$HOME/Library/Caches/PDF2MD-build}"
-archive="$cache_dir/$PYTHON_ARCHIVE"
-target="$app_dir/src-tauri/sidecar-runtime"
-launcher="$app_dir/src-tauri/binaries/python3"
-expected="$PYTHON_SHA256:$(shasum -a 256 "$repo_dir/pyproject.toml" "$app_dir/scripts/prepare-sidecar-python.sh" | shasum -a 256 | awk '{print $1}')"
-helper="$app_dir/scripts/sidecar_runtime.py"
-lock="$app_dir/src-tauri/.sidecar-runtime.lock"
-lock_token="${PDF2MD_RUNTIME_LOCKED:-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')}"
-temporary=""
-temporary_archive=""
-
-mkdir -p "$cache_dir" "$(dirname "$launcher")"
-
-if [[ -z "${PDF2MD_RUNTIME_LOCKED:-}" ]]; then
-  exec python3 "$helper" run-with-lock "$lock" "$lock_token" -- \
-    env "PDF2MD_RUNTIME_LOCKED=$lock_token" bash "$0" "$@"
+uv_path="${PDF2MD_UV_BIN:-}"
+if [[ -z "$uv_path" ]]; then
+  echo "PDF2MD_UV_BIN must name the uv $UV_VERSION executable" >&2
+  exit 64
+fi
+if [[ "$uv_path" != /* ]]; then
+  echo "PDF2MD_UV_BIN must be an absolute path" >&2
+  exit 64
 fi
 
-cleanup() {
-  [[ -z "$temporary" ]] || rm -rf "$temporary"
-  [[ -z "$temporary_archive" ]] || rm -f "$temporary_archive"
-}
-trap cleanup EXIT
-
-sanitize_runtime() {
-  local runtime="$1"
-  find "$runtime" -type d -name '__pycache__' -prune -exec rm -rf {} +
-  find "$runtime" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
-  rm -rf "$runtime/lib/python3.12/site-packages/bin"
-  rm -rf "$runtime/lib/python3.12/site-packages/pip" "$runtime/share/man" \
-    "$runtime/lib/python3.12/config-3.12-darwin"
-  find "$runtime/lib/python3.12/site-packages" -type d -name sboms -prune -exec rm -rf {} +
-  find "$runtime/lib/python3.12/site-packages" -name direct_url.json -delete
-  sed -i '' \
-    -e '/expanduser("~\/Library\/Frameworks")/d' \
-    -e '/"\/Library\/Frameworks"/d' \
-    -e '/"\/Network\/Library\/Frameworks"/d' \
-    "$runtime/lib/python3.12/ctypes/macholib/dyld.py"
-  sed -i '' \
-    -e '/"\/usr\/local\/bin",/d' \
-    -e '/"\/opt[^" ]*",/d' \
-    "$runtime/lib/python3.12/site-packages/markitdown/_markitdown.py"
-  find "$runtime" -type f -name '*.py' -exec chmod a-x {} +
-  find "$runtime" -type f -perm -111 -print0 | while IFS= read -r -d '' file; do
-    if [[ "$file" != "$runtime/bin/python3.12" ]] && \
-      [[ "$(LC_ALL=C head -c 2 "$file" 2>/dev/null || true)" == '#!' ]]; then
-      chmod a-x "$file"
-    fi
-  done
-  find "$runtime/bin" -mindepth 1 -maxdepth 1 \
-    ! -name 'python' ! -name 'python3' ! -name 'python3.12' \
-    -exec rm -rf {} +
-}
-
-runtime_is_valid() {
-  local candidate="$1"
-  local candidate_stamp="$candidate/.runtime-stamp"
-  local candidate_manifest="$candidate/.runtime-manifest.sha256"
-  local actual_manifest="$candidate/.runtime-manifest.actual.$$"
-  [[ -f "$candidate_stamp" && "$(cat "$candidate_stamp")" == "$expected" ]] || return 1
-  [[ -f "$candidate_manifest" && -x "$candidate/python/bin/python3" ]] || return 1
-  [[ -f "$candidate/python/lib/python3.12/os.py" ]] || return 1
-  [[ "$(readlink "$candidate/python/bin/python")" == "python3.12" ]] || return 1
-  [[ "$(readlink "$candidate/python/bin/python3")" == "python3.12" ]] || return 1
-  file "$candidate/python/bin/python3.12" | grep -q 'arm64' || return 1
-  [[ "$(PYTHONDONTWRITEBYTECODE=1 "$candidate/python/bin/python3" -c 'import platform; print(platform.python_version())')" == "$PYTHON_VERSION" ]] || return 1
-  (cd "$candidate/python" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256) \
-    > "$actual_manifest"
-  cmp -s "$candidate_manifest" "$actual_manifest" || { rm -f "$actual_manifest"; return 1; }
-  rm -f "$actual_manifest"
-}
-
-if [[ ! -f "$archive" ]] || [[ "$(shasum -a 256 "$archive" | awk '{print $1}')" != "$PYTHON_SHA256" ]]; then
-  temporary_archive="$archive.tmp.$$"
-  rm -f "$archive" "$temporary_archive"
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output "$temporary_archive" "$PYTHON_URL"
-  echo "$PYTHON_SHA256  $temporary_archive" | shasum -a 256 --check
-  mv "$temporary_archive" "$archive"
-  temporary_archive=""
+wheelhouse_root="${PDF2MD_WHEELHOUSE_ROOT:-}"
+if [[ -z "$wheelhouse_root" ]]; then
+  echo "PDF2MD_WHEELHOUSE_ROOT must name the prefetched locked wheelhouse" >&2
+  exit 64
+fi
+if [[ "$wheelhouse_root" != /* ]]; then
+  echo "PDF2MD_WHEELHOUSE_ROOT must be an absolute path" >&2
+  exit 64
 fi
 
-if ! runtime_is_valid "$target"; then
-  temporary="$target.tmp.$$"
-  rm -rf "$temporary"
-  mkdir -p "$temporary"
-  python3 "$helper" validate-archive "$archive"
-  tar -xzf "$archive" -C "$temporary"
-  runtime="$temporary/python"
-  test -x "$runtime/bin/python3"
-  file "$runtime/bin/python3.12" | grep -q 'arm64'
-  [[ "$(PYTHONDONTWRITEBYTECODE=1 "$runtime/bin/python3" -c 'import platform; print(platform.python_version())')" == "$PYTHON_VERSION" ]]
-  "$runtime/bin/python3" -m pip install \
-    --disable-pip-version-check \
-    --no-compile \
-    --target "$runtime/lib/python3.12/site-packages" \
-    "$repo_dir[serve]"
-  sanitize_runtime "$runtime"
-  (cd "$runtime" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256) \
-    > "$temporary/.runtime-manifest.sha256"
-  printf '%s\n' "$expected" > "$temporary/.runtime-stamp"
-  runtime_is_valid "$temporary"
-  python3 "$helper" atomic-install "$temporary" "$target"
-  rm -rf "$temporary"
-  temporary=""
-fi
+script_dir="$(cd -P -- "$($SYSTEM_DIRNAME -- "${BASH_SOURCE[0]}")" && pwd -P)"
+app_dir="$(cd -P -- "$script_dir/.." && pwd -P)"
+repo_dir="$(cd -P -- "$app_dir/.." && pwd -P)"
+helper="$script_dir/sidecar_runtime.py"
 
-find "$repo_dir/src" -type d -name '__pycache__' -prune -exec rm -rf {} +
-find "$repo_dir/src" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
-
-cat > "$launcher" <<'LAUNCHER'
-#!/bin/bash
-set -euo pipefail
-
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-resources="$script_dir/../Resources"
-runtime="$resources/python-runtime"
-python="$runtime/bin/python3"
-support="$HOME/Library/Application Support/PDF2MD"
-
-if [[ ! -x "$python" || ! -d "$runtime/lib/python3.12" ]]; then
-  echo "bundled Python runtime is incomplete" >&2
-  exit 70
-fi
-
-mkdir -p "$support/data" "$support/cache" "$support/tmp" "$support/logs"
-export PYTHONDONTWRITEBYTECODE=1
-export PYTHONNOUSERSITE=1
-export PYTHONPATH="$resources/src:$runtime/lib/python3.12/site-packages"
-export XDG_DATA_HOME="$support/data"
-export XDG_CACHE_HOME="$support/cache"
-export TMPDIR="$support/tmp"
-export PDF2MD_RESOURCES="$resources"
-export PDF2MD_VISION_HELPER="${PDF2MD_VISION_HELPER:-$resources/vision-ocr}"
-exec "$python" -s -m parsing_core.serving.serve "$@"
-LAUNCHER
-chmod 755 "$launcher"
-ln -sfn python3 "$launcher-aarch64-apple-darwin"
+exec "$SYSTEM_PYTHON" -I -B "$helper" prepare \
+  --repo "$repo_dir" \
+  --app "$app_dir" \
+  --prepare-script "$script_dir/prepare-sidecar-python.sh" \
+  --helper "$helper" \
+  --cache "$CACHE_DIR" \
+  --archive-name "$PYTHON_ARCHIVE" \
+  --archive-url "$PYTHON_URL" \
+  --archive-sha256 "$PYTHON_SHA256" \
+  --python-version "$PYTHON_VERSION" \
+  --uv-path "$uv_path" \
+  --uv-version "$UV_VERSION" \
+  --wheelhouse-root "$wheelhouse_root"

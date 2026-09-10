@@ -2,6 +2,10 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from parsing_core.workbench.repository import (
+    WorkbenchRepository,
+    read_stable_source_markdown,
+)
 from parsing_core.workbench.source_import import source_anchors
 
 READING_RULES = """\
@@ -13,6 +17,7 @@ READING_RULES = """\
 - 服务贴文和公众号长文素材。
 - 每章最终必须包含两张 Mermaid 图：知识结构图和应用流程图。
 """
+TASK_PACKAGE_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -25,13 +30,20 @@ class TaskPackage:
     citation_ids: tuple[str, ...] = ()
 
 
-def build_task_package(repo, chapter_id: str, round_key: str) -> TaskPackage:
+def build_task_package(repo: WorkbenchRepository, chapter_id: str, round_key: str) -> TaskPackage:
     chapter = repo.get_chapter(chapter_id)
     if chapter is None:
         raise ValueError("chapter not found")
 
-    source_text = Path(chapter.source_md_path).read_text(encoding="utf-8")
-    snapshot, fingerprint = repo.chapter_input_snapshot(chapter_id)
+    source_bytes, source_hash = read_stable_source_markdown(chapter.source_md_path)
+    try:
+        source_text = source_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("chapter source must be UTF-8") from exc
+    snapshot, fingerprint = repo.chapter_input_snapshot(
+        chapter_id,
+        source_content_hash=source_hash,
+    )
     main_anchors = source_anchors(source_text, chapter.source_id[:12], prefix="src")
     attachment_citation_ids = tuple(
         anchor["citation_id"]
@@ -40,8 +52,8 @@ def build_task_package(repo, chapter_id: str, round_key: str) -> TaskPackage:
     )
     attachment_text = "\n".join(
         f"[{anchor['citation_id']}] {anchor['text']}"
-        for attachment in repo.list_attachments(chapter_id)
-        for anchor in json.loads(attachment.anchors_json)
+        for attachment in snapshot["attachments"]
+        for anchor in attachment["anchors"]
     )
     source_text_with_citations = "\n\n".join(
         f"[{anchor['citation_id']}] {anchor['text']}" for anchor in main_anchors
@@ -66,7 +78,9 @@ def write_task_package(package: TaskPackage, base_dir: str | Path) -> str:
     return str(path)
 
 
-def build_review_package(repo, chapter_id: str, candidates: dict[str, str]) -> str:
+def build_review_package(
+    repo: WorkbenchRepository, chapter_id: str, candidates: dict[str, str]
+) -> str:
     chapter = repo.get_chapter(chapter_id)
     if chapter is None:
         raise ValueError("chapter not found")

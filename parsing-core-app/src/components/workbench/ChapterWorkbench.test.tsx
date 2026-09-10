@@ -847,7 +847,7 @@ describe("ChapterWorkbench", () => {
     expect(screen.queryByRole("textbox", { name: "知识结构图 Mermaid 源码" })).not.toBeInTheDocument();
     expect(screen.getByText("还没有精读结果")).toBeInTheDocument();
     expect(screen.getByTestId("current-location")).toHaveTextContent("/workbench/chapter");
-    expect(screen.getByTestId("current-location")).not.toHaveTextContent("chapterId");
+    await waitFor(() => expect(screen.getByTestId("current-location")).not.toHaveTextContent("chapterId"));
     const unload = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(unload);
     expect(unload.defaultPrevented).toBe(false);

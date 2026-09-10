@@ -9,9 +9,10 @@ import re
 import secrets
 import stat
 import weakref
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple, Never, SupportsIndex
 
 from jsonschema import Draft202012Validator
 
@@ -33,6 +34,7 @@ _FENCE_RE = re.compile(r"^```mermaid\n(.*?)\n^```$", re.MULTILINE | re.DOTALL)
 _DANGEROUS_RE = re.compile(
     r"(?is)<\s*/?\s*(?:script|iframe|object|embed|style|link)|javascript\s*:|on[a-z]+\s*=|%%\{"
 )
+_MERMAID_ACTIVE_URI_RE = re.compile(r"(?is)\b(?:url\s*\(|(?:javascript|data|vbscript)\s*:)")
 _DIRECTION_RE = re.compile(r"^(?:TD|TB|LR|RL|BT)$")
 _FLOW_LINE_RE = re.compile(
     r"^[A-Za-z][A-Za-z0-9_-]*(?:\[[^\r\n]*\]|\(\([^\r\n]*\)\))?"
@@ -50,7 +52,7 @@ class MarkdownNoteError(ValueError):
     pass
 
 
-class AcceptedIntensiveReadingNote(dict):
+class AcceptedIntensiveReadingNote(dict[str, object]):
     """An in-memory note minted only by the accepted OCR builder."""
 
     __slots__ = ("__weakref__",)
@@ -61,17 +63,31 @@ class _BuildCredential:
 
     __slots__ = ()
 
-    def __copy__(self):
+    def __copy__(self) -> Never:
         raise TypeError("build credential cannot be copied")
 
-    def __deepcopy__(self, _memo):
+    def __deepcopy__(self, _memo: object) -> Never:
         raise TypeError("build credential cannot be copied")
 
-    def __reduce__(self):
+    def __reduce__(self) -> Never:
         raise TypeError("build credential cannot be serialized")
 
-    def __reduce_ex__(self, _protocol):
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
         raise TypeError("build credential cannot be serialized")
+
+
+@dataclass(frozen=True)
+class _AcceptedBlock:
+    id: str
+    text: object
+    reading_order: int
+
+
+class _AcceptedPage(NamedTuple):
+    page: int
+    evidence: str
+    input_fingerprint: str
+    blocks: tuple[_AcceptedBlock, ...]
 
 
 _ACCEPTED_NOTE_REFS: dict[int, tuple[weakref.ReferenceType[AcceptedIntensiveReadingNote], str]] = {}
@@ -86,12 +102,21 @@ def _register_built_note(note: AcceptedIntensiveReadingNote, credential: _BuildC
         raise MarkdownNoteError("note was not built by the accepted OCR builder")
     note_id = id(note)
 
-    def remove(_ref, *, note_id=note_id):
+    metadata = note.get("metadata")
+    fingerprint = metadata.get("note_fingerprint") if isinstance(metadata, Mapping) else None
+    if not isinstance(fingerprint, str):
+        raise MarkdownNoteError("note was not built by the accepted OCR builder")
+
+    def remove(
+        _ref: weakref.ReferenceType[AcceptedIntensiveReadingNote],
+        *,
+        note_id: int = note_id,
+    ) -> None:
         _ACCEPTED_NOTE_REFS.pop(note_id, None)
 
     _ACCEPTED_NOTE_REFS[note_id] = (
         weakref.ref(note, remove),
-        note["metadata"]["note_fingerprint"],
+        fingerprint,
     )
 
 
@@ -101,7 +126,9 @@ def _require_accepted_note(note: Mapping[str, Any]) -> None:
     registered = _ACCEPTED_NOTE_REFS.get(id(note))
     if registered is None or registered[0]() is not note:
         raise MarkdownNoteError("note is not an accepted OCR context")
-    if note.get("metadata", {}).get("note_fingerprint") != registered[1]:
+    metadata = note.get("metadata")
+    fingerprint = metadata.get("note_fingerprint") if isinstance(metadata, Mapping) else None
+    if fingerprint != registered[1]:
         raise MarkdownNoteError("accepted OCR context was modified")
 
 
@@ -123,7 +150,7 @@ def build_intensive_reading_note(
         validate_chapter_confirmation(dict(confirmation), dict(chapter_tree))
     except Exception as exc:
         raise MarkdownNoteError("chapter confirmation is invalid") from exc
-    if confirmation["action"] != "confirm" or confirmation["chapter"] is None:
+    if confirmation["action"] not in {"confirm", "edit"} or confirmation["chapter"] is None:
         raise MarkdownNoteError("a confirmed chapter is required")
     if not _safe_token(source_id) or not _safe_token(prompt_rules_version):
         raise MarkdownNoteError("source and prompt rule identifiers are invalid")
@@ -138,9 +165,9 @@ def build_intensive_reading_note(
     evidence_lines: list[str] = []
     for page, evidence, page_input, blocks in page_records:
         for block in blocks:
-            block_id = block["id"]
+            block_id = block.id
             citation = f"[src:{source_id}:p{page}:{block_id}]"
-            text = _safe_markdown_text(block.get("text", ""))
+            text = _safe_markdown_text(block.text)
             if text:
                 source_refs.append(citation)
                 evidence_lines.append(
@@ -150,7 +177,7 @@ def build_intensive_reading_note(
     if not evidence_lines:
         raise MarkdownNoteError("accepted OCR contains no text evidence")
 
-    metadata = {
+    metadata: dict[str, object] = {
         "input_fingerprint": chapter_tree["input_fingerprint"],
         "chapter_fingerprint": confirmation["chapter_fingerprint"],
         "evidence_fingerprint": chapter_tree["evidence_fingerprint"],
@@ -163,7 +190,7 @@ def build_intensive_reading_note(
         "page_end": chapter["page_end"],
         "citation_ids": source_refs,
     }
-    sections = [
+    sections: list[dict[str, object]] = [
         {
             "key": key,
             "title": title,
@@ -174,7 +201,7 @@ def build_intensive_reading_note(
         }
         for key, title in SECTION_ORDER
     ]
-    mermaid = [
+    mermaid: list[dict[str, object]] = [
         {
             "key": "concept_map",
             "title": "知识结构图",
@@ -247,7 +274,12 @@ def validate_mermaid_block(source: str, *, expected_type: str | None = None) -> 
     if not isinstance(source, str) or not source.strip() or len(source) > 20_000:
         raise MarkdownNoteError("Mermaid source is invalid")
     source = source.replace("\r\n", "\n").strip()
-    if "```" in source or _DANGEROUS_RE.search(source) or "<" in source:
+    if (
+        "```" in source
+        or _DANGEROUS_RE.search(source)
+        or _MERMAID_ACTIVE_URI_RE.search(source)
+        or "<" in source
+    ):
         raise MarkdownNoteError("Mermaid source contains unsafe syntax")
     lines = source.splitlines()
     first = lines[0].split()
@@ -339,7 +371,7 @@ def _accepted_pages(
     chapter: Mapping[str, Any],
     *,
     expected_input_fingerprint: str,
-):
+) -> list[_AcceptedPage]:
     records = sorted(list(pages), key=lambda item: _page_number(item))
     start, end = chapter["page_start"], chapter["page_end"]
     if start is None or end is None or end < start:
@@ -347,26 +379,48 @@ def _accepted_pages(
     selected = [item for item in records if start <= _page_number(item) <= end]
     if [item["page"] for item in selected] != list(range(start, end + 1)):
         raise MarkdownNoteError("chapter OCR page sequence is incomplete")
-    result = []
+    result: list[_AcceptedPage] = []
     for record in selected:
         decision = record.get("decision")
         payload = decision.get("payload") if isinstance(decision, dict) else None
         if not isinstance(payload, dict) or payload.get("status") != "accepted":
             raise MarkdownNoteError("chapter requires accepted OCR decisions")
         page_info = payload.get("page")
+        if not isinstance(page_info, dict):
+            raise MarkdownNoteError("chapter OCR evidence is invalid")
+        width = page_info.get("width")
+        height = page_info.get("height")
+        if not isinstance(width, int) or not isinstance(height, int):
+            raise MarkdownNoteError("chapter OCR evidence is invalid")
         try:
             validate_persisted_payload(
                 payload,
                 kind="adjudication",
                 page=record["page"],
-                width=page_info["width"],
-                height=page_info["height"],
+                width=width,
+                height=height,
             )
         except (CodexVisionError, KeyError, TypeError) as exc:
             raise MarkdownNoteError("chapter OCR evidence is invalid") from exc
-        blocks = sorted(
-            payload["final_blocks"], key=lambda item: (item["reading_order"], item["id"])
-        )
+        raw_blocks = payload.get("final_blocks")
+        if not isinstance(raw_blocks, list):
+            raise MarkdownNoteError("chapter OCR evidence is invalid")
+        blocks: list[_AcceptedBlock] = []
+        for raw_block in raw_blocks:
+            if not isinstance(raw_block, dict):
+                raise MarkdownNoteError("chapter OCR evidence is invalid")
+            block_id = raw_block.get("id")
+            reading_order = raw_block.get("reading_order")
+            if not isinstance(block_id, str) or not isinstance(reading_order, int):
+                raise MarkdownNoteError("chapter OCR evidence is invalid")
+            blocks.append(
+                _AcceptedBlock(
+                    id=block_id,
+                    text=raw_block.get("text", ""),
+                    reading_order=reading_order,
+                )
+            )
+        blocks.sort(key=lambda item: (item.reading_order, item.id))
         page_input = record.get("page_input_fingerprint")
         evidence = record.get("evidence_fingerprint")
         if not isinstance(evidence, str) or not evidence:
@@ -375,11 +429,23 @@ def _accepted_pages(
             raise MarkdownNoteError("chapter OCR fingerprints are missing")
         if page_input != expected_input_fingerprint:
             raise MarkdownNoteError("chapter OCR input fingerprint is inconsistent")
-        result.append((record["page"], evidence, page_input, blocks))
+        result.append(
+            _AcceptedPage(
+                page=_page_number(record),
+                evidence=evidence,
+                input_fingerprint=page_input,
+                blocks=tuple(blocks),
+            )
+        )
     return result
 
 
-def _render_markdown(chapter, metadata, sections, mermaid):
+def _render_markdown(
+    chapter: Mapping[str, object],
+    metadata: Mapping[str, object],
+    sections: Iterable[Mapping[str, object]],
+    mermaid: Sequence[Mapping[str, object]],
+) -> str:
     lines = [
         f"# {_safe_markdown_text(chapter['number'])} {_safe_markdown_text(chapter['title'])}",
         "",
@@ -395,11 +461,20 @@ def _render_markdown(chapter, metadata, sections, mermaid):
         lines.append(f"> Prompt 指纹：`{metadata['prompt_fingerprint']}`")
     lines.append("")
     for section in sections:
-        lines.extend([f"## {section['title']}", "", section["content"], ""])
-        if section["key"] == "source_evidence":
+        title = section["title"]
+        content = section["content"]
+        key = section["key"]
+        if not isinstance(title, str) or not isinstance(content, str) or not isinstance(key, str):
+            raise MarkdownNoteError("note section is invalid")
+        lines.extend([f"## {title}", "", content, ""])
+        if key == "source_evidence":
             lines.extend(["来源引用必须保持在本章正文和后续模型输出中。", ""])
-    lines.extend([f"## {mermaid[0]['title']}", "", "```mermaid", mermaid[0]["source"], "```", ""])
-    lines.extend([f"## {mermaid[1]['title']}", "", "```mermaid", mermaid[1]["source"], "```", ""])
+    for diagram in (mermaid[0], mermaid[1]):
+        title = diagram["title"]
+        source = diagram["source"]
+        if not isinstance(title, str) or not isinstance(source, str):
+            raise MarkdownNoteError("note Mermaid diagram is invalid")
+        lines.extend([f"## {title}", "", "```mermaid", source, "```", ""])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -423,7 +498,7 @@ def _mermaid_label(value: str) -> str:
     return value
 
 
-def _safe_markdown_text(value: Any) -> str:
+def _safe_markdown_text(value: object) -> str:
     if not isinstance(value, str):
         raise MarkdownNoteError("OCR text is invalid")
     value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", value).strip()
@@ -432,11 +507,11 @@ def _safe_markdown_text(value: Any) -> str:
     return value[:8192]
 
 
-def _safe_token(value: Any) -> bool:
+def _safe_token(value: object) -> bool:
     return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value))
 
 
-def _page_number(record: Mapping[str, Any]) -> int:
+def _page_number(record: Mapping[str, object]) -> int:
     value = record.get("page")
     if isinstance(value, dict):
         value = value.get("number")
@@ -445,17 +520,20 @@ def _page_number(record: Mapping[str, Any]) -> int:
     return value
 
 
-def _digest(value: Any) -> str:
+def _digest(value: object) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _load_schema() -> dict[str, Any]:
+def _load_schema() -> dict[str, object]:
     path = Path(__file__).with_name("schemas") / "intensive-reading-note.json"
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise MarkdownNoteError("note schema cannot be loaded") from exc
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise MarkdownNoteError("note schema cannot be loaded")
+    return {key: item for key, item in value.items() if isinstance(key, str)}
 
 
 def _open_safe_parent(parent: Path) -> int:

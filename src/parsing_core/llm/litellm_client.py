@@ -1,5 +1,6 @@
 import time
 import uuid
+from collections.abc import Callable
 
 import litellm
 
@@ -9,16 +10,18 @@ from parsing_core.llm.prompt_templates import SECTION_INTERPRET_PROMPT
 from parsing_core.models.dataclasses import AIArtifact, Section
 from parsing_core.utils.retry import with_retry
 
+ProgressCallback = Callable[[str, str, dict[str, object]], None]
+
 
 class RealLLMClient(LLMClient):
-    def __init__(self, tier: str, on_progress=None):
+    def __init__(self, tier: str, on_progress: ProgressCallback | None = None) -> None:
         self.tier = tier
         self._on_progress = on_progress
         self._cfg = get_tier_config(tier)
 
     def interpret(self, section: Section, raw_md: str) -> AIArtifact:
         prompt = SECTION_INTERPRET_PROMPT.format(raw_md=raw_md)
-        kwargs = {
+        kwargs: dict[str, object] = {
             "model": self._cfg["model"],
             "messages": [{"role": "user", "content": prompt}],
         }
@@ -33,7 +36,7 @@ class RealLLMClient(LLMClient):
         full_response = ""
 
         @with_retry(max_attempts=3, base_delay=2.0)
-        def _call():
+        def _call() -> str:
             nonlocal full_response
             response = litellm.completion(**kwargs)
             if self._cfg.get("stream"):

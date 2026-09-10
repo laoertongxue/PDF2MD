@@ -70,13 +70,18 @@ def test_pipeline_syncs_markdown_only_after_database_publication(tmp_path, monke
     repo, topic, _ = setup_topic(tmp_path)
     observed = []
 
-    def observe_sync(current_repo, topic_id, *, fence):
-        fence()
+    def observe_sync(current_repo, topic_id, *, owner_id, clock, lease_ttl):
         observed.append(
             (
                 current_repo.get_topic(topic_id).status,
                 len(current_repo.list_topic_note_blocks(topic_id)),
             )
+        )
+        current_repo.finish_topic_markdown_sync(
+            topic_id,
+            owner_id,
+            "SYNCED",
+            now=clock(),
         )
 
     monkeypatch.setattr(topic_pipeline_module, "sync_topic_markdown", observe_sync)
@@ -87,8 +92,14 @@ def test_pipeline_syncs_markdown_only_after_database_publication(tmp_path, monke
 def test_markdown_sync_failure_does_not_rollback_or_mark_model_run_failed(tmp_path, monkeypatch):
     repo, topic, _ = setup_topic(tmp_path)
 
-    def fail_sync(repo, topic_id, *, fence):
-        fence()
+    def fail_sync(repo, topic_id, *, owner_id, clock, lease_ttl):
+        repo.finish_topic_markdown_sync(
+            topic_id,
+            owner_id,
+            "FAILED",
+            "disk full",
+            now=clock(),
+        )
         raise OSError("disk full")
 
     monkeypatch.setattr(topic_pipeline_module, "sync_topic_markdown", fail_sync)
@@ -100,6 +111,44 @@ def test_markdown_sync_failure_does_not_rollback_or_mark_model_run_failed(tmp_pa
     assert repo.get_topic_markdown_sync_state(topic.id).status == "FAILED"
 
 
+def test_topic_markdown_sync_error_has_safe_code_message_and_empty_exception_chain(
+    tmp_path,
+    monkeypatch,
+):
+    repo, topic, _ = setup_topic(tmp_path)
+    token = "topic-public-exception-token"
+    absolute_path = "/Users/private/topic.md"
+    stderr = "stderr: upstream request failed"
+
+    try:
+        cause = RuntimeError(f"cause {token} {absolute_path}")
+        cause.add_note(f"cause note {stderr}")
+        raise OSError(f"Authorization: Bearer {token} {absolute_path} {stderr}") from cause
+    except OSError as error_with_context:
+        error_with_context.add_note(f"outer note {token}")
+        rich_error = error_with_context
+
+    def fail_sync(*_args, **_kwargs):
+        raise rich_error
+
+    monkeypatch.setattr(topic_pipeline_module, "sync_topic_map_markdown", fail_sync)
+
+    with pytest.raises(TopicMarkdownSyncError) as captured:
+        TopicFusionPipeline(repo, StubIntensiveReadingExecutor()).retry_markdown_sync(topic.id)
+
+    error = captured.value
+    assert error.code == "TOPIC_MARKDOWN_PUBLICATION_FAILED"
+    assert error.args == ("topic Markdown publication failed",)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert getattr(error, "__notes__", []) == []
+    exposed = repr(
+        (error.args, error.__cause__, error.__context__, getattr(error, "__notes__", []))
+    )
+    for forbidden in (token, absolute_path, stderr, "Bearer"):
+        assert forbidden not in exposed
+
+
 def test_retry_markdown_sync_uses_published_db_without_model(tmp_path, monkeypatch):
     repo, topic, _ = setup_topic(tmp_path)
     pipeline = TopicFusionPipeline(repo, StubIntensiveReadingExecutor())
@@ -107,9 +156,9 @@ def test_retry_markdown_sync_uses_published_db_without_model(tmp_path, monkeypat
     repo.set_topic_markdown_sync_state(topic.id, "FAILED", "disk failed")
     calls = []
 
-    def observe_retry(repo, topic_id, *, fence):
-        fence()
+    def observe_retry(repo, topic_id, *, owner_id, clock, lease_ttl):
         calls.append(topic_id)
+        repo.finish_topic_markdown_sync(topic_id, owner_id, "SYNCED", now=clock())
 
     monkeypatch.setattr(topic_pipeline_module, "sync_topic_markdown", observe_retry)
     pipeline.retry_markdown_sync(topic.id)
@@ -129,9 +178,9 @@ def test_retry_markdown_sync_accepts_stale_or_failed_complete_publication(
     repo.set_topic_markdown_sync_state(topic.id, "FAILED", "retry requested")
     calls = []
 
-    def observe_retry(repo, topic_id, *, fence):
-        fence()
+    def observe_retry(repo, topic_id, *, owner_id, clock, lease_ttl):
         calls.append(topic_id)
+        repo.finish_topic_markdown_sync(topic_id, owner_id, "SYNCED", now=clock())
 
     monkeypatch.setattr(topic_pipeline_module, "sync_topic_map_markdown", observe_retry)
 
@@ -242,6 +291,12 @@ def test_only_one_request_can_start_and_interrupted_run_can_be_recovered(tmp_pat
         "graph TD\n  subgraph S[一]\n  A --> B\n  end\n  end",
         "```mermaid\ngraph TD\nA --> B\n```",
         "graph TD\n  A[<script>alert(1)</script>] --> B",
+        "graph TD\n  A --> B\n  style A fill:url(javascript:alert(1)) RED",
+        "graph TD\n  A --> B\n  style A fill:javascript:alert(1)",
+        "graph TD\n  A --> B\n  style A fill:data:text",
+        "graph TD\n  A --> B\n  style A fill:vbscript:msgbox(1)",
+        "graph TD\n  %%{init: {'theme': 'dark'}}%%\n  A --> B",
+        "graph TD\n  %% { InIt: {'theme': 'dark'} } %%\n  A --> B",
     ],
 )
 def test_mermaid_subset_rejects_invalid_or_dangerous_syntax(diagram):
@@ -263,6 +318,10 @@ style C fill:#eee
 linkStyle 0 stroke:#333
 """
     )
+
+
+def test_mermaid_subset_accepts_safe_english_label_with_colon():
+    validate_mermaid_subset("flowchart LR\nA[Data: Model] --> B")
 
 
 def test_mermaid_subset_accepts_nested_subgraphs():
@@ -633,7 +692,8 @@ def test_interrupted_published_topic_becomes_stale_without_output_loss(tmp_path)
     assert recovered.status == "STALE"
     assert (repo.list_topic_note_blocks(topic.id), repo.list_topic_cards(topic.id)) == old
     assert repo.list_topic_runs(topic.id)[-1].status == "FAILED"
-    assert repo.list_topic_runs(topic.id)[-1].error == "interrupted"
+    assert repo.list_topic_runs(topic.id)[-1].error == "topic generation interrupted"
+    assert repo.list_topic_runs(topic.id)[-1].error_code == "TOPIC_GENERATION_INTERRUPTED"
     assert repo.get_topic_generation_lease(topic.id) is None
 
 

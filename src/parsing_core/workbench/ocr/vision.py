@@ -9,15 +9,19 @@ import stat
 import subprocess
 import threading
 import time
+from collections import OrderedDict
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .alignment import primary_block_uncertainty_reason
 from .models import OcrObservation
 from .page_cache import (
     CachedPagePayload,
     CacheInputs,
+    CacheLimits,
     PageCache,
     PageCacheError,
     SourceSnapshot,
@@ -39,6 +43,9 @@ _MAX_PAGE_NUMBER = 10_000
 _MAX_DPI = 600
 _ALLOWED_HELPER_ENV = frozenset({"HOME", "PATH", "TMPDIR"})
 _HELPER_LOCALE_ENV = {"LANG": "C.UTF-8", "LC_CTYPE": "C.UTF-8"}
+_HELPER_GROUP_POLL_ATTEMPTS = 10
+_HELPER_GROUP_POLL_INTERVAL = 0.01
+_HELPER_CLEANUP_FAILURE = "helper process cleanup failed"
 
 
 @dataclass(frozen=True)
@@ -55,6 +62,89 @@ class VisionPageResult:
     height: int
     supported_languages: tuple[str, ...]
     observation: OcrObservation
+
+
+def canonicalize_vision_payload(
+    payload: object,
+    *,
+    page: int,
+    width: int,
+    height: int,
+    image_sha256: str,
+) -> dict[str, Any]:
+    """Adapt validated Apple Vision observations to the shared OCR block contract."""
+    if not isinstance(payload, dict):
+        raise VisionClientError("vision OCR evidence is invalid")
+    if isinstance(payload.get("blocks"), list):
+        canonical = json.loads(json.dumps(payload, ensure_ascii=False))
+        if not isinstance(canonical, dict):
+            raise VisionClientError("vision OCR evidence is invalid")
+        return canonical
+    observations = _validate_observations(payload.get("observations"))
+    ordered = sorted(
+        enumerate(observations),
+        key=lambda item: (
+            item[1]["bounding_box"]["y"],
+            item[1]["bounding_box"]["x"],
+            item[0],
+        ),
+    )
+    blocks: list[dict[str, Any]] = []
+    uncertain_items: list[dict[str, Any]] = []
+    for reading_order, (_source_index, observation) in enumerate(ordered, start=1):
+        bounding_box = dict(observation["bounding_box"])
+        stable_material = {
+            "page": page,
+            "reading_order": reading_order,
+            "text": observation["text"],
+            "confidence": observation["confidence"],
+            "bounding_box": bounding_box,
+            "candidates": list(observation["candidates"]),
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                stable_material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+        block_id = f"apple-p{page:05d}-b{reading_order:04d}-{digest}"
+        block = {
+            "id": block_id,
+            "type": "paragraph",
+            "text": observation["text"],
+            "region": bounding_box,
+            "bounding_box": dict(bounding_box),
+            "confidence": observation["confidence"],
+            "reading_order": reading_order,
+            "candidates": [dict(candidate) for candidate in observation["candidates"]],
+            "uncertainty_reason": "",
+            "table": None,
+            "formula": None,
+            "source_region": block_id,
+        }
+        reason = primary_block_uncertainty_reason(block)
+        if reason is not None:
+            block["uncertainty_reason"] = reason
+            uncertain_items.append(
+                {
+                    "block_id": block_id,
+                    "reason": reason,
+                    "confidence": observation["confidence"],
+                }
+            )
+        blocks.append(block)
+
+    return {
+        "id": f"apple-{image_sha256[:24]}-p{page}",
+        "engine": "apple_vision",
+        "input_fingerprint": image_sha256,
+        "page": {"number": page, "width": width, "height": height},
+        "blocks": blocks,
+        "uncertain_items": uncertain_items,
+        "reading_order": [block["id"] for block in blocks],
+    }
 
 
 @dataclass(frozen=True)
@@ -82,7 +172,7 @@ class _HelperIdentity:
 
 
 class RegisteredPdfSources:
-    def __init__(self, paths):
+    def __init__(self, paths: Iterable[str | Path]) -> None:
         self._sources: dict[Path, tuple[int, int]] = {}
         for path in paths:
             error = None
@@ -103,7 +193,7 @@ class RegisteredPdfSources:
             return source.path
 
     @contextmanager
-    def open_validated(self, path: Path | str):
+    def open_validated(self, path: Path | str) -> Iterator[_OpenedPdfSource]:
         error = None
         fd = None
         try:
@@ -115,10 +205,10 @@ class RegisteredPdfSources:
             canonical, fd, identity = self._open_pdf(candidate, expected=expected)
         except Exception:
             error = VisionClientError("PDF source is not registered")
-        if error is not None:
+        if error is not None or fd is None:
             if fd is not None:
                 os.close(fd)
-            raise error from None
+            raise error or VisionClientError("PDF source is not registered") from None
         source = _OpenedPdfSource(canonical, fd, identity)
         try:
             yield source
@@ -165,37 +255,64 @@ class VisionClient:
     def __init__(
         self,
         *,
-        helper_path,
-        cache_root,
-        source_validator,
-        helper_version,
-        timeout=30,
-        python_executable=None,
-    ):
+        helper_path: str | Path,
+        cache_root: str | Path,
+        source_validator: RegisteredPdfSources,
+        helper_version: str,
+        timeout: float = 30,
+        python_executable: str | Path | None = None,
+        snapshot_index_max_entries: int | None = None,
+        cache_limits: CacheLimits | None = None,
+    ) -> None:
         helper_candidate = Path(helper_path).expanduser()
         self.helper_path = (
             helper_candidate if helper_candidate.is_absolute() else Path.cwd() / helper_candidate
         )
-        self.cache = PageCache(Path(cache_root))
+        effective_cache_limits = cache_limits or CacheLimits()
+        self.cache = PageCache(Path(cache_root), limits=effective_cache_limits)
         self.source_validator = source_validator
         self._declared_helper_version = str(helper_version)
         self.timeout = timeout
         self.python_executable = python_executable
+        if snapshot_index_max_entries is None:
+            snapshot_index_max_entries = effective_cache_limits.snapshot_index_max_entries
+        if (
+            not isinstance(snapshot_index_max_entries, int)
+            or isinstance(snapshot_index_max_entries, bool)
+            or snapshot_index_max_entries <= 0
+        ):
+            raise VisionClientError("vision OCR configuration is invalid")
+        self._snapshot_index_max_entries = snapshot_index_max_entries
         self._helper_identity = self._capture_helper_identity()
         self.helper_version = _stable_helper_version(
             self._declared_helper_version, self._helper_identity
         )
         self._source_snapshots_guard = threading.Lock()
-        self._source_snapshots: dict[tuple[int, int], SourceSnapshot] = {}
+        self._source_snapshots: OrderedDict[tuple[int, int], SourceSnapshot] = OrderedDict()
 
-    def recognize(self, pdf_path, *, page, dpi, languages) -> VisionPageResult:
+    def recognize(
+        self,
+        pdf_path: str | Path,
+        *,
+        page: int,
+        dpi: int,
+        languages: list[str] | tuple[str, ...],
+        deadline: float | None = None,
+        cancel_event: Any | None = None,
+    ) -> VisionPageResult:
         error = None
         try:
+            effective_deadline = _effective_deadline(self.timeout, deadline)
+            _check_execution_control(effective_deadline, cancel_event)
             with self.source_validator.open_validated(pdf_path) as source:
                 _validate_page_number(page)
                 _validate_dpi(dpi)
                 language_config = canonical_language_config(languages)
-                source_snapshot = self._snapshot_for_source(source)
+                source_snapshot = self._snapshot_for_source(
+                    source,
+                    deadline=effective_deadline,
+                    cancel_event=cancel_event,
+                )
                 inputs = CacheInputs(
                     pdf_sha256=source_snapshot.pdf_sha256,
                     page=page,
@@ -204,13 +321,31 @@ class VisionClient:
                     language_config=language_config,
                 )
                 cache_key = cache_key_for(inputs)
-                with self.cache.lock(cache_key):
-                    cached = self.cache.load_valid(cache_key, inputs)
+                with self.cache.lock(
+                    cache_key,
+                    deadline=effective_deadline,
+                    cancel_event=cancel_event,
+                ):
+                    _check_execution_control(effective_deadline, cancel_event)
+                    cached = self.cache.load_valid(
+                        cache_key,
+                        inputs,
+                        deadline=effective_deadline,
+                        cancel_event=cancel_event,
+                    )
                     if cached is not None:
                         source.assert_current()
+                        _check_execution_control(effective_deadline, cancel_event)
                         return self._result_from_cached(cached)
-                    result = self._render_and_publish(source_snapshot.path, inputs, cache_key)
+                    result = self._render_and_publish(
+                        source_snapshot,
+                        inputs,
+                        cache_key,
+                        deadline=effective_deadline,
+                        cancel_event=cancel_event,
+                    )
                     source.assert_current()
+                    _check_execution_control(effective_deadline, cancel_event)
                     return result
         except VisionClientError as exc:
             error = VisionClientError(_safe_error_message(exc))
@@ -220,12 +355,33 @@ class VisionClient:
             error = VisionClientError("vision OCR could not complete")
         raise error from None
 
-    def _snapshot_for_source(self, source: _OpenedPdfSource) -> SourceSnapshot:
+    def _snapshot_for_source(
+        self,
+        source: _OpenedPdfSource,
+        *,
+        deadline: float,
+        cancel_event: Any | None,
+    ) -> SourceSnapshot:
+        _check_execution_control(deadline, cancel_event)
         with self._source_snapshots_guard:
             snapshot = self._source_snapshots.get(source.identity)
+            if snapshot is not None:
+                self._source_snapshots.move_to_end(source.identity)
         if snapshot is not None:
             try:
-                return self.cache.validate_source_snapshot(snapshot, verify_hash=True)
+                validated = self.cache.validate_source_snapshot(
+                    snapshot,
+                    verify_hash=True,
+                    deadline=deadline,
+                    cancel_event=cancel_event,
+                )
+                with self._source_snapshots_guard:
+                    if self._source_snapshots.get(source.identity) == snapshot:
+                        self._source_snapshots[source.identity] = validated
+                        self._source_snapshots.move_to_end(source.identity)
+                return validated
+            except (InterruptedError, TimeoutError):
+                raise
             except PageCacheError:
                 with self._source_snapshots_guard:
                     if self._source_snapshots.get(source.identity) == snapshot:
@@ -234,28 +390,78 @@ class VisionClient:
         lock_token = hashlib.sha256(
             f"source-snapshot:{self.cache.root}:{source.identity[0]}:{source.identity[1]}".encode()
         ).hexdigest()
-        with self.cache.lock(lock_token):
+        with self.cache.lock(
+            lock_token,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        ):
+            _check_execution_control(deadline, cancel_event)
             with self._source_snapshots_guard:
                 snapshot = self._source_snapshots.get(source.identity)
+                if snapshot is not None:
+                    self._source_snapshots.move_to_end(source.identity)
             if snapshot is not None:
                 try:
-                    return self.cache.validate_source_snapshot(snapshot, verify_hash=True)
+                    validated = self.cache.validate_source_snapshot(
+                        snapshot,
+                        verify_hash=True,
+                        deadline=deadline,
+                        cancel_event=cancel_event,
+                    )
+                    with self._source_snapshots_guard:
+                        if self._source_snapshots.get(source.identity) == snapshot:
+                            self._source_snapshots[source.identity] = validated
+                            self._source_snapshots.move_to_end(source.identity)
+                    return validated
+                except (InterruptedError, TimeoutError):
+                    raise
                 except PageCacheError:
                     with self._source_snapshots_guard:
                         if self._source_snapshots.get(source.identity) == snapshot:
                             del self._source_snapshots[source.identity]
-            snapshot = self.cache.publish_source_snapshot(source.fd)
+            snapshot = self.cache.publish_source_snapshot(
+                source.fd,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            )
+            _check_execution_control(deadline, cancel_event)
             with self._source_snapshots_guard:
                 self._source_snapshots[source.identity] = snapshot
+                self._source_snapshots.move_to_end(source.identity)
+                while len(self._source_snapshots) > self._snapshot_index_max_entries:
+                    self._source_snapshots.popitem(last=False)
             return snapshot
 
     def _render_and_publish(
-        self, source_path: Path, inputs: CacheInputs, cache_key: str
+        self,
+        source_snapshot: SourceSnapshot,
+        inputs: CacheInputs,
+        cache_key: str,
+        *,
+        deadline: float,
+        cancel_event: Any | None,
     ) -> VisionPageResult:
         job_relative, job_dir, job_root = self.cache.make_job_dir(cache_key)
         temp_image = self.cache.temporary_image_path(cache_key)
         try:
-            response = self._run_helper(source_path, inputs, job_relative, job_root)
+            with self.cache.open_source_snapshot(
+                source_snapshot,
+                verify_hash=False,
+                record_access=False,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            ) as (_validated_snapshot, source_fd):
+                response = self._run_helper(
+                    Path(f"/dev/fd/{source_fd}"),
+                    inputs,
+                    job_relative,
+                    job_root,
+                    source_fd=source_fd,
+                    deadline=deadline,
+                    cancel_event=cancel_event,
+                )
+            self.cache.validate_job_usage(job_root)
+            _check_execution_control(deadline, cancel_event)
             validated = _validate_helper_response(response, inputs.page)
             copy_verified_helper_image(
                 jobs_root=job_root,
@@ -263,7 +469,11 @@ class VisionClient:
                 relative_image_path=validated["image_path"],
                 expected_sha256=validated["image_sha256"],
                 destination=temp_image,
+                max_bytes=self.cache.limits.max_page_image_bytes,
+                deadline=deadline,
+                cancel_event=cancel_event,
             )
+            _check_execution_control(deadline, cancel_event)
             cached = self.cache.publish(
                 cache_key=cache_key,
                 inputs=inputs,
@@ -273,6 +483,8 @@ class VisionClient:
                 height=validated["height"],
                 supported_languages=validated["supported_languages"],
                 observations=validated["observations"],
+                deadline=deadline,
+                cancel_event=cancel_event,
             )
             return self._result_from_cached(cached)
         except Exception:
@@ -285,8 +497,17 @@ class VisionClient:
             self.cache.cleanup_job_dir(job_root)
 
     def _run_helper(
-        self, source_path: Path, inputs: CacheInputs, job_relative: str, job_root: Path
+        self,
+        source_path: Path,
+        inputs: CacheInputs,
+        job_relative: str,
+        job_root: Path,
+        *,
+        source_fd: int,
+        deadline: float,
+        cancel_event: Any | None,
     ) -> dict[str, Any]:
+        _check_execution_control(deadline, cancel_event)
         self._verify_helper_identity()
         command = {
             "command": "render_and_recognize",
@@ -298,24 +519,30 @@ class VisionClient:
         }
         env = _helper_environment(job_root)
         args = [str(self.helper_path)]
-        process = subprocess.Popen(
-            args,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            close_fds=True,
-            start_new_session=True,
-        )
-        process_group_id = process.pid
+        try:
+            process, process_group_id = _spawn_helper_process(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                close_fds=True,
+                pass_fds=(source_fd,),
+            )
+        except Exception:
+            raise VisionClientError("vision helper is not available") from None
         try:
             stdout = self._communicate_bounded(
                 process,
                 json.dumps(command, sort_keys=True).encode("utf-8") + b"\n",
-                process_group_id,
+                deadline=deadline,
+                cancel_event=cancel_event,
             )
         finally:
-            self._close_process_pipes(process)
+            try:
+                self._terminate_process(process, process_group_id)
+            finally:
+                self._close_process_pipes(process)
         if process.returncode != 0:
             raise VisionClientError("vision helper failed")
         line = _single_stdout_response(stdout)
@@ -335,8 +562,14 @@ class VisionClient:
         return response
 
     def _communicate_bounded(
-        self, process: subprocess.Popen[bytes], payload: bytes, process_group_id: int
+        self,
+        process: subprocess.Popen[bytes],
+        payload: bytes,
+        *,
+        deadline: float,
+        cancel_event: Any | None,
     ) -> bytes:
+        _check_execution_control(deadline, cancel_event)
         try:
             if process.stdin is not None:
                 process.stdin.write(payload)
@@ -347,7 +580,6 @@ class VisionClient:
         stdout_chunks: list[bytes] = []
         stdout_size = 0
         stderr_size = 0
-        deadline = time.monotonic() + self.timeout
         selector = selectors.DefaultSelector()
         for name, pipe in (("stdout", process.stdout), ("stderr", process.stderr)):
             if pipe is None:
@@ -356,9 +588,9 @@ class VisionClient:
             selector.register(pipe.fileno(), selectors.EVENT_READ, name)
         try:
             while selector.get_map():
+                _check_execution_control(deadline, cancel_event)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    self._terminate_process(process, process_group_id)
                     raise VisionClientError("vision helper timed out")
                 for key, _mask in selector.select(timeout=min(0.1, remaining)):
                     try:
@@ -371,68 +603,29 @@ class VisionClient:
                     if key.data == "stdout":
                         stdout_size += len(chunk)
                         if stdout_size > _MAX_STDOUT_BYTES:
-                            self._terminate_process(process, process_group_id)
                             raise VisionClientError("vision helper output exceeded limit")
                         stdout_chunks.append(chunk)
                     else:
                         stderr_size += len(chunk)
                         if stderr_size > _MAX_STDERR_BYTES:
-                            self._terminate_process(process, process_group_id)
                             raise VisionClientError("vision helper output exceeded limit")
-            remaining = deadline - time.monotonic()
-            if process.poll() is None:
+            while process.poll() is None:
+                _check_execution_control(deadline, cancel_event)
+                remaining = deadline - time.monotonic()
                 try:
-                    process.wait(timeout=max(0, remaining))
+                    process.wait(timeout=min(0.1, max(0, remaining)))
                 except subprocess.TimeoutExpired:
-                    self._terminate_process(process, process_group_id)
-                    raise VisionClientError("vision helper timed out") from None
+                    continue
         finally:
             selector.close()
         return b"".join(stdout_chunks)
 
     @staticmethod
-    def _terminate_process(process: subprocess.Popen[bytes], process_group_id: int) -> None:
-        caller_group_id = os.getpgrp()
-        group_is_safe = process_group_id != caller_group_id
-        try:
-            if group_is_safe:
-                try:
-                    os.killpg(process_group_id, signal.SIGTERM)
-                except (PermissionError, ProcessLookupError):
-                    process.terminate()
-            else:
-                process.terminate()
-        except Exception:
-            pass
-        try:
-            process.wait(timeout=0.5)
-        except subprocess.TimeoutExpired:
-            pass
-        except Exception:
-            pass
-        try:
-            if group_is_safe:
-                try:
-                    os.killpg(process_group_id, signal.SIGKILL)
-                except (PermissionError, ProcessLookupError):
-                    process.kill()
-            else:
-                process.kill()
-        except Exception:
-            pass
-        try:
-            process.wait(timeout=0.5)
-        except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except Exception:
-                pass
-            try:
-                process.wait(timeout=0.5)
-            except Exception:
-                pass
-        except Exception:
-            pass
+    def _terminate_process(
+        process: subprocess.Popen[bytes],
+        process_group_id: int,
+    ) -> None:
+        _terminate_helper_process(process, process_group_id)
 
     @staticmethod
     def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
@@ -491,6 +684,18 @@ class VisionClient:
             raise VisionClientError("vision helper is not available") from None
         if current != self._helper_identity:
             raise VisionClientError("vision helper is not available")
+
+
+def _effective_deadline(timeout: float, deadline: float | None) -> float:
+    local_deadline = time.monotonic() + timeout
+    return local_deadline if deadline is None else min(local_deadline, deadline)
+
+
+def _check_execution_control(deadline: float, cancel_event: Any | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise VisionClientError("vision helper cancelled")
+    if time.monotonic() >= deadline:
+        raise VisionClientError("vision helper timed out")
 
 
 def _validate_helper_response(response: dict[str, Any], expected_page: int) -> dict[str, Any]:
@@ -643,6 +848,177 @@ def _helper_environment(job_root: Path) -> dict[str, str]:
     return env
 
 
+def _spawn_helper_process(
+    args: list[str], **popen_kwargs: Any
+) -> tuple[subprocess.Popen[bytes], int]:
+    caller_process_group_id = os.getpgrp()
+    caller_session_id = os.getsid(0)
+    process = subprocess.Popen(args, process_group=0, **popen_kwargs)
+    process_group_id: int | None = None
+    try:
+        process_group_id = os.getpgid(process.pid)
+        process_session_id = os.getsid(process.pid)
+        if (
+            process_group_id != process.pid
+            or process_group_id == caller_process_group_id
+            or process_session_id != caller_session_id
+        ):
+            raise RuntimeError("helper process group verification failed")
+    except BaseException:
+        cleanup_group_id = _confirmed_spawned_process_group(
+            process,
+            observed_process_group_id=process_group_id,
+            caller_process_group_id=caller_process_group_id,
+        )
+        if cleanup_group_id is None:
+            _terminate_known_process(process)
+        else:
+            try:
+                _terminate_helper_process(process, cleanup_group_id)
+            finally:
+                _close_helper_process_pipes(process)
+            raise
+        _close_helper_process_pipes(process)
+        raise
+    return process, process_group_id
+
+
+def _confirmed_spawned_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    observed_process_group_id: int | None,
+    caller_process_group_id: int,
+) -> int | None:
+    process_id = getattr(process, "pid", None)
+    if not isinstance(process_id, int) or process_id <= 0:
+        return None
+    if (
+        observed_process_group_id == process_id
+        and observed_process_group_id != caller_process_group_id
+    ):
+        return observed_process_group_id
+    try:
+        current_process_group_id = os.getpgid(process_id)
+    except Exception:
+        return None
+    if (
+        current_process_group_id == process_id
+        and current_process_group_id != caller_process_group_id
+    ):
+        return current_process_group_id
+    return None
+
+
+def _terminate_helper_process(
+    process: subprocess.Popen[bytes],
+    process_group_id: int,
+) -> None:
+    try:
+        group_is_safe = (
+            isinstance(process_group_id, int)
+            and process_group_id > 0
+            and process_group_id == process.pid
+            and process_group_id != os.getpgrp()
+        )
+    except Exception:
+        group_is_safe = False
+    if not group_is_safe:
+        if getattr(process, "returncode", None) is None:
+            _terminate_known_process(process)
+        return
+    if not _helper_process_group_exists(process_group_id):
+        return
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    if _wait_for_helper_process_group_exit(process, process_group_id):
+        return
+    try:
+        os.killpg(process_group_id, signal.SIGKILL)
+    except ProcessLookupError:
+        _reap_helper_root(process)
+        return
+    except OSError:
+        pass
+    if _wait_for_helper_process_group_exit(process, process_group_id):
+        _reap_helper_root(process)
+        return
+    _reap_helper_root(process)
+    if _helper_process_group_exists(process_group_id):
+        raise RuntimeError(_HELPER_CLEANUP_FAILURE)
+
+
+def _helper_process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _wait_for_helper_process_group_exit(
+    process: subprocess.Popen[bytes], process_group_id: int
+) -> bool:
+    for attempt in range(_HELPER_GROUP_POLL_ATTEMPTS):
+        _poll_helper_root(process)
+        if not _helper_process_group_exists(process_group_id):
+            return True
+        if attempt + 1 < _HELPER_GROUP_POLL_ATTEMPTS:
+            time.sleep(_HELPER_GROUP_POLL_INTERVAL)
+    return False
+
+
+def _poll_helper_root(process: subprocess.Popen[bytes]) -> None:
+    if getattr(process, "returncode", None) is not None:
+        return
+    try:
+        process.poll()
+    except Exception:
+        pass
+
+
+def _reap_helper_root(process: subprocess.Popen[bytes]) -> None:
+    if getattr(process, "returncode", None) is not None:
+        return
+    try:
+        process.wait(timeout=0.1)
+    except Exception:
+        pass
+
+
+def _terminate_known_process(process: subprocess.Popen[bytes]) -> None:
+    try:
+        process.terminate()
+    except Exception:
+        pass
+    try:
+        process.wait(timeout=0.5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        return
+    try:
+        process.kill()
+    except Exception:
+        pass
+    try:
+        process.wait(timeout=0.5)
+    except Exception:
+        pass
+
+
+def _close_helper_process_pipes(process: subprocess.Popen[bytes]) -> None:
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None and not pipe.closed:
+            pipe.close()
+
+
 def _single_stdout_response(stdout: bytes) -> bytes:
     if not stdout:
         return b""
@@ -681,6 +1057,7 @@ _SAFE_ERROR_MESSAGES = frozenset(
         "vision helper reported an error",
         "vision helper returned invalid response",
         "vision helper returned no response",
+        "vision helper cancelled",
         "vision helper timed out",
     }
 )

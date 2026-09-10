@@ -1,3 +1,5 @@
+import asyncio
+import threading
 import time
 
 import pytest
@@ -20,7 +22,7 @@ TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
 ALLOWED_ORIGIN = "http://localhost:1420"
 
 
-def make_test_app(tmp_path, monkeypatch):
+def make_test_app(tmp_path, monkeypatch, *, shutdown_request=None):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     base = tmp_path / "data"
     base.mkdir()
@@ -39,6 +41,7 @@ def make_test_app(tmp_path, monkeypatch):
         orch_factory=orch_factory,
         max_global_concurrency=4,
         session_token=TEST_SESSION_TOKEN,
+        shutdown_request=shutdown_request,
     )
     return TestClient(app)
 
@@ -48,6 +51,114 @@ def test_health_returns_ok(tmp_path, monkeypatch):
     r = client.get("/health", headers={"X-PDF2MD-Session": TEST_SESSION_TOKEN})
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
+
+
+def test_shutdown_requires_current_session_and_acknowledges_once(tmp_path, monkeypatch):
+    requests = []
+    client = make_test_app(
+        tmp_path,
+        monkeypatch,
+        shutdown_request=lambda: requests.append("shutdown"),
+    )
+
+    missing = client.post("/shutdown")
+    wrong = client.post("/shutdown", headers={"X-PDF2MD-Session": "wrong-session-token"})
+    valid = client.post("/shutdown", headers={"X-PDF2MD-Session": TEST_SESSION_TOKEN})
+
+    assert missing.status_code == 401
+    assert missing.json() == {"detail": {"code": "session_required"}}
+    assert wrong.status_code == 401
+    assert wrong.json() == {"detail": {"code": "session_required"}}
+    assert valid.status_code == 200
+    assert valid.json() == {"status": "shutting_down"}
+    assert requests == ["shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_drains_scheduler_thread_before_external_hook(tmp_path):
+    loop = asyncio.get_running_loop()
+    parse_started = asyncio.Event()
+    release_parse = threading.Event()
+    thread_finished = threading.Event()
+    events: list[str] = []
+
+    class Repo:
+        def __init__(self):
+            self.batches = {}
+            self.tasks = {}
+
+        def create_batch_with_tasks(self, batch, tasks):
+            self.batches[batch["id"]] = dict(batch)
+            self.tasks.update({task.id: task for task in tasks})
+
+        def set_batch_progress(self, batch_id, completed, status=None):
+            self.batches[batch_id]["completed_tasks"] = completed
+            if status is not None:
+                self.batches[batch_id]["status"] = status
+
+        def update_task_status(self, task_id, status, error_msg=None):
+            self.tasks[task_id].status = status
+            self.tasks[task_id].error_msg = error_msg
+
+        def get_batch(self, batch_id):
+            return self.batches.get(batch_id)
+
+        def list_batches_by_status(self, status):
+            return [batch for batch in self.batches.values() if batch["status"] == status]
+
+        def list_all_batches(self):
+            return list(self.batches.values())
+
+        def list_all_tasks(self):
+            return list(self.tasks.values())
+
+    repo = Repo()
+
+    class Orch:
+        def __init__(self):
+            self.repo = repo
+            self.on_progress = None
+
+        def parse_file(self, *_args):
+            loop.call_soon_threadsafe(parse_started.set)
+            release_parse.wait(timeout=5)
+            thread_finished.set()
+
+    app = build_app(
+        orch_factory=Orch,
+        session_token=TEST_SESSION_TOKEN,
+        shutdown_hook=lambda: events.append("external-hook"),
+    )
+
+    lifespan = app.router.lifespan_context(app)
+    await lifespan.__aenter__()
+    scheduler = app.state.scheduler
+    response = await scheduler.submit_batch(files=["running.pdf"], concurrency=1)
+    await asyncio.wait_for(parse_started.wait(), timeout=1)
+
+    shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
+    await asyncio.sleep(0.05)
+    try:
+        assert not shutdown.done()
+        assert not thread_finished.is_set()
+        assert not scheduler._batches[response.batch_id].done.is_set()
+        assert repo.batches[response.batch_id]["status"] == "RUNNING"
+        assert events == []
+    finally:
+        release_parse.set()
+
+    await asyncio.wait_for(shutdown, timeout=1)
+    assert repo.batches[response.batch_id]["status"] == "CANCELLED"
+    assert events == ["external-hook"]
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_interactive_api_docs_are_disabled(tmp_path, monkeypatch, path):
+    client = make_test_app(tmp_path, monkeypatch)
+
+    response = client.get(path)
+
+    assert response.status_code == 404
 
 
 def test_health_requires_matching_session_without_origin(tmp_path, monkeypatch):

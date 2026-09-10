@@ -42,24 +42,24 @@ def main() -> int:
     orch = _build_orchestrator()
 
     if args.cmd == "parse":
-        out = orch.parse_file(args.file_path, force=args.force)
-        print(json.dumps(out, ensure_ascii=False))
+        parse_result = orch.parse_file(args.file_path, force=args.force)
+        print(json.dumps(parse_result, ensure_ascii=False))
         return 0
     if args.cmd == "resume":
-        out = orch.resume(args.task_id)
-        print(json.dumps(out, ensure_ascii=False))
+        resume_result = orch.resume(args.task_id)
+        print(json.dumps(resume_result, ensure_ascii=False))
         return 0
     if args.cmd == "status":
-        out = orch.status(args.task_id)
-        print(json.dumps(out, ensure_ascii=False))
+        status_result = orch.status(args.task_id)
+        print(json.dumps(status_result, ensure_ascii=False))
         return 0
     if args.cmd == "list":
-        out = orch.list_all()
-        print(json.dumps(out, ensure_ascii=False))
+        list_result = orch.list_all()
+        print(json.dumps(list_result, ensure_ascii=False))
         return 0
     if args.cmd == "purge":
-        out = orch.purge(args.task_id)
-        print(json.dumps(out, ensure_ascii=False))
+        purge_result = orch.purge(args.task_id)
+        print(json.dumps(purge_result, ensure_ascii=False))
         return 0
     return 1
 

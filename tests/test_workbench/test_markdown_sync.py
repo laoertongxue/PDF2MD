@@ -1,7 +1,9 @@
 import gc
+import multiprocessing
 import os
 import threading
 import unicodedata
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -9,14 +11,31 @@ import pytest
 from parsing_core.storage.schema import init_db
 from parsing_core.workbench import markdown_sync
 from parsing_core.workbench.markdown_sync import (
+    ChapterMarkdownSyncError,
     allocate_safe_source_names,
     atomic_write_bundle,
+    recover_atomic_bundle,
     redact_sensitive_text,
     safe_name,
+    staged_atomic_write_bundle_fd,
     sync_chapter_markdown,
 )
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.schema import apply_workbench_schema
+
+
+def _hold_publication_lock(directory, entered, release, tamper_detected):
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            with markdown_sync._locked_bundle_directories([dir_fd]):
+                entered.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("publication lock test timed out")
+        except OSError:
+            tamper_detected.set()
+    finally:
+        os.close(dir_fd)
 
 
 def test_sync_chapter_markdown_writes_note_cards_and_mermaid(tmp_path):
@@ -63,6 +82,297 @@ def test_sync_chapter_markdown_uses_pure_mermaid_from_fenced_body(tmp_path):
     note = Path(paths["note"]).read_text(encoding="utf-8")
     assert note.count("```mermaid") == 1
     assert "CustomNode[自定义节点]" in note
+
+
+def test_publication_writer_uses_recovery_compatible_file_then_database_lock_order(
+    tmp_path,
+    monkeypatch,
+):
+    conn = init_db(str(tmp_path / "workbench.db"))
+    apply_workbench_schema(conn)
+    repo = WorkbenchRepository(conn)
+    course = repo.create_course("战略管理", "", str(tmp_path / "out"))
+    source = repo.create_source(course.id, "main", "/tmp/book.pdf", "战略教材")
+    source_md = tmp_path / "source.md"
+    source_md.write_text("## 第一章\n原文", encoding="utf-8")
+    chapter = repo.create_chapter(course.id, source.id, 0, "第一章", str(source_md))
+    repo.upsert_note_block(chapter.id, "summary", "本章概要", "战略是取舍。", 0)
+    events = []
+    original_locks = markdown_sync._locked_bundle_directories
+    original_fence = repo.fence_markdown_publication
+
+    @contextmanager
+    def observe_locks(dir_fds):
+        with original_locks(dir_fds) as owned:
+            events.append("file")
+            yield owned
+
+    @contextmanager
+    def observe_fence(claim, **kwargs):
+        events.append("database")
+        with original_fence(claim, **kwargs) as fence:
+            yield fence
+
+    monkeypatch.setattr(markdown_sync, "_locked_bundle_directories", observe_locks)
+    monkeypatch.setattr(repo, "fence_markdown_publication", observe_fence)
+
+    sync_chapter_markdown(repo, chapter.id)
+
+    assert events[:2] == ["file", "database"]
+
+
+def test_plain_chapter_sync_cannot_overwrite_a_newer_publication(tmp_path, monkeypatch):
+    db_path = tmp_path / "workbench.db"
+    conn = init_db(str(db_path))
+    apply_workbench_schema(conn)
+    repo = WorkbenchRepository(conn)
+    course = repo.create_course("战略管理", "", str(tmp_path / "out"))
+    source = repo.create_source(course.id, "main", "/tmp/book.pdf", "战略教材")
+    chapter = repo.create_chapter(
+        course.id,
+        source.id,
+        0,
+        "第一章",
+        str(tmp_path / "source.md"),
+    )
+    Path(chapter.source_md_path).write_text("## 第一章\n原文", encoding="utf-8")
+    repo.upsert_note_block(chapter.id, "summary", "本章概要", "旧内容", 0)
+
+    winner_conn = init_db(str(db_path))
+    apply_workbench_schema(winner_conn)
+    winner_repo = WorkbenchRepository(winner_conn)
+    raced = False
+
+    def publish_winner_before_old_write(entity_type, entity_id):
+        nonlocal raced
+        if not raced and (entity_type, entity_id) == ("chapter", chapter.id):
+            raced = True
+            winner_repo.upsert_note_block(
+                chapter.id,
+                "summary",
+                "本章概要",
+                "winner 内容",
+                0,
+            )
+            sync_chapter_markdown(winner_repo, chapter.id)
+
+    monkeypatch.setattr(
+        markdown_sync,
+        "_publication_race_hook",
+        publish_winner_before_old_write,
+        raising=False,
+    )
+
+    with pytest.raises(ChapterMarkdownSyncError):
+        sync_chapter_markdown(repo, chapter.id)
+
+    note_path = tmp_path / "out" / "教材" / "战略教材" / "01-第一章" / "intensive-note.md"
+    note = note_path.read_text(encoding="utf-8")
+    assert "winner 内容" in note
+    assert "旧内容" not in note
+    winner_conn.close()
+    conn.close()
+
+
+def test_chapter_fence_rejects_sibling_textbook_rename_that_reallocates_directory(
+    tmp_path,
+    monkeypatch,
+):
+    conn = init_db(str(tmp_path / "workbench.db"))
+    apply_workbench_schema(conn)
+    repo = WorkbenchRepository(conn)
+    course = repo.create_course("课程", "", str(tmp_path / "out"))
+    first = repo.create_source(course.id, "main", "/tmp/first.pdf", "教材")
+    target = repo.create_source(course.id, "main", "/tmp/target.pdf", "教材")
+    raw = tmp_path / "target.md"
+    raw.write_text("目标教材原文", encoding="utf-8")
+    chapter = repo.create_chapter(course.id, target.id, 0, "章节", str(raw))
+    repo.upsert_note_block(chapter.id, "summary", "本章概要", "旧快照内容", 0)
+    old_note = tmp_path / "out" / "教材" / "教材（2）" / "01-章节" / "intensive-note.md"
+
+    assert markdown_sync.textbook_dir(repo, target).name == "教材（2）"
+
+    def rename_sibling_after_snapshot(entity_type, entity_id):
+        assert (entity_type, entity_id) == ("chapter", chapter.id)
+        repo.conn.execute(
+            "UPDATE wb_sources SET title = ? WHERE id = ?",
+            ("第一教材", first.id),
+        )
+        repo.conn.commit()
+
+    monkeypatch.setattr(
+        markdown_sync,
+        "_publication_race_hook",
+        rename_sibling_after_snapshot,
+    )
+
+    with pytest.raises(ChapterMarkdownSyncError):
+        sync_chapter_markdown(repo, chapter.id)
+
+    assert markdown_sync.textbook_dir(repo, target).name == "教材"
+    assert not old_note.exists()
+    assert not (tmp_path / "out" / "教材" / "教材" / "01-章节" / "intensive-note.md").exists()
+
+
+def test_chapter_fence_rejects_same_connection_aba_during_render(tmp_path, monkeypatch):
+    conn = init_db(str(tmp_path / "workbench.db"))
+    apply_workbench_schema(conn)
+    repo = WorkbenchRepository(conn)
+    course = repo.create_course("课程", "", str(tmp_path / "out"))
+    source = repo.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    raw = tmp_path / "raw.md"
+    raw.write_text("原文", encoding="utf-8")
+    chapter = repo.create_chapter(course.id, source.id, 0, "章节", str(raw))
+    repo.upsert_note_block(chapter.id, "summary", "本章概要", "STATE-A", 0)
+    note_path = Path(sync_chapter_markdown(repo, chapter.id)["note"])
+
+    original = repo.list_note_blocks
+    calls = 0
+
+    def render_transient_state(entity_id):
+        nonlocal calls
+        calls += 1
+        if calls != 2:
+            return original(entity_id)
+        conn.execute(
+            "UPDATE wb_note_blocks SET body = 'TRANSIENT-B' "
+            "WHERE chapter_id = ? AND kind = 'summary'",
+            (chapter.id,),
+        )
+        conn.commit()
+        transient = original(entity_id)
+        conn.execute(
+            "UPDATE wb_note_blocks SET body = 'STATE-A' WHERE chapter_id = ? AND kind = 'summary'",
+            (chapter.id,),
+        )
+        conn.commit()
+        return transient
+
+    monkeypatch.setattr(repo, "list_note_blocks", render_transient_state)
+
+    with pytest.raises(Exception) as captured:
+        sync_chapter_markdown(repo, chapter.id)
+
+    assert type(captured.value).__name__ == "ChapterMarkdownSyncError"
+    published = note_path.read_text(encoding="utf-8")
+    assert "STATE-A" in published
+    assert "TRANSIENT-B" not in published
+
+
+def test_publication_lock_survives_fixed_lock_name_rename_and_recreate(tmp_path):
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    lock_path = directory / markdown_sync.LOCK_NAME
+    lock_path.write_text("original", encoding="utf-8")
+    context = multiprocessing.get_context("spawn")
+    first_entered = context.Event()
+    first_release = context.Event()
+    first_tamper_detected = context.Event()
+    second_entered = context.Event()
+    second_release = context.Event()
+    second_tamper_detected = context.Event()
+    first = context.Process(
+        target=_hold_publication_lock,
+        args=(str(directory), first_entered, first_release, first_tamper_detected),
+    )
+    second = context.Process(
+        target=_hold_publication_lock,
+        args=(str(directory), second_entered, second_release, second_tamper_detected),
+    )
+    try:
+        first.start()
+        assert first_entered.wait(timeout=5)
+        lock_path.rename(directory / ".renamed-lock")
+        lock_path.write_text("replacement", encoding="utf-8")
+        second.start()
+        assert not second_entered.wait(timeout=0.75)
+        first_release.set()
+        assert second_entered.wait(timeout=5)
+        second_release.set()
+    finally:
+        first_release.set()
+        second_release.set()
+        for process in (first, second):
+            process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    assert first_tamper_detected.is_set()
+    assert not second_tamper_detected.is_set()
+
+
+def test_publication_lock_registry_releases_inactive_directories(tmp_path):
+    baseline = set(markdown_sync._BUNDLE_LOCKS)
+
+    for index in range(32):
+        directory = tmp_path / f"bundle-{index}"
+        directory.mkdir()
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with markdown_sync._locked_bundle_directories([dir_fd]):
+                pass
+        finally:
+            os.close(dir_fd)
+
+    assert set(markdown_sync._BUNDLE_LOCKS) == baseline
+
+
+def test_bundle_recovery_waits_for_the_same_writer_locks(tmp_path):
+    target = tmp_path / "bundle"
+    target.mkdir()
+    dir_fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY)
+    writer_ready = threading.Event()
+    release_writer = threading.Event()
+    recovery_done = threading.Event()
+    committed = False
+    errors: list[BaseException] = []
+
+    def transaction_committed(_transaction_id: str) -> bool:
+        return committed
+
+    def write_bundle() -> None:
+        try:
+            with staged_atomic_write_bundle_fd(
+                dir_fd,
+                {"note.md": "winner"},
+                transaction_id="1" * 32,
+                transaction_committed=transaction_committed,
+            ):
+                writer_ready.set()
+                assert release_writer.wait(timeout=3)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def recover_bundle() -> None:
+        try:
+            assert writer_ready.wait(timeout=3)
+            recover_atomic_bundle(
+                dir_fd,
+                transaction_committed=transaction_committed,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            recovery_done.set()
+
+    writer = threading.Thread(target=write_bundle)
+    recovery = threading.Thread(target=recover_bundle)
+    writer.start()
+    recovery.start()
+    assert writer_ready.wait(timeout=3)
+    recovered_while_writer_held_lock = recovery_done.wait(timeout=0.2)
+    committed = True
+    release_writer.set()
+    writer.join(timeout=3)
+    recovery.join(timeout=3)
+    os.close(dir_fd)
+
+    assert not recovered_while_writer_held_lock
+    assert not writer.is_alive() and not recovery.is_alive()
+    assert errors == []
+    assert (target / "note.md").read_text(encoding="utf-8") == "winner"
 
 
 def test_safe_name_normalizes_malicious_and_equivalent_names():
@@ -157,7 +467,7 @@ def test_marker_migration_preserves_unknown_files_and_conflict_fails(tmp_path):
     conflict = moved.parent / "01-冲突"
     conflict.mkdir()
     (conflict / "user.txt").write_text("用户", encoding="utf-8")
-    with pytest.raises(FileExistsError):
+    with pytest.raises(ChapterMarkdownSyncError):
         sync_chapter_markdown(repo, chapter.id)
     assert moved.exists() and (conflict / "user.txt").exists()
 
@@ -177,7 +487,7 @@ def test_preexisting_desired_chapter_directory_is_never_overwritten(tmp_path, fo
     user_file = desired / "intensive-note.md"
     user_file.write_text(f"{foreign_marker}\n用户内容", encoding="utf-8")
 
-    with pytest.raises(FileExistsError, match="target directory already exists"):
+    with pytest.raises(ChapterMarkdownSyncError):
         sync_chapter_markdown(repo, chapter.id)
     assert user_file.read_text(encoding="utf-8") == f"{foreign_marker}\n用户内容"
 
@@ -303,6 +613,143 @@ def test_chapter_run_redacts_paths_file_uris_and_keys(tmp_path):
         assert secret not in run_text
 
 
+@pytest.mark.parametrize(
+    ("header", "token"),
+    [
+        ("Authorization: Bearer chapter-token-a", "chapter-token-a"),
+        ("authorization=bearer chapter_token_b", "chapter_token_b"),
+        ('"AUTHORIZATION": "BEARER chapter.token.c"', "chapter.token.c"),
+        ("Proxy-Authorization: Bearer chapter-token-d", "chapter-token-d"),
+        ("Authorization: Basic Y2hhcHRlcjpzZWNyZXQ=", "Y2hhcHRlcjpzZWNyZXQ="),
+    ],
+)
+def test_redact_sensitive_text_removes_bearer_authorization_headers(header, token):
+    redacted = redact_sensitive_text(f"safe prefix {header} safe suffix")
+
+    assert token not in redacted
+    assert "safe prefix" in redacted
+    assert "safe suffix" in redacted
+
+
+def test_chapter_publication_removes_bearer_tokens_from_every_markdown_file(tmp_path):
+    conn = init_db(str(tmp_path / "workbench.db"))
+    apply_workbench_schema(conn)
+    repo = WorkbenchRepository(conn)
+    course = repo.create_course("课程", "", str(tmp_path / "out"))
+    source = repo.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    raw = tmp_path / "raw.md"
+    raw.write_text(
+        "普通教材内容\nAuthorization: Bearer chapter-source-token",
+        encoding="utf-8",
+    )
+    chapter = repo.create_chapter(course.id, source.id, 0, "章节", str(raw))
+    tokens = (
+        "chapter-source-token",
+        "chapter_note_token",
+        "chapter.card.token",
+        "chapter-run-token",
+    )
+    repo.upsert_note_block(
+        chapter.id,
+        "summary",
+        "本章概要",
+        f"普通笔记 Authorization: Bearer {tokens[1]}",
+        0,
+    )
+    repo.upsert_note_block(
+        chapter.id,
+        "knowledge_mermaid",
+        "知识结构图",
+        "flowchart TD\n  A[普通内容] --> B[保留结构]",
+        1,
+    )
+    repo.create_card(
+        course.id,
+        chapter.id,
+        "topic",
+        "普通卡片",
+        f"authorization=bearer {tokens[2]}",
+    )
+    repo.upsert_run(
+        chapter.id,
+        "review",
+        "exec",
+        "DONE",
+        "",
+        "",
+        " ".join(
+            [
+                f"Proxy-Authorization: Bearer {tokens[3]}",
+            ]
+        ),
+    )
+
+    sync_chapter_markdown(repo, chapter.id)
+
+    published = "\n".join(
+        path.read_text(encoding="utf-8") for path in (tmp_path / "out").rglob("*.md")
+    )
+    for token in tokens:
+        assert token not in published
+    assert "普通教材内容" in published
+    assert "普通笔记" in published
+    assert "flowchart TD" in published
+    assert "A[普通内容] --> B[保留结构]" in published
+    assert "普通卡片" in published
+
+
+def test_chapter_sync_exposes_only_stable_error_and_preserves_control_signals(
+    tmp_path,
+    monkeypatch,
+):
+    conn = init_db(str(tmp_path / "workbench.db"))
+    apply_workbench_schema(conn)
+    repo = WorkbenchRepository(conn)
+    course = repo.create_course("课程", "", str(tmp_path / "out"))
+    source = repo.create_source(course.id, "main", "/tmp/book.pdf", "教材")
+    raw = tmp_path / "raw.md"
+    raw.write_text("原文", encoding="utf-8")
+    chapter = repo.create_chapter(course.id, source.id, 0, "章节", str(raw))
+    token = "chapter-sensitive-error-token"
+    leaked_bytes = b"secret textbook bytes"
+
+    rich_error = None
+    try:
+        cause = UnicodeDecodeError("utf-8", leaked_bytes, 0, 1, token)
+        cause.add_note(f"/Users/private/{token}")
+        raise ValueError(f"Authorization: Bearer {token}") from cause
+    except ValueError as exc:
+        rich_error = exc
+    assert rich_error is not None
+
+    def fail_render(*_args, **_kwargs):
+        raise rich_error
+
+    monkeypatch.setattr(markdown_sync, "_sync_chapter_markdown", fail_render)
+    with pytest.raises(Exception) as captured:
+        sync_chapter_markdown(repo, chapter.id)
+
+    error = captured.value
+    assert type(error).__name__ == "ChapterMarkdownSyncError"
+    assert getattr(error, "code", None) == "CHAPTER_MARKDOWN_PUBLICATION_FAILED"
+    assert error.args == ("chapter Markdown publication failed",)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert getattr(error, "__notes__", []) == []
+    assert token not in repr(error)
+    assert repr(leaked_bytes) not in repr(error)
+
+    for signal in (KeyboardInterrupt(), SystemExit(17)):
+        monkeypatch.setattr(
+            markdown_sync,
+            "_sync_chapter_markdown",
+            lambda *_args, _signal=signal, **_kwargs: (_ for _ in ()).throw(_signal),
+        )
+        with pytest.raises(type(signal)) as control:
+            sync_chapter_markdown(repo, chapter.id)
+        assert control.value is signal
+
+
 def test_redact_sensitive_text_handles_all_absolute_paths_without_harming_safe_text():
     value = (
         "正常中文 /tmp/a /var/log/x /private/a /Volumes/Disk/a /opt/tool "
@@ -358,7 +805,7 @@ def test_chapter_sync_rejects_symlink_escape_at_every_level(tmp_path, level):
         else:
             (root / "教材" / "教材").mkdir()
             (root / "教材" / "教材" / "01-章节").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(OSError):
+    with pytest.raises(ChapterMarkdownSyncError):
         sync_chapter_markdown(repo, chapter.id)
     assert not list(outside.iterdir())
 
@@ -385,6 +832,25 @@ def test_marker_scan_ignores_quoted_nonfirst_and_wrong_depth_markers(tmp_path):
     assert (bad / "quoted.md").exists()
 
 
+def test_marker_first_line_read_is_bounded_by_bytes(tmp_path, monkeypatch):
+    marker_file = tmp_path / "intensive-note.md"
+    monkeypatch.setattr(markdown_sync, "MAX_MARKER_LINE_BYTES", 16, raising=False)
+    marker_file.write_bytes(b"x" * 17 + b"\n<!-- chapter-id: hidden -->\n")
+
+    assert markdown_sync._first_line_regular_file(marker_file) is None
+
+
+def test_marker_directory_enumeration_has_a_hard_limit(tmp_path, monkeypatch):
+    root = tmp_path / "topics"
+    root.mkdir()
+    for index in range(3):
+        (root / f"candidate-{index}").mkdir()
+    monkeypatch.setattr(markdown_sync, "MAX_MARKER_SCAN_ENTRIES", 2, raising=False)
+
+    with pytest.raises(ValueError, match="scan limit"):
+        markdown_sync._directory_with_marker(root, "<!-- topic-id: missing -->")
+
+
 def test_chapter_first_bundle_failure_keeps_owner_and_retry_succeeds(tmp_path, monkeypatch):
     conn = init_db(str(tmp_path / "workbench.db"))
     apply_workbench_schema(conn)
@@ -394,7 +860,7 @@ def test_chapter_first_bundle_failure_keeps_owner_and_retry_succeeds(tmp_path, m
     raw = tmp_path / "raw.md"
     raw.write_text("原文", encoding="utf-8")
     chapter = repo.create_chapter(course.id, source.id, 0, "章节", str(raw))
-    original = markdown_sync.atomic_write_bundle_fd
+    original = markdown_sync._locked_atomic_write_bundles_fd
     calls = 0
 
     def fail_once(*args, **kwargs):
@@ -404,8 +870,8 @@ def test_chapter_first_bundle_failure_keeps_owner_and_retry_succeeds(tmp_path, m
             raise OSError("disk full")
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(markdown_sync, "atomic_write_bundle_fd", fail_once)
-    with pytest.raises(OSError, match="disk full"):
+    monkeypatch.setattr(markdown_sync, "_locked_atomic_write_bundles_fd", fail_once)
+    with pytest.raises(ChapterMarkdownSyncError):
         sync_chapter_markdown(repo, chapter.id)
     chapter_dir = tmp_path / "out" / "教材" / "教材" / "01-章节"
     assert (chapter_dir / ".pdf2md-owner").read_text(encoding="utf-8") == (
@@ -562,9 +1028,9 @@ def test_chapter_bundle_failures_do_not_leak_file_descriptors(tmp_path, monkeypa
     def fail(*args, **kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(markdown_sync, "atomic_write_bundle_fd", fail)
+    monkeypatch.setattr(markdown_sync, "_locked_atomic_write_bundles_fd", fail)
     for _ in range(40):
-        with pytest.raises(OSError):
+        with pytest.raises(ChapterMarkdownSyncError):
             sync_chapter_markdown(repo, chapter.id)
     gc.collect()
     assert len(list(fd_dir.iterdir())) <= baseline

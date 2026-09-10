@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -18,7 +18,7 @@ class TopicPatchRequest(StrictModel):
     description: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
-    def require_change(self):
+    def require_change(self) -> Self:
         if self.title is None and self.description is None:
             raise ValueError("title or description is required")
         return self
@@ -35,7 +35,7 @@ class TopicMergeRequest(StrictModel):
     chapter_ids: list[str] | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
-    def normalize_and_validate(self):
+    def normalize_and_validate(self) -> Self:
         self.title = self.title.strip()
         if not self.title or len(self.topic_ids) != len(set(self.topic_ids)):
             raise ValueError("title and unique topic_ids are required")
@@ -48,7 +48,7 @@ class TopicSplitRequest(StrictModel):
     new_chapter_ids: list[str] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def normalize_and_validate(self):
+    def normalize_and_validate(self) -> Self:
         self.title = self.title.strip()
         if not self.title or len(self.new_chapter_ids) != len(set(self.new_chapter_ids)):
             raise ValueError("title and unique new_chapter_ids are required")

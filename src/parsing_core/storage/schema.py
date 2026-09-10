@@ -1,6 +1,20 @@
 import sqlite3
 
-SCHEMA_SQL = """
+TASK_RECOVERY_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS task_recovery (
+  task_id              TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  sectioning_complete  INTEGER NOT NULL DEFAULT 0 CHECK(sectioning_complete IN (0, 1)),
+  expected_sections    INTEGER NOT NULL DEFAULT 0 CHECK(expected_sections >= 0),
+  resume_owner         TEXT,
+  resume_generation    INTEGER NOT NULL DEFAULT 0 CHECK(resume_generation >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_task_recovery_owner ON task_recovery(resume_owner);
+INSERT OR IGNORE INTO task_recovery (task_id)
+SELECT id FROM tasks;
+"""
+
+SCHEMA_SQL = (
+    """
 CREATE TABLE IF NOT EXISTS tasks (
   id            TEXT PRIMARY KEY,
   file_path     TEXT NOT NULL,
@@ -12,6 +26,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   updated_at    INTEGER NOT NULL,
   error_msg     TEXT
 );
+"""
+    + TASK_RECOVERY_TABLE_SQL
+    + """
 
 CREATE TABLE IF NOT EXISTS sections (
   id            TEXT PRIMARY KEY,
@@ -43,6 +60,7 @@ CREATE INDEX IF NOT EXISTS idx_section_task ON sections(task_id);
 CREATE INDEX IF NOT EXISTS idx_sha_file ON tasks(file_sha256);
 CREATE INDEX IF NOT EXISTS idx_sha_section ON sections(sha256);
 """
+)
 
 
 def init_db(db_path: str) -> sqlite3.Connection:

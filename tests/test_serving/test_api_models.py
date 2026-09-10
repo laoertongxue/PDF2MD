@@ -22,6 +22,13 @@ def test_batch_create_request_validates_files():
         BatchCreateRequest(files=[])
 
 
+def test_batch_create_request_limits_file_count_and_path_length():
+    with pytest.raises(ValidationError):
+        BatchCreateRequest(files=[f"/{index}.pdf" for index in range(101)])
+    with pytest.raises(ValidationError):
+        BatchCreateRequest(files=["/" + "a" * 4096])
+
+
 def test_batch_create_request_concurrency_bounds():
     with pytest.raises(ValidationError):
         BatchCreateRequest(files=["/a"], concurrency=0)

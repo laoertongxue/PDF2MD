@@ -38,6 +38,7 @@ export type SafeApiErrorCategory =
   | "service_unavailable"
   | "protocol"
   | "network"
+  | "timeout"
   | "canceled"
   | "task_running"
   | "edit_saved_sync_failed";
@@ -52,6 +53,7 @@ const SAFE_ERROR_MESSAGES: Record<SafeApiErrorCategory, string> = {
   service_unavailable: "服务暂时不可用，请稍后重试",
   protocol: "服务返回数据格式异常，请稍后重试",
   network: "无法连接本地服务，请确认服务已启动",
+  timeout: "请求超时，请重试",
   canceled: "操作已取消",
   task_running: "任务仍在运行",
   edit_saved_sync_failed: "编辑已保存到数据库，Markdown同步失败，可重试",
@@ -309,40 +311,43 @@ async function request<T>(
   statusCategories: Partial<Record<number, SafeApiErrorCategory>> = {},
 ): Promise<T> {
   try {
-    const res = await apiFetch(path, init);
-    if (!res.ok) {
-      const categories: Record<number, SafeApiErrorCategory> = {
-        400: "invalid_request",
-        404: "not_found",
-        409: "conflict",
-        422: "invalid_format",
-        502: "model_unavailable",
-        507: "storage",
-      };
-      throw new SafeApiError(statusCategories[res.status] ?? categories[res.status] ?? "service_unavailable");
-    }
-    if (res.status === 204) {
-      if (allowNoContent) return undefined as T;
-      throw protocolError();
-    }
-    let value: unknown;
-    try {
-      value = await res.json();
-    } catch {
-      throw protocolError();
-    }
-    return parse(value);
+    return await apiFetch(path, init, async (res, signal) => {
+      if (!res.ok) {
+        const categories: Record<number, SafeApiErrorCategory> = {
+          400: "invalid_request",
+          404: "not_found",
+          409: "conflict",
+          422: "invalid_format",
+          502: "model_unavailable",
+          507: "storage",
+        };
+        throw new SafeApiError(statusCategories[res.status] ?? categories[res.status] ?? "service_unavailable");
+      }
+      if (res.status === 204) {
+        if (allowNoContent) return undefined as T;
+        throw protocolError();
+      }
+      let value: unknown;
+      try {
+        value = await res.json();
+      } catch {
+        if (signal.aborted) throw signal.reason;
+        throw protocolError();
+      }
+      return parse(value);
+    });
   } catch (error) {
     if (error instanceof SafeApiError) {
       throw error;
     }
-    if (isRecord(error) && error.name === "AbortError") {
-      throw new SafeApiError("canceled");
+    if (isRecord(error)) {
+      if (error.name === "TimeoutError") throw new SafeApiError("timeout");
+      if (error.name === "AbortError") throw new SafeApiError("canceled");
     }
     if (error instanceof TypeError) {
       throw new SafeApiError("network");
     }
-    throw protocolError();
+    throw error;
   }
 }
 
@@ -358,8 +363,8 @@ function post<T>(path: string, body?: unknown, parse?: (value: unknown) => T): P
   );
 }
 
-export function listCourses(): Promise<Course[]> {
-  return request<Course[]>("/api/workbench/courses");
+export function listCourses(signal?: AbortSignal): Promise<Course[]> {
+  return request<Course[]>("/api/workbench/courses", signal ? { signal } : undefined);
 }
 
 export function createCourse(title: string, description: string, root_dir: string): Promise<Course> {
@@ -375,8 +380,8 @@ export function importSources(courseId: string, paths: string[], titles?: string
   return post<ImportedSource[]>(`/api/workbench/courses/${courseId}/sources/import`, payload, parseImportedSources);
 }
 
-export function listSources(courseId: string): Promise<Source[]> {
-  return request<Source[]>(`/api/workbench/courses/${courseId}/sources`);
+export function listSources(courseId: string, signal?: AbortSignal): Promise<Source[]> {
+  return request<Source[]>(`/api/workbench/courses/${courseId}/sources`, signal ? { signal } : undefined);
 }
 
 export function startSourceOcr(sourceId: string): Promise<OcrStatus> {
@@ -411,8 +416,8 @@ export function detectChapters(sourceId: string): Promise<Chapter[]> {
   return post<Chapter[]>(`/api/workbench/sources/${sourceId}/detect-chapters`);
 }
 
-export function listChapters(sourceId: string): Promise<Chapter[]> {
-  return request<Chapter[]>(`/api/workbench/sources/${sourceId}/chapters`);
+export function listChapters(sourceId: string, signal?: AbortSignal): Promise<Chapter[]> {
+  return request<Chapter[]>(`/api/workbench/sources/${sourceId}/chapters`, signal ? { signal } : undefined);
 }
 
 export function getChapterDrafts(sourceId: string): Promise<ChapterDraftState> {
@@ -479,8 +484,8 @@ export function runHybridChapter(chapterId: string): Promise<Chapter> {
   return post<Chapter>(`/api/workbench/chapters/${chapterId}/run-hybrid`);
 }
 
-export function listCourseCards(courseId: string): Promise<Card[]> {
-  return request<Card[]>(`/api/workbench/courses/${courseId}/cards`, undefined, (value) =>
+export function listCourseCards(courseId: string, signal?: AbortSignal): Promise<Card[]> {
+  return request<Card[]>(`/api/workbench/courses/${courseId}/cards`, signal ? { signal } : undefined, (value) =>
     parseArray(value, parseCourseCard),
   );
 }

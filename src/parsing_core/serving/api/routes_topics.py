@@ -1,5 +1,10 @@
+from __future__ import annotations
+
 import json
+import sqlite3
+from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol, TypedDict, cast
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import ValidationError
@@ -19,33 +24,75 @@ from parsing_core.serving.models.topics import (
     TopicRunResponse,
     TopicSplitRequest,
 )
+from parsing_core.storage.fs_layout import FsLayout
 from parsing_core.workbench.codex_cli import CodexCliError, CodexCliExecutor, resolve_codex_path
 from parsing_core.workbench.deepseek import DeepSeekClient, DeepSeekError, DeepSeekExecutor
-from parsing_core.workbench.executors import StubIntensiveReadingExecutor
+from parsing_core.workbench.executors import (
+    IntensiveReadingExecutor,
+    StubIntensiveReadingExecutor,
+    TextExecutor,
+)
 from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
 from parsing_core.workbench.keychain import KeychainError, read_secret
 from parsing_core.workbench.markdown_sync import redact_sensitive_text
+from parsing_core.workbench.models import (
+    CourseTopic,
+    TopicMarkdownSyncState,
+    TopicNoteBlock,
+)
 from parsing_core.workbench.repository import WorkbenchRepository
 from parsing_core.workbench.settings import load_settings
 from parsing_core.workbench.topic_markdown_sync import (
     TopicMarkdownDeleteError,
+    TopicMarkdownSyncError,
     delete_unpublished_topic,
     merge_unpublished_topics,
 )
 from parsing_core.workbench.topic_outline import generate_topic_outline
-from parsing_core.workbench.topic_pipeline import TopicFusionPipeline, TopicMarkdownSyncError
+from parsing_core.workbench.topic_pipeline import TopicFusionPipeline
 
 router = APIRouter(prefix="/api/workbench", tags=["workbench-topics"])
 KEYCHAIN_SERVICE = "pdf2md.deepseek"
 KEYCHAIN_ACCOUNT = "api-key"
 
 
+class _RepositoryOwner(Protocol):
+    conn: sqlite3.Connection
+
+
+class _FilesystemOwner(Protocol):
+    base_dir: str
+
+
+class _WorkbenchOrchestrator(Protocol):
+    repo: _RepositoryOwner
+    fs: _FilesystemOwner
+
+
+class _TopicApiState(TypedDict):
+    chapter_ids: list[str]
+    blocking_chapter_ids: list[str]
+    sync: TopicMarkdownSyncState | None
+
+
+_HybridExecutorFactory = Callable[
+    [IntensiveReadingExecutor, IntensiveReadingExecutor], IntensiveReadingExecutor
+]
+
+
+def _workbench_orchestrator(sch: SchedulerDep) -> _WorkbenchOrchestrator:
+    return cast(_WorkbenchOrchestrator, sch._query_orch)
+
+
 def _repo(sch: SchedulerDep) -> WorkbenchRepository:
-    return WorkbenchRepository(sch._query_orch.repo.conn)
+    return WorkbenchRepository(_workbench_orchestrator(sch).repo.conn)
 
 
-def _settings_path(sch: SchedulerDep) -> Path:
-    return Path(sch._query_orch.fs.base_dir) / "workbench-settings.json"
+def _settings_root(sch: SchedulerDep) -> FsLayout:
+    fs = _workbench_orchestrator(sch).fs
+    if type(fs) is not FsLayout:
+        raise RuntimeError("workbench settings require the bound filesystem layout")
+    return fs
 
 
 def _not_found(detail: str = "topic not found") -> HTTPException:
@@ -88,7 +135,11 @@ def _safe_run_error(error: str) -> str:
     return "topic round execution failed"
 
 
-def _topic_response(repo: WorkbenchRepository, topic, state: dict | None = None) -> TopicResponse:
+def _topic_response(
+    repo: WorkbenchRepository,
+    topic: CourseTopic,
+    state: _TopicApiState | None = None,
+) -> TopicResponse:
     if state is None:
         chapters = repo.list_topic_chapters(topic.id)
         reviews = repo.list_topic_chapter_reviews(topic.id)
@@ -142,35 +193,36 @@ class _StubTopicOutlineExecutor:
         return json.dumps({"topics": topics, "unmapped_chapter_ids": []})
 
 
-def _deepseek_executor(sch: SchedulerDep):
+def _deepseek_executor(sch: SchedulerDep) -> DeepSeekExecutor:
     try:
         api_key = read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).strip()
     except KeychainError as exc:
         raise HTTPException(400, "deepseek api key not configured") from exc
     if not api_key:
         raise HTTPException(400, "deepseek api key not configured")
-    settings = load_settings(_settings_path(sch))
+    settings = load_settings(_settings_root(sch))
     return DeepSeekExecutor(DeepSeekClient(api_key, settings.deepseek_model))
 
 
-def _hybrid_executor(sch: SchedulerDep, topic_id: str):
+def _hybrid_executor(sch: SchedulerDep, topic_id: str) -> IntensiveReadingExecutor:
     repo = _repo(sch)
     topic = repo.get_topic(topic_id)
     if topic is None:
         raise _not_found()
     course = repo.get_course(topic.course_id)
+    if course is None:
+        raise _not_found("course not found")
     try:
         codex_path = resolve_codex_path()
     except CodexCliError as exc:
         raise HTTPException(400, "codex cli not configured") from exc
     run_dir = Path(course.root_dir) / ".pdf2md" / "topic-runs" / topic.id
-    return HybridIntensiveReadingExecutor(
-        _deepseek_executor(sch), CodexCliExecutor(codex_path, run_dir)
-    )
+    factory = cast(_HybridExecutorFactory, HybridIntensiveReadingExecutor)
+    return factory(_deepseek_executor(sch), CodexCliExecutor(codex_path, run_dir))
 
 
 @router.get("/courses/{course_id}/topics", response_model=list[TopicResponse])
-def list_topics(course_id: str, sch: SchedulerDep):
+def list_topics(course_id: str, sch: SchedulerDep) -> list[TopicResponse]:
     repo = _repo(sch)
     if repo.get_course(course_id) is None:
         raise _not_found("course not found")
@@ -180,7 +232,7 @@ def list_topics(course_id: str, sch: SchedulerDep):
 
 
 @router.post("/courses/{course_id}/topics", response_model=TopicResponse)
-def create_topic(course_id: str, req: TopicCreateRequest, sch: SchedulerDep):
+def create_topic(course_id: str, req: TopicCreateRequest, sch: SchedulerDep) -> TopicResponse:
     repo = _repo(sch)
     try:
         topic = repo.create_topic_with_chapters(
@@ -193,11 +245,15 @@ def create_topic(course_id: str, req: TopicCreateRequest, sch: SchedulerDep):
 
 
 @router.post("/courses/{course_id}/topics/generate", response_model=list[TopicResponse])
-def generate_topics(course_id: str, req: TopicGenerateRequest, sch: SchedulerDep):
+def generate_topics(
+    course_id: str, req: TopicGenerateRequest, sch: SchedulerDep
+) -> list[TopicResponse]:
     repo = _repo(sch)
     if repo.get_course(course_id) is None:
         raise _not_found("course not found")
-    executor = _StubTopicOutlineExecutor() if req.executor == "stub" else _deepseek_executor(sch)
+    executor: TextExecutor = (
+        _StubTopicOutlineExecutor() if req.executor == "stub" else _deepseek_executor(sch)
+    )
     try:
         generate_topic_outline(repo, course_id, executor)
     except (ValidationError, ValueError) as exc:
@@ -210,7 +266,7 @@ def generate_topics(course_id: str, req: TopicGenerateRequest, sch: SchedulerDep
 
 
 @router.post("/courses/{course_id}/topics/merge", response_model=TopicResponse)
-def merge_topics(course_id: str, req: TopicMergeRequest, sch: SchedulerDep):
+def merge_topics(course_id: str, req: TopicMergeRequest, sch: SchedulerDep) -> TopicResponse:
     repo = _repo(sch)
     try:
         topic = merge_unpublished_topics(
@@ -228,7 +284,9 @@ def merge_topics(course_id: str, req: TopicMergeRequest, sch: SchedulerDep):
 
 
 @router.put("/courses/{course_id}/topics/reorder", response_model=list[TopicResponse])
-def reorder_topics(course_id: str, req: TopicReorderRequest, sch: SchedulerDep):
+def reorder_topics(
+    course_id: str, req: TopicReorderRequest, sch: SchedulerDep
+) -> list[TopicResponse]:
     repo = _repo(sch)
     if repo.get_course(course_id) is None:
         raise _not_found("course not found")
@@ -241,7 +299,7 @@ def reorder_topics(course_id: str, req: TopicReorderRequest, sch: SchedulerDep):
 
 
 @router.post("/courses/{course_id}/topics/confirm", response_model=list[TopicResponse])
-def confirm_topics(course_id: str, sch: SchedulerDep):
+def confirm_topics(course_id: str, sch: SchedulerDep) -> list[TopicResponse]:
     repo = _repo(sch)
     try:
         topics = repo.confirm_course_topics(course_id)
@@ -252,7 +310,7 @@ def confirm_topics(course_id: str, sch: SchedulerDep):
 
 
 @router.get("/topics/{topic_id}", response_model=TopicResponse)
-def get_topic(topic_id: str, sch: SchedulerDep):
+def get_topic(topic_id: str, sch: SchedulerDep) -> TopicResponse:
     repo = _repo(sch)
     topic = repo.get_topic(topic_id)
     if topic is None:
@@ -261,7 +319,7 @@ def get_topic(topic_id: str, sch: SchedulerDep):
 
 
 @router.post("/topics/{topic_id}/split", response_model=list[TopicResponse])
-def split_topic(topic_id: str, req: TopicSplitRequest, sch: SchedulerDep):
+def split_topic(topic_id: str, req: TopicSplitRequest, sch: SchedulerDep) -> list[TopicResponse]:
     repo = _repo(sch)
     try:
         topics = repo.split_topic(
@@ -277,7 +335,7 @@ def split_topic(topic_id: str, req: TopicSplitRequest, sch: SchedulerDep):
 
 
 @router.patch("/topics/{topic_id}", response_model=TopicResponse)
-def patch_topic(topic_id: str, req: TopicPatchRequest, sch: SchedulerDep):
+def patch_topic(topic_id: str, req: TopicPatchRequest, sch: SchedulerDep) -> TopicResponse:
     repo = _repo(sch)
     try:
         topic = repo.edit_topic_content(topic_id, title=req.title, description=req.description)
@@ -288,7 +346,7 @@ def patch_topic(topic_id: str, req: TopicPatchRequest, sch: SchedulerDep):
 
 
 @router.delete("/topics/{topic_id}", status_code=204)
-def delete_topic(topic_id: str, sch: SchedulerDep):
+def delete_topic(topic_id: str, sch: SchedulerDep) -> Response:
     try:
         delete_unpublished_topic(_repo(sch), topic_id)
     except TopicMarkdownDeleteError as exc:
@@ -301,7 +359,7 @@ def delete_topic(topic_id: str, sch: SchedulerDep):
 
 
 @router.put("/topics/{topic_id}/chapters", response_model=TopicResponse)
-def map_topic(topic_id: str, req: TopicMappingRequest, sch: SchedulerDep):
+def map_topic(topic_id: str, req: TopicMappingRequest, sch: SchedulerDep) -> TopicResponse:
     repo = _repo(sch)
     try:
         topic = repo.replace_topic_chapters_and_refresh(topic_id, req.chapter_ids)
@@ -311,7 +369,11 @@ def map_topic(topic_id: str, req: TopicMappingRequest, sch: SchedulerDep):
     return _topic_response(repo, topic)
 
 
-def _run_topic(topic_id: str, executor, sch: SchedulerDep):
+def _run_topic(
+    topic_id: str,
+    executor: IntensiveReadingExecutor,
+    sch: SchedulerDep,
+) -> TopicResponse:
     repo = _repo(sch)
     if repo.get_topic(topic_id) is None:
         raise _not_found()
@@ -325,21 +387,23 @@ def _run_topic(topic_id: str, executor, sch: SchedulerDep):
     except (DeepSeekError, CodexCliError) as exc:
         raise HTTPException(502, "topic model execution failed") from exc
     topic = repo.get_topic(topic_id)
+    if topic is None:
+        raise _not_found()
     return _topic_response(repo, topic)
 
 
 @router.post("/topics/{topic_id}/run", response_model=TopicResponse)
-def run_topic(topic_id: str, req: TopicRunRequest, sch: SchedulerDep):
+def run_topic(topic_id: str, req: TopicRunRequest, sch: SchedulerDep) -> TopicResponse:
     return _run_topic(topic_id, StubIntensiveReadingExecutor(), sch)
 
 
 @router.post("/topics/{topic_id}/run-hybrid", response_model=TopicResponse)
-def run_topic_hybrid(topic_id: str, sch: SchedulerDep):
+def run_topic_hybrid(topic_id: str, sch: SchedulerDep) -> TopicResponse:
     return _run_topic(topic_id, _hybrid_executor(sch, topic_id), sch)
 
 
 @router.post("/topics/{topic_id}/recover", response_model=TopicResponse)
-def recover_topic(topic_id: str, sch: SchedulerDep):
+def recover_topic(topic_id: str, sch: SchedulerDep) -> TopicResponse:
     repo = _repo(sch)
     try:
         topic = repo.recover_interrupted_topic_run(topic_id)
@@ -349,7 +413,7 @@ def recover_topic(topic_id: str, sch: SchedulerDep):
 
 
 @router.post("/topics/{topic_id}/sync/retry", response_model=TopicResponse)
-def retry_topic_sync(topic_id: str, sch: SchedulerDep):
+def retry_topic_sync(topic_id: str, sch: SchedulerDep) -> TopicResponse:
     repo = _repo(sch)
     if repo.get_topic(topic_id) is None:
         raise _not_found()
@@ -359,11 +423,14 @@ def retry_topic_sync(topic_id: str, sch: SchedulerDep):
         raise HTTPException(507, "topic Markdown sync failed") from exc
     except ValueError as exc:
         raise _business_error(exc, conflict=True) from exc
-    return _topic_response(repo, repo.get_topic(topic_id))
+    topic = repo.get_topic(topic_id)
+    if topic is None:
+        raise _not_found()
+    return _topic_response(repo, topic)
 
 
 @router.get("/topics/{topic_id}/note-blocks", response_model=list[TopicNoteBlockResponse])
-def topic_note_blocks(topic_id: str, sch: SchedulerDep):
+def topic_note_blocks(topic_id: str, sch: SchedulerDep) -> list[TopicNoteBlock]:
     repo = _repo(sch)
     if repo.get_topic(topic_id) is None:
         raise _not_found()
@@ -371,7 +438,7 @@ def topic_note_blocks(topic_id: str, sch: SchedulerDep):
 
 
 @router.get("/topics/{topic_id}/cards", response_model=list[TopicCardResponse])
-def topic_cards(topic_id: str, sch: SchedulerDep):
+def topic_cards(topic_id: str, sch: SchedulerDep) -> list[TopicCardResponse]:
     repo = _repo(sch)
     if repo.get_topic(topic_id) is None:
         raise _not_found()
@@ -390,7 +457,7 @@ def topic_cards(topic_id: str, sch: SchedulerDep):
 
 
 @router.get("/topics/{topic_id}/runs", response_model=list[TopicRunResponse])
-def topic_runs(topic_id: str, sch: SchedulerDep):
+def topic_runs(topic_id: str, sch: SchedulerDep) -> list[TopicRunResponse]:
     repo = _repo(sch)
     if repo.get_topic(topic_id) is None:
         raise _not_found()

@@ -1,9 +1,11 @@
 import sqlite3
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
+import parsing_core.storage.repository as repository_module
 from parsing_core.models.dataclasses import AIArtifact, Section, Task
 from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
@@ -121,6 +123,297 @@ def test_create_and_list_sections(tmp_path):
     conn.close()
 
 
+def test_create_sections_rolls_back_entire_batch_on_mid_insert_failure(tmp_path, monkeypatch):
+    conn = init_db(str(tmp_path / "x.db"))
+    repo = Repository(conn)
+    repo.create_task(make_task())
+    sections = [
+        Section(
+            id=f"s{seq}",
+            task_id="t1",
+            seq=seq,
+            raw_md_path=f"/x/{seq}.raw.md",
+            sha256=f"sha-{seq}",
+            char_count=10,
+            ai_status="PENDING",
+            created_at=int(time.time()),
+        )
+        for seq in range(3)
+    ]
+    original_insert = repo._insert_section
+    insert_count = 0
+
+    def fail_second_insert(section):
+        nonlocal insert_count
+        insert_count += 1
+        if insert_count == 2:
+            raise RuntimeError("forced section batch failure")
+        original_insert(section)
+
+    monkeypatch.setattr(repo, "_insert_section", fail_second_insert)
+    with pytest.raises(RuntimeError, match="forced section batch failure"):
+        repo.create_sections(sections)
+
+    assert repo.list_sections("t1") == []
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_create_sections_records_complete_contiguous_checkpoint(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    repo = Repository(conn)
+    repo.create_task(make_task())
+    sections = [
+        Section(
+            id=f"s{seq}",
+            task_id="t1",
+            seq=seq,
+            raw_md_path=f"/x/{seq}.raw.md",
+            sha256=f"sha-{seq}",
+            char_count=10,
+            ai_status="PENDING",
+            created_at=int(time.time()),
+        )
+        for seq in range(3)
+    ]
+
+    repo.create_sections(sections)
+
+    recovery = repo.get_task_recovery("t1")
+    assert recovery is not None
+    assert recovery["sectioning_complete"] is True
+    assert recovery["expected_sections"] == 3
+    assert recovery["resume_owner"] is None
+    assert recovery["resume_generation"] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("invalid_batch", ["empty", "duplicate_seq", "seq_gap", "mixed_task"])
+def test_create_sections_rejects_invalid_batch_without_partial_checkpoint(
+    tmp_path,
+    invalid_batch,
+):
+    conn = init_db(str(tmp_path / "x.db"))
+    repo = Repository(conn)
+    repo.create_task(make_task())
+    repo.create_task(make_task(tid="t2", sha="h2"))
+    task_ids = ["t1", "t1"]
+    seqs = [0, 1]
+    if invalid_batch == "empty":
+        task_ids = []
+        seqs = []
+    elif invalid_batch == "duplicate_seq":
+        seqs = [0, 0]
+    elif invalid_batch == "seq_gap":
+        seqs = [0, 2]
+    elif invalid_batch == "mixed_task":
+        task_ids = ["t1", "t2"]
+    sections = [
+        Section(
+            id=f"invalid-{index}",
+            task_id=task_id,
+            seq=seq,
+            raw_md_path=f"/x/{index}.raw.md",
+            sha256=f"sha-{index}",
+            char_count=10,
+            ai_status="PENDING",
+            created_at=int(time.time()),
+        )
+        for index, (task_id, seq) in enumerate(zip(task_ids, seqs, strict=True))
+    ]
+
+    with pytest.raises(ValueError):
+        repo.create_sections(sections)
+
+    assert repo.list_sections("t1") == []
+    assert repo.list_sections("t2") == []
+    for task_id in ("t1", "t2"):
+        recovery = repo.get_task_recovery(task_id)
+        assert recovery is not None
+        assert recovery["sectioning_complete"] is False
+        assert recovery["expected_sections"] == 0
+    conn.close()
+
+
+def test_resume_claim_is_exclusive_across_connections_and_generation_fenced(tmp_path):
+    db_path = tmp_path / "x.db"
+    first_conn = init_db(str(db_path))
+    first = Repository(first_conn)
+    first.create_task(make_task())
+    second_conn = init_db(str(db_path))
+    second = Repository(second_conn)
+
+    first_generation = first.claim_task_resume("t1", "owner-one")
+    competing_generation = second.claim_task_resume("t1", "owner-two")
+
+    assert first_generation == 1
+    assert competing_generation is None
+    with pytest.raises(RuntimeError, match="resume claim"):
+        second.update_task_status_fenced(
+            "t1",
+            "FAILED",
+            "owner-two",
+            1,
+            error_msg="must not win",
+        )
+    assert second.get_task("t1").status == "PENDING"
+    assert second.release_task_resume("t1", "owner-two", 1) is False
+    assert first.release_task_resume("t1", "owner-one", first_generation) is True
+    second_generation = second.claim_task_resume("t1", "owner-two")
+    assert second_generation == 2
+    with pytest.raises(RuntimeError, match="resume claim"):
+        first.update_task_status_fenced(
+            "t1",
+            "FAILED",
+            "owner-one",
+            first_generation,
+            error_msg="stale owner",
+        )
+    assert first.get_task("t1").status == "PENDING"
+    assert second.release_task_resume("t1", "owner-two", second_generation) is True
+    first_conn.close()
+    second_conn.close()
+
+
+def test_stale_resume_generation_cannot_commit_sections_or_artifact(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    repo = Repository(conn)
+    repo.create_task(make_task())
+    original = Section(
+        id="original-section",
+        task_id="t1",
+        seq=0,
+        raw_md_path="/x/0.raw.md",
+        sha256="original",
+        char_count=8,
+        ai_status="PENDING",
+        created_at=int(time.time()),
+    )
+    repo.create_sections([original])
+    stale_generation = repo.claim_task_resume("t1", "stale-owner")
+    assert stale_generation == 1
+    assert repo.release_task_resume("t1", "stale-owner", stale_generation) is True
+    current_generation = repo.claim_task_resume("t1", "current-owner")
+    assert current_generation == 2
+    replacement = Section(
+        id="replacement-section",
+        task_id="t1",
+        seq=0,
+        raw_md_path="/x/replacement.raw.md",
+        sha256="replacement",
+        char_count=11,
+        ai_status="PENDING",
+        created_at=int(time.time()),
+    )
+    artifact = AIArtifact(
+        id="stale-artifact",
+        section_id=original.id,
+        ai_md_path="/x/0.ai.md",
+        ai_md="",
+        created_at=int(time.time()),
+    )
+
+    with pytest.raises(RuntimeError, match="resume claim"):
+        repo.replace_sections_with_checkpoint(
+            "t1",
+            [replacement],
+            "stale-owner",
+            stale_generation,
+        )
+    with pytest.raises(RuntimeError, match="resume claim"):
+        repo.complete_section_with_artifact_fenced(
+            artifact,
+            "t1",
+            "stale-owner",
+            stale_generation,
+        )
+
+    assert repo.list_sections("t1") == [original]
+    assert repo.get_artifact_by_section(original.id) is None
+    assert repo.get_section(original.id).ai_status == "PENDING"
+    assert repo.release_task_resume("t1", "current-owner", current_generation) is True
+    conn.close()
+
+
+def test_recovery_write_methods_are_registered_as_atomic():
+    assert {
+        "claim_task_resume",
+        "release_task_resume",
+        "update_task_status_fenced",
+        "replace_sections_with_checkpoint",
+        "complete_section_with_artifact_fenced",
+    } <= set(repository_module._WRITE_METHODS)
+
+
+def test_fenced_section_rebuild_is_atomic_and_preserves_claim_on_failure(tmp_path, monkeypatch):
+    conn = init_db(str(tmp_path / "x.db"))
+    repo = Repository(conn)
+    repo.create_task(make_task())
+    old_section = Section(
+        id="old-section",
+        task_id="t1",
+        seq=0,
+        raw_md_path="/x/old.raw.md",
+        sha256="old",
+        char_count=3,
+        ai_status="COMPLETED",
+        created_at=int(time.time()),
+    )
+    repo.create_section(old_section)
+    repo.create_artifact(
+        AIArtifact(
+            id="old-artifact",
+            section_id=old_section.id,
+            ai_md_path="/x/old.ai.md",
+            ai_md="",
+            created_at=int(time.time()),
+        )
+    )
+    generation = repo.claim_task_resume("t1", "owner-one")
+    assert generation == 1
+    replacements = [
+        Section(
+            id=f"new-{seq}",
+            task_id="t1",
+            seq=seq,
+            raw_md_path=f"/x/{seq}.raw.md",
+            sha256=f"new-{seq}",
+            char_count=5,
+            ai_status="PENDING",
+            created_at=int(time.time()),
+        )
+        for seq in range(2)
+    ]
+    original_insert = repo._insert_section
+    insert_count = 0
+
+    def fail_second_insert(section):
+        nonlocal insert_count
+        insert_count += 1
+        if insert_count == 2:
+            raise RuntimeError("forced fenced rebuild failure")
+        original_insert(section)
+
+    monkeypatch.setattr(repo, "_insert_section", fail_second_insert)
+    with pytest.raises(RuntimeError, match="forced fenced rebuild failure"):
+        repo.replace_sections_with_checkpoint(
+            "t1",
+            replacements,
+            "owner-one",
+            generation,
+        )
+
+    assert repo.list_sections("t1") == [old_section]
+    assert repo.get_artifact_by_section(old_section.id) is not None
+    recovery = repo.get_task_recovery("t1")
+    assert recovery is not None
+    assert recovery["resume_owner"] == "owner-one"
+    assert recovery["resume_generation"] == generation
+    assert recovery["sectioning_complete"] is False
+    assert recovery["expected_sections"] == 0
+    conn.close()
+
+
 def test_update_section_ai_status(tmp_path):
     conn = init_db(str(tmp_path / "x.db"))
     repo = Repository(conn)
@@ -176,6 +469,91 @@ def test_create_and_get_artifact(tmp_path):
     assert a is not None
     assert a.ai_md_path == "/x/0.ai.md"
     assert a.ai_md == ""  # 重建后默认空
+    conn.close()
+
+
+def test_complete_section_with_artifact_atomically_persists_both_states(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    repo = Repository(conn)
+    repo.create_task(make_task())
+    repo.create_section(
+        Section(
+            id="s1",
+            task_id="t1",
+            seq=0,
+            raw_md_path="/x/0.raw.md",
+            sha256="a",
+            char_count=10,
+            ai_status="PENDING",
+            created_at=int(time.time()),
+        )
+    )
+    artifact = AIArtifact(
+        id="a1",
+        section_id="s1",
+        ai_md_path="/x/0.ai.md",
+        ai_md="",
+        model_name="stub",
+        created_at=int(time.time()),
+    )
+
+    repo.complete_section_with_artifact(artifact)
+
+    assert repo.get_artifact_by_section("s1") == artifact
+    assert repo.get_section("s1").ai_status == "COMPLETED"
+    repo.update_section_ai_status("s1", "PENDING")
+    repo.complete_section_with_artifact(artifact, artifact_already_persisted=True)
+    assert repo.get_artifact_by_section("s1") == artifact
+    assert repo.get_section("s1").ai_status == "COMPLETED"
+    conn.close()
+
+
+def test_complete_section_with_artifact_rolls_back_replacement_if_status_update_fails(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    repo = Repository(conn)
+    repo.create_task(make_task())
+    repo.create_section(
+        Section(
+            id="s1",
+            task_id="t1",
+            seq=0,
+            raw_md_path="/x/0.raw.md",
+            sha256="a",
+            char_count=10,
+            ai_status="PENDING",
+            created_at=int(time.time()),
+        )
+    )
+    old_artifact = AIArtifact(
+        id="old-artifact",
+        section_id="s1",
+        ai_md_path="/x/old.ai.md",
+        ai_md="",
+        created_at=int(time.time()),
+    )
+    repo.create_artifact(old_artifact)
+    conn.executescript(
+        """
+        CREATE TRIGGER fail_atomic_section_completion
+        BEFORE UPDATE ON sections WHEN NEW.ai_status = 'COMPLETED'
+        BEGIN SELECT RAISE(ABORT, 'forced section completion failure'); END;
+        """
+    )
+    conn.commit()
+    replacement = AIArtifact(
+        id="replacement-artifact",
+        section_id="s1",
+        ai_md_path="/x/new.ai.md",
+        ai_md="",
+        created_at=int(time.time()),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced section completion failure"):
+        repo.complete_section_with_artifact(replacement)
+
+    assert repo.get_artifact_by_section("s1") == old_artifact
+    assert repo.get_section("s1").ai_status == "PENDING"
+    assert conn.in_transaction is False
     conn.close()
 
 
@@ -275,6 +653,242 @@ def test_find_section_by_sha256_completed(tmp_path):
     conn.close()
 
 
+def test_materialize_cached_task_rolls_back_waiting_promotion_and_children(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    apply_serve_schema(conn)
+    repo = Repository(conn)
+    now = int(time.time())
+    batch = {
+        "id": "b1",
+        "status": "RUNNING",
+        "concurrency": 1,
+        "policy": "serial",
+        "priority": 0,
+        "total_tasks": 1,
+        "completed_tasks": 0,
+        "created_at": now,
+        "finished_at": None,
+    }
+    repo.create_batch(batch)
+    waiting = make_task(tid="accepted", sha="")
+    waiting.file_path = "/course.md"
+    waiting.snapshot_path = ""
+    waiting.status = "WAITING"
+    waiting.batch_id = "b1"
+    repo.create_task(waiting)
+    completed = make_task(tid="accepted", sha="course-sha")
+    completed.file_path = "/course.md"
+    completed.snapshot_path = ""
+    completed.status = "COMPLETED"
+    completed.batch_id = "b1"
+    sections = [
+        Section(
+            id="s1",
+            task_id="accepted",
+            seq=0,
+            raw_md_path="/accepted/0.raw.md",
+            sha256="section-1",
+            char_count=10,
+            ai_status="COMPLETED",
+            created_at=now,
+        ),
+        Section(
+            id="s2",
+            task_id="accepted",
+            seq=1,
+            raw_md_path="/accepted/1.raw.md",
+            sha256="section-2",
+            char_count=10,
+            ai_status="COMPLETED",
+            created_at=now,
+        ),
+    ]
+    artifacts = [
+        AIArtifact(
+            id="duplicate-artifact",
+            section_id="s1",
+            ai_md_path="/accepted/0.ai.md",
+            created_at=now,
+        ),
+        AIArtifact(
+            id="duplicate-artifact",
+            section_id="s2",
+            ai_md_path="/accepted/1.ai.md",
+            created_at=now,
+        ),
+    ]
+
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint"):
+        repo.materialize_cached_task(completed, sections, artifacts)
+
+    restored = repo.get_task("accepted")
+    assert restored is not None
+    assert restored.status == "WAITING"
+    assert restored.file_sha256 == ""
+    assert repo.list_sections("accepted") == []
+    conn.close()
+
+
+def test_materialize_cached_task_rejects_empty_completed_task(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    apply_serve_schema(conn)
+    repo = Repository(conn)
+    now = int(time.time())
+    repo.create_batch(
+        {
+            "id": "b1",
+            "status": "RUNNING",
+            "concurrency": 1,
+            "policy": "serial",
+            "priority": 0,
+            "total_tasks": 1,
+            "completed_tasks": 0,
+            "created_at": now,
+            "finished_at": None,
+        }
+    )
+    waiting = make_task(tid="accepted", sha="")
+    waiting.file_path = "/course.md"
+    waiting.snapshot_path = ""
+    waiting.status = "WAITING"
+    waiting.batch_id = "b1"
+    repo.create_task(waiting)
+    completed = make_task(tid="accepted", sha="course-sha")
+    completed.file_path = "/course.md"
+    completed.snapshot_path = ""
+    completed.status = "COMPLETED"
+    completed.batch_id = "b1"
+
+    with pytest.raises(ValueError, match="at least one section"):
+        repo.materialize_cached_task(completed, [], [])
+
+    restored = repo.get_task("accepted")
+    assert restored is not None
+    assert restored.status == "WAITING"
+    assert repo.list_sections("accepted") == []
+    conn.close()
+
+
+def test_materialize_cached_task_does_not_revive_deleted_target(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    apply_serve_schema(conn)
+    repo = Repository(conn)
+    now = int(time.time())
+    repo.create_batch(
+        {
+            "id": "b1",
+            "status": "RUNNING",
+            "concurrency": 1,
+            "policy": "serial",
+            "priority": 0,
+            "total_tasks": 1,
+            "completed_tasks": 0,
+            "created_at": now,
+            "finished_at": None,
+        }
+    )
+    waiting = make_task(tid="accepted", sha="")
+    waiting.file_path = "/course.md"
+    waiting.snapshot_path = ""
+    waiting.status = "WAITING"
+    waiting.batch_id = "b1"
+    repo.create_task(waiting)
+    repo.delete_task("accepted")
+
+    completed = make_task(tid="accepted", sha="course-sha")
+    completed.file_path = "/course.md"
+    completed.snapshot_path = ""
+    completed.status = "COMPLETED"
+    completed.batch_id = "b1"
+    section = Section(
+        id="section-1",
+        task_id="accepted",
+        seq=0,
+        raw_md_path="/accepted/0.raw.md",
+        sha256="section-sha",
+        char_count=10,
+        ai_status="COMPLETED",
+        created_at=now,
+    )
+    artifact = AIArtifact(
+        id="artifact-1",
+        section_id=section.id,
+        ai_md_path="/accepted/0.ai.md",
+        created_at=now,
+    )
+
+    with pytest.raises(RuntimeError, match="no longer eligible"):
+        repo.materialize_cached_task(completed, [section], [artifact])
+
+    assert repo.get_task("accepted") is None
+    assert repo.get_section(section.id) is None
+    assert repo.get_artifact_by_section(section.id) is None
+    conn.close()
+
+
+def test_promote_preregistered_task_is_update_only_and_never_inserts_missing_target(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    apply_serve_schema(conn)
+    repo = Repository(conn)
+    promoted = make_task(tid="deleted-before-promotion", sha="course-sha")
+    promoted.file_path = "/course.md"
+    promoted.status = "PARSING"
+    promoted.batch_id = "batch-1"
+
+    with pytest.raises(repository_module.TaskPromotionConflict, match="no longer eligible"):
+        repo.promote_preregistered_task(promoted)
+
+    assert repo.get_task(promoted.id) is None
+    conn.close()
+
+
+def test_promote_preregistered_task_updates_matching_waiting_row(tmp_path):
+    conn = init_db(str(tmp_path / "x.db"))
+    apply_serve_schema(conn)
+    repo = Repository(conn)
+    now = int(time.time())
+    repo.create_batch(
+        {
+            "id": "batch-1",
+            "status": "RUNNING",
+            "concurrency": 1,
+            "policy": "serial",
+            "priority": 0,
+            "total_tasks": 1,
+            "completed_tasks": 0,
+            "created_at": now,
+            "finished_at": None,
+        }
+    )
+    waiting = make_task(tid="accepted", sha="")
+    waiting.file_path = "/course.md"
+    waiting.snapshot_path = ""
+    waiting.status = "WAITING"
+    waiting.batch_id = "batch-1"
+    repo.create_task(waiting)
+    promoted = make_task(tid="accepted", sha="course-sha")
+    promoted.file_path = waiting.file_path
+    promoted.snapshot_path = "/tmp/course.snapshot"
+    promoted.status = "PARSING"
+    promoted.batch_id = waiting.batch_id
+
+    repo.promote_preregistered_task(promoted)
+
+    stored = repo.get_task("accepted")
+    assert stored is not None
+    assert stored.status == "PARSING"
+    assert stored.file_sha256 == "course-sha"
+    assert stored.snapshot_path == "/tmp/course.snapshot"
+    conn.close()
+
+
+def test_normal_task_promotion_conflict_is_distinct_from_cache_materialization_conflict():
+    assert (
+        repository_module.TaskPromotionConflict
+        is not repository_module.CachedTaskMaterializationConflict
+    )
+
+
 def test_list_tasks_by_status(tmp_path):
     conn = init_db(str(tmp_path / "x.db"))
     repo = Repository(conn)
@@ -304,6 +918,30 @@ def test_list_all_tasks_orders_desc_by_created(tmp_path):
     # DESC 排序：最新的在前
     assert all_tasks[0].id == "t2"
     assert all_tasks[1].id == "t1"
+    conn.close()
+
+
+def test_list_waiting_tasks_page_uses_stable_id_keyset_and_limit(tmp_path: Path) -> None:
+    conn = init_db(str(tmp_path / "x.db"))
+    apply_serve_schema(conn)
+    repo = Repository(conn)
+    now = int(time.time())
+    for index, status in enumerate(
+        ["WAITING", "PENDING", "COMPLETED", "WAITING", "FAILED", "PENDING"]
+    ):
+        task = make_task(tid=f"task-{index}", sha=f"sha-{index}")
+        task.status = status
+        task.created_at = now + index
+        task.updated_at = now + index
+        repo.create_task(task)
+
+    first = repo.list_waiting_tasks_page(after_id=None, limit=2)
+    second = repo.list_waiting_tasks_page(after_id=first[-1].id, limit=2)
+    final = repo.list_waiting_tasks_page(after_id=second[-1].id, limit=2)
+
+    assert [task.id for task in first] == ["task-0", "task-1"]
+    assert [task.id for task in second] == ["task-3", "task-5"]
+    assert final == []
     conn.close()
 
 
@@ -550,13 +1188,18 @@ def test_storage_write_failure_preserves_outer_transaction(tmp_path):
         "update_task_status",
         "delete_task",
         "create_section",
+        "create_sections",
         "update_section_ai_status",
         "create_artifact",
+        "complete_section_with_artifact",
         "increment_retry",
         "create_batch",
+        "create_batch_with_tasks",
+        "materialize_cached_task",
         "update_batch_status",
         "increment_batch_completed",
         "finish_batch",
+        "set_batch_progress",
         "set_task_batch_id",
     ],
 )
@@ -584,6 +1227,9 @@ def test_storage_write_execute_failures_restore_transaction_state(tmp_path, oper
         created_at=int(time.time()),
     )
     storage.create_artifact(artifact)
+    section.ai_status = "COMPLETED"
+    materialized_task = make_task(tid="t1", sha="materialized")
+    materialized_task.status = "COMPLETED"
     batch = {
         "id": "b1",
         "status": "PENDING",
@@ -605,7 +1251,9 @@ def test_storage_write_execute_failures_restore_transaction_state(tmp_path, oper
         BEFORE DELETE ON tasks
         BEGIN SELECT RAISE(ABORT, 'forced storage failure'); END;
         CREATE TRIGGER fail_section_update
-        BEFORE UPDATE ON sections WHEN NEW.ai_status = 'FAIL_TX'
+        BEFORE UPDATE ON sections
+        WHEN NEW.ai_status = 'FAIL_TX'
+          OR (NEW.ai_status = 'COMPLETED' AND OLD.ai_status = 'PENDING')
         BEGIN SELECT RAISE(ABORT, 'forced storage failure'); END;
         CREATE TRIGGER fail_artifact_retry
         BEFORE UPDATE ON ai_artifacts WHEN NEW.retry_count > OLD.retry_count
@@ -624,13 +1272,27 @@ def test_storage_write_execute_failures_restore_transaction_state(tmp_path, oper
         "update_task_status": lambda: storage.update_task_status("t1", "FAIL_TX"),
         "delete_task": lambda: storage.delete_task("t1"),
         "create_section": lambda: storage.create_section(section),
+        "create_sections": lambda: storage.create_sections([section]),
         "update_section_ai_status": lambda: storage.update_section_ai_status("s1", "FAIL_TX"),
         "create_artifact": lambda: storage.create_artifact(artifact),
+        "complete_section_with_artifact": lambda: storage.complete_section_with_artifact(
+            artifact,
+            artifact_already_persisted=True,
+        ),
         "increment_retry": lambda: storage.increment_retry("a1"),
         "create_batch": lambda: storage.create_batch(batch),
+        "create_batch_with_tasks": lambda: storage.create_batch_with_tasks(batch, [make_task()]),
+        "materialize_cached_task": lambda: storage.materialize_cached_task(
+            materialized_task,
+            [section],
+            [artifact],
+        ),
         "update_batch_status": lambda: storage.update_batch_status("b1", "FAIL_TX"),
         "increment_batch_completed": lambda: storage.increment_batch_completed("b1"),
         "finish_batch": lambda: storage.finish_batch("b1", "FAIL_TX"),
+        "set_batch_progress": lambda: storage.set_batch_progress(
+            "b1", completed=1, status="FAIL_TX"
+        ),
         "set_task_batch_id": lambda: storage.set_task_batch_id("t1", "fail-batch"),
     }
 
@@ -724,8 +1386,8 @@ def test_begin_failures_do_not_call_rollback(tmp_path):
     course = workbench.create_course("战略管理", "", str(tmp_path / "out"))
     topic = workbench.create_topic(course.id, 0, "竞争优势", "")
 
-    conn.fail_begin_sql = "BEGIN"
-    with pytest.raises(sqlite3.OperationalError, match="forced BEGIN failure"):
+    conn.fail_begin_sql = "BEGIN IMMEDIATE"
+    with pytest.raises(sqlite3.OperationalError, match="forced BEGIN IMMEDIATE failure"):
         storage.create_task(make_task(tid="begin-failed", sha="begin-failed"))
     assert conn.rollback_calls == 0
     assert conn.in_transaction is False

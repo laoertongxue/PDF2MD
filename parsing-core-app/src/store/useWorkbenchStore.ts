@@ -23,6 +23,11 @@ interface AsyncActionState {
   error: string | null;
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+}
+
 interface WorkbenchState {
   courses: Course[];
   sources: Record<string, Source[]>;
@@ -39,10 +44,10 @@ interface WorkbenchState {
   selectedCourseId: string | null;
 
   selectCourse: (courseId: string) => void;
-  loadCourses: () => Promise<void>;
-  loadSources: (courseId: string) => Promise<Source[]>;
-  loadChapters: (sourceId: string) => Promise<Chapter[]>;
-  loadCourseCards: (courseId: string) => Promise<Card[]>;
+  loadCourses: (signal?: AbortSignal) => Promise<void>;
+  loadSources: (courseId: string, signal?: AbortSignal) => Promise<Source[]>;
+  loadChapters: (sourceId: string, signal?: AbortSignal) => Promise<Chapter[]>;
+  loadCourseCards: (courseId: string, signal?: AbortSignal) => Promise<Card[]>;
   loadChapterNoteBlocks: (chapterId: string) => Promise<NoteBlock[]>;
   loadChapterRuns: (chapterId: string) => Promise<ChapterRun[]>;
   saveChapterBlock: (chapterId: string, kind: string, body: string, expectedBody: string) => Promise<NoteBlock>;
@@ -249,25 +254,33 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
 
     selectCourse: (courseId) => set({ selectedCourseId: courseId }),
 
-    loadCourses: async () => {
-      const courses = await api.listCourses();
+    loadCourses: async (signal) => {
+      throwIfAborted(signal);
+      const courses = await api.listCourses(signal);
+      throwIfAborted(signal);
       set((state) => ({ courses, selectedCourseId: state.selectedCourseId ?? courses[0]?.id ?? null }));
     },
 
-    loadSources: async (courseId) => {
-      const sources = await api.listSources(courseId);
+    loadSources: async (courseId, signal) => {
+      throwIfAborted(signal);
+      const sources = await api.listSources(courseId, signal);
+      throwIfAborted(signal);
       set((state) => ({ sources: { ...state.sources, [courseId]: sources } }));
       return sources;
     },
 
-    loadChapters: async (sourceId) => {
-      const chapters = await api.listChapters(sourceId);
+    loadChapters: async (sourceId, signal) => {
+      throwIfAborted(signal);
+      const chapters = await api.listChapters(sourceId, signal);
+      throwIfAborted(signal);
       set((state) => ({ chapters: { ...state.chapters, [sourceId]: chapters } }));
       return chapters;
     },
 
-    loadCourseCards: async (courseId) => {
-      const cards = await api.listCourseCards(courseId);
+    loadCourseCards: async (courseId, signal) => {
+      throwIfAborted(signal);
+      const cards = await api.listCourseCards(courseId, signal);
+      throwIfAborted(signal);
       set((state) => ({ cardsByCourse: { ...state.cardsByCourse, [courseId]: cards } }));
       return cards;
     },

@@ -2,6 +2,30 @@
 
 All notable changes to PDF2MD are documented here.
 
+## [0.1.3] - 2026-08-26
+
+### Reliability
+
+- Hardened the desktop sidecar lifecycle with random loopback endpoints, inherited-file-descriptor
+  session tokens, bounded redacted logs, controlled restart behavior, and descendant cleanup.
+- Made OCR recovery and Markdown publication fail closed with durable transaction state,
+  deterministic sidecars, active leases, and idempotent final publication.
+- Pinned the Python, Node, Rust, and frontend toolchains and added unified architecture, security,
+  dependency, and release-asset quality gates.
+
+### Release
+
+- Strengthened Apple Silicon DMG verification for sidecar cold start, local authentication,
+  architecture, development-path or credential leaks, code-signature integrity, and the mounted app.
+- Added checksums and workflow provenance for the DMG and App ZIP published by GitHub Release.
+
+### Known Limitations
+
+- This is the M0 engineering baseline, not a commercial GA release.
+- The macOS app remains ad-hoc signed and is not notarized.
+- Codex CLI must be configured as a secure direct executable; Baidu OCR escalation fails closed when
+  required credentials are unavailable.
+
 ## [0.1.2] - 2026-07-15
 
 ### Added
