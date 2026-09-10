@@ -55,8 +55,18 @@ def test_release_uses_exact_python_3_12_patch():
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert 'python-version: "3.12.13"' in workflow
+    assert "uv python install 3.12.13" in workflow
+    assert "actions/setup-python" not in workflow
     assert 'python-runtime/bin/python3.12"' in workflow
     assert "python3.13" not in workflow
+
+
+def test_workflows_hand_verified_toolchain_paths_to_the_security_gate():
+    for workflow_path in (CI_WORKFLOW, RELEASE_WORKFLOW):
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        assert 'PDF2MD_NPM_BIN="$(command -v npm)"' in workflow
+        assert 'PDF2MD_UV_BIN="$(command -v uv)"' in workflow
 
 
 def test_ci_uses_current_native_apple_silicon_runner():
