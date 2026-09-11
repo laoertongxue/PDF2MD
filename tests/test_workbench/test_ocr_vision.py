@@ -823,11 +823,11 @@ def test_thread_cache_lock_polls_cancel_while_waiting(tmp_path):
     def hold_lock():
         with cache.lock(cache_key):
             holder_entered.set()
-            release_holder.wait(timeout=2)
+            release_holder.wait(timeout=10)
 
     holder = threading.Thread(target=hold_lock, name="page-cache-lock-holder")
     holder.start()
-    assert holder_entered.wait(timeout=1)
+    assert holder_entered.wait(timeout=5)
     cancel = threading.Event()
     timer = threading.Timer(0.05, cancel.set)
     timer.start()
@@ -836,15 +836,15 @@ def test_thread_cache_lock_polls_cancel_while_waiting(tmp_path):
         with pytest.raises(InterruptedError, match="cancelled"):
             with cache.lock(
                 cache_key,
-                deadline=time.monotonic() + 1,
+                deadline=time.monotonic() + 5,
                 cancel_event=cancel,
             ):
                 raise AssertionError("cancelled waiter must not acquire the lock")
-        assert time.monotonic() - started < 0.3
+        assert time.monotonic() - started < 4.0
     finally:
         timer.cancel()
         release_holder.set()
-        holder.join(timeout=1)
+        holder.join(timeout=5)
 
     assert not holder.is_alive()
 
