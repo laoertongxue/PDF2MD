@@ -90,7 +90,7 @@ export default function BatchSubmit() {
                 setPasting(false);
               }
             }}
-            placeholder="每行一个路径&#10;/Users/xxx/a.xlsx&#10;/Users/xxx/b.pdf&#10;&#10;⌘+V 粘贴"
+            placeholder="每行一个路径&#10;~/Documents/a.xlsx&#10;~/Documents/b.pdf&#10;&#10;⌘+V 粘贴"
             className="w-full h-24 text-sm font-mono border border-zinc-200 rounded-md p-3 placeholder:text-zinc-300 resize-none focus:outline-none focus:ring-2 focus:ring-zinc-200"
           />
           <p className="text-xs text-zinc-400 mt-2">Finder 中 ⌥⌘C 复制路径 → 回到这里 ⌘V</p>
