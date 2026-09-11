@@ -2011,6 +2011,8 @@ def test_prepare_ignores_legacy_bypass_and_path_injection(tmp_path: Path) -> Non
         tool.chmod(0o755)
 
     environment = os.environ.copy()
+    environment.pop("PDF2MD_UV_BIN", None)
+    environment.pop("PDF2MD_WHEELHOUSE_ROOT", None)
     environment.update(
         {
             "BASH_ENV": str(tmp_path / "bash-env"),

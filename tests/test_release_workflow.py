@@ -291,7 +291,7 @@ def test_release_reclaims_rust_test_artifacts_before_native_release_build():
         if step.get("name") == "Build desktop app natively"
     )
 
-    assert quality < clean < prefetch < runtime < native_build
+    assert prefetch < runtime < quality < clean < native_build
     assert steps[clean].get("working-directory") == "parsing-core-app/src-tauri"
     assert _active_shell_lines(steps[clean].get("run", "")) == {"cargo clean"}
 
