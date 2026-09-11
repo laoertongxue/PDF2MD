@@ -1,6 +1,10 @@
 import sqlite3
 import time
 
+from parsing_core.log import get_logger
+
+log = get_logger(__name__)
+
 _WAL_RETRY_ATTEMPTS = 5
 _WAL_RETRY_DELAY_SECONDS = 0.05
 
@@ -67,20 +71,31 @@ CREATE INDEX IF NOT EXISTS idx_sha_section ON sections(sha256);
 )
 
 
-def _enable_write_ahead_logging(conn: sqlite3.Connection) -> None:
+def _open_connection(db_path: str) -> sqlite3.Connection:
+    return sqlite3.connect(db_path, check_same_thread=False)
+
+
+def _enable_write_ahead_logging(conn: sqlite3.Connection, db_path: str) -> sqlite3.Connection:
     for attempt in range(_WAL_RETRY_ATTEMPTS):
         try:
             conn.execute("PRAGMA journal_mode = WAL")
-            return
+            return conn
         except sqlite3.OperationalError as error:
-            if attempt + 1 == _WAL_RETRY_ATTEMPTS or str(error) != "locking protocol":
+            if str(error) != "locking protocol":
+                conn.close()
                 raise
+            conn.close()
+            if attempt + 1 == _WAL_RETRY_ATTEMPTS:
+                log.warning("write_ahead_logging_unavailable db_path=%s", db_path)
+                return _open_connection(db_path)
             time.sleep(_WAL_RETRY_DELAY_SECONDS * (attempt + 1))
+            conn = _open_connection(db_path)
+    raise AssertionError("unreachable write-ahead logging state")
 
 
 def init_db(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    _enable_write_ahead_logging(conn)
+    conn = _open_connection(db_path)
+    conn = _enable_write_ahead_logging(conn, db_path)
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA_SQL)
