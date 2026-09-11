@@ -1086,12 +1086,14 @@ def run(app: Path, home: Path) -> None:
         environment = {
             "HOME": str(home),
             "PATH": "/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
             HARNESS_MARKER_ENV: harness_marker,
         }
         process = subprocess.Popen(
             [
                 sys.executable,
                 "-I",
+                "-B",
                 "-S",
                 "-c",
                 SPAWN_GATE_BOOTSTRAP,

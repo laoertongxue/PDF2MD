@@ -16,10 +16,23 @@ fi
 bash "$app_dir/scripts/prepare-sidecar-python.sh"
 bash "$app_dir/scripts/build-vision-ocr.sh"
 
+entitlements="$app_dir/scripts/sidecar-entitlements.plist"
+
+/usr/bin/python3 -I -B "$app_dir/scripts/sign-app-bundle.py" \
+  "$app_dir/src-tauri/sidecar-runtime" "${APPLE_SIGNING_IDENTITY:--}" "$entitlements"
+/usr/bin/python3 -I -B "$app_dir/scripts/sign-app-bundle.py" \
+  "$app_dir/src-tauri/binaries" "${APPLE_SIGNING_IDENTITY:--}" "$entitlements"
+
 if [[ "${1:-}" == "build" ]]; then
   rm -rf "$app_dir/src-tauri/target/release/bundle"
 fi
 
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$repo_dir=/build/pdf2md --remap-path-prefix=$HOME/.cargo=/build/cargo"
 
-exec "$app_dir/node_modules/.bin/tauri" "$@"
+set +e
+"$app_dir/node_modules/.bin/tauri" "$@"
+status=$?
+set -e
+if [[ $status -ne 0 ]]; then
+  exit $status
+fi

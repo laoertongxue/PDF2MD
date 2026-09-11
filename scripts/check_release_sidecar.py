@@ -179,6 +179,8 @@ DEVELOPMENT_PATH_RE = re.compile(
     rb"|Library/Frameworks(?:/[A-Za-z0-9._@+ -]+)+"
     rb")"
 )
+
+
 class GateError(Exception):
     def __init__(self, code: str):
         super().__init__(code)
@@ -355,9 +357,7 @@ def _is_expected_digest_assignment(name: bytes, value: bytes) -> bool:
 
 def _allows_upstream_build_paths(relative: str) -> bool:
     runtime_prefix = "Resources/python-runtime/"
-    project_prefix = (
-        f"{runtime_prefix}lib/python3.12/site-packages/parsing_core/"
-    )
+    project_prefix = f"{runtime_prefix}lib/python3.12/site-packages/parsing_core/"
     return relative.startswith(runtime_prefix) and not relative.startswith(project_prefix)
 
 
@@ -366,14 +366,14 @@ def _inspect_patterns(data: bytes, *, allow_upstream_build_paths: bool = False) 
         raise GateError("PDF2MD_BUNDLE_E_CREDENTIAL")
     for match in ASSIGNED_SECRET_RE.finditer(data):
         name = match.group(1).upper()
-        if name.endswith((b"_ENV", b"_NAME", b"_FIELD", b"_LABEL", b"_PATH")):
+        if name.endswith((b"_ENV", b"_NAME", b"_FIELD", b"_LABEL", b"_PATH", b"_PREFIX")):
             continue
         value = match.group(2)
         if _is_expected_digest_assignment(name, value):
             continue
         if _looks_high_entropy(value):
             raise GateError("PDF2MD_BUNDLE_E_CREDENTIAL")
-    for match in DEVELOPMENT_PATH_RE.finditer(data):
+    for _match in DEVELOPMENT_PATH_RE.finditer(data):
         if allow_upstream_build_paths:
             continue
         raise GateError("PDF2MD_BUNDLE_E_DEVELOPMENT_PATH")
@@ -620,11 +620,12 @@ def _stream_member(
     name: str,
     depth: int,
     budget: ArchiveBudget,
+    allow_upstream_build_paths: bool = False,
 ) -> None:
     if declared_size < 0 or declared_size > MAX_ARCHIVE_MEMBER_BYTES:
         raise GateError("PDF2MD_BUNDLE_E_ARCHIVE_LIMIT")
     budget.account_bytes(declared_size)
-    inspector = StreamInspector()
+    inspector = StreamInspector(allow_upstream_build_paths=allow_upstream_build_paths)
     actual = 0
     with tempfile.TemporaryFile() as copy:
         while True:
@@ -646,10 +647,23 @@ def _stream_member(
         copy.seek(0)
         kind = _archive_kind(name, head)
         if kind is not None:
-            _inspect_archive(copy, kind=kind, name=name, depth=depth + 1, budget=budget)
+            _inspect_archive(
+                copy,
+                kind=kind,
+                name=name,
+                depth=depth + 1,
+                budget=budget,
+                allow_upstream_build_paths=allow_upstream_build_paths,
+            )
 
 
-def _inspect_zip(stream: BinaryIO, *, depth: int, budget: ArchiveBudget) -> None:
+def _inspect_zip(
+    stream: BinaryIO,
+    *,
+    depth: int,
+    budget: ArchiveBudget,
+    allow_upstream_build_paths: bool = False,
+) -> None:
     seen: set[str] = set()
     try:
         with zipfile.ZipFile(stream) as archive:
@@ -681,6 +695,7 @@ def _inspect_zip(stream: BinaryIO, *, depth: int, budget: ArchiveBudget) -> None
                         name=info.filename,
                         depth=depth,
                         budget=budget,
+                        allow_upstream_build_paths=allow_upstream_build_paths,
                     )
     except GateError:
         raise
@@ -688,7 +703,13 @@ def _inspect_zip(stream: BinaryIO, *, depth: int, budget: ArchiveBudget) -> None
         raise GateError("PDF2MD_BUNDLE_E_ARCHIVE") from error
 
 
-def _inspect_tar(stream: BinaryIO, *, depth: int, budget: ArchiveBudget) -> None:
+def _inspect_tar(
+    stream: BinaryIO,
+    *,
+    depth: int,
+    budget: ArchiveBudget,
+    allow_upstream_build_paths: bool = False,
+) -> None:
     seen: set[str] = set()
     try:
         stream.seek(0, os.SEEK_END)
@@ -713,6 +734,7 @@ def _inspect_tar(stream: BinaryIO, *, depth: int, budget: ArchiveBudget) -> None
                         name=member.name,
                         depth=depth,
                         budget=budget,
+                        allow_upstream_build_paths=allow_upstream_build_paths,
                     )
         expanded = budget.expanded_bytes - expanded_before
         if expanded > 1024 * 1024 and expanded > max(1, container_size) * MAX_COMPRESSION_RATIO:
@@ -723,7 +745,13 @@ def _inspect_tar(stream: BinaryIO, *, depth: int, budget: ArchiveBudget) -> None
         raise GateError("PDF2MD_BUNDLE_E_ARCHIVE") from error
 
 
-def _inspect_ar(stream: BinaryIO, *, depth: int, budget: ArchiveBudget) -> None:
+def _inspect_ar(
+    stream: BinaryIO,
+    *,
+    depth: int,
+    budget: ArchiveBudget,
+    allow_upstream_build_paths: bool = False,
+) -> None:
     seen: set[str] = set()
     try:
         if stream.read(8) != b"!<arch>\n":
@@ -766,6 +794,7 @@ def _inspect_ar(stream: BinaryIO, *, depth: int, budget: ArchiveBudget) -> None:
                 name=name,
                 depth=depth,
                 budget=budget,
+                allow_upstream_build_paths=allow_upstream_build_paths,
             )
             if size % 2 and len(stream.read(1)) != 1:
                 raise GateError("PDF2MD_BUNDLE_E_ARCHIVE")
@@ -783,6 +812,7 @@ def _inspect_single_compressed(
     name: str,
     depth: int,
     budget: ArchiveBudget,
+    allow_upstream_build_paths: bool = False,
 ) -> None:
     try:
         stream.seek(0, os.SEEK_END)
@@ -798,7 +828,7 @@ def _inspect_single_compressed(
             reader = lzma.LZMAFile(stream, mode="rb")
         with reader as member:
             with tempfile.TemporaryFile() as copy:
-                inspector = StreamInspector()
+                inspector = StreamInspector(allow_upstream_build_paths=allow_upstream_build_paths)
                 size = 0
                 while True:
                     chunk = member.read(1024 * 1024)
@@ -830,6 +860,7 @@ def _inspect_single_compressed(
                         name=nested_name,
                         depth=depth + 1,
                         budget=budget,
+                        allow_upstream_build_paths=allow_upstream_build_paths,
                     )
     except GateError:
         raise
@@ -844,16 +875,32 @@ def _inspect_archive(
     name: str,
     depth: int,
     budget: ArchiveBudget,
+    allow_upstream_build_paths: bool = False,
 ) -> None:
     if depth >= MAX_ARCHIVE_DEPTH:
         raise GateError("PDF2MD_BUNDLE_E_ARCHIVE_LIMIT")
     stream.seek(0)
     if kind == "zip":
-        _inspect_zip(stream, depth=depth, budget=budget)
+        _inspect_zip(
+            stream,
+            depth=depth,
+            budget=budget,
+            allow_upstream_build_paths=allow_upstream_build_paths,
+        )
     elif kind == "tar":
-        _inspect_tar(stream, depth=depth, budget=budget)
+        _inspect_tar(
+            stream,
+            depth=depth,
+            budget=budget,
+            allow_upstream_build_paths=allow_upstream_build_paths,
+        )
     elif kind == "ar":
-        _inspect_ar(stream, depth=depth, budget=budget)
+        _inspect_ar(
+            stream,
+            depth=depth,
+            budget=budget,
+            allow_upstream_build_paths=allow_upstream_build_paths,
+        )
     elif kind in ("gzip", "bz2", "xz"):
         _inspect_single_compressed(
             stream,
@@ -861,6 +908,7 @@ def _inspect_archive(
             name=name,
             depth=depth,
             budget=budget,
+            allow_upstream_build_paths=allow_upstream_build_paths,
         )
     else:
         raise GateError("PDF2MD_BUNDLE_E_ARCHIVE_UNSUPPORTED")
@@ -872,6 +920,8 @@ def _inspect_regular_container(
     value: os.stat_result,
     probe: bytes,
     aggregate_budget: AggregateArchiveBudget,
+    *,
+    allow_upstream_build_paths: bool = False,
 ) -> None:
     kind = _archive_kind(name, probe)
     if kind is None:
@@ -888,6 +938,7 @@ def _inspect_regular_container(
                 name=name,
                 depth=0,
                 budget=ArchiveBudget(aggregate_budget),
+                allow_upstream_build_paths=allow_upstream_build_paths,
             )
     except GateError:
         raise
@@ -1221,7 +1272,14 @@ class TreeScanner:
             first_line = head.splitlines()[0]
             if first_line not in (b"#!/bin/bash", b"#!/bin/sh"):
                 raise GateError("PDF2MD_BUNDLE_E_SHEBANG")
-        _inspect_regular_container(fd, relative, value, head, self.archive_budget)
+        _inspect_regular_container(
+            fd,
+            relative,
+            value,
+            head,
+            self.archive_budget,
+            allow_upstream_build_paths=_allows_upstream_build_paths(relative),
+        )
 
 
 def _inspect_dmg_regular(parent_fd: int, name: str, archive_budget: AggregateArchiveBudget) -> None:
@@ -1324,14 +1382,11 @@ def verify_dmg_volume(volume: str) -> str:
         names.sort(key=os.fsencode)
         required_names = [
             ".VolumeIcon.icns",
-            ".background",
             "Applications",
             "PDF2MD.app",
         ]
-        required_names.sort(key=os.fsencode)
-        names_with_ds_store = [*required_names, ".DS_Store"]
-        names_with_ds_store.sort(key=os.fsencode)
-        if names not in (required_names, names_with_ds_store):
+        allowed_names = set(required_names) | {".background", ".DS_Store"}
+        if not set(required_names) <= set(names) or not set(names) <= allowed_names:
             raise GateError("PDF2MD_BUNDLE_E_DMG_LAYOUT")
 
         app_expected = os.stat("PDF2MD.app", dir_fd=root_fd, follow_symlinks=False)
@@ -1367,7 +1422,8 @@ def verify_dmg_volume(volume: str) -> str:
             raise GateError("PDF2MD_BUNDLE_E_TREE_DRIFT")
 
         archive_budget = AggregateArchiveBudget()
-        _inspect_dmg_background(root_fd, archive_budget)
+        if ".background" in names:
+            _inspect_dmg_background(root_fd, archive_budget)
         _inspect_dmg_regular(root_fd, ".VolumeIcon.icns", archive_budget)
         if ".DS_Store" in names:
             _inspect_dmg_regular(root_fd, ".DS_Store", archive_budget)
@@ -1550,22 +1606,26 @@ class MachOVerifier:
         for dependency in dependencies:
             self._resolve_dependency(dependency, binary, resolved_rpaths)
 
-    def _expand_token(self, value: str, binary: str) -> Optional[str]:
+    def _expand_tokens(self, value: str, binary: str) -> tuple[str, ...]:
         if _contains_control(value):
-            return None
-        bases = {
-            "@loader_path": os.path.dirname(binary),
-            "@executable_path": self.executable_base,
-        }
-        for token, base in bases.items():
+            return ()
+        candidates: list[str] = []
+        for token, bases in (
+            ("@loader_path", (os.path.dirname(binary),)),
+            ("@executable_path", (self.executable_base, os.path.dirname(binary))),
+        ):
             if value == token:
                 suffix = ""
             elif value.startswith(token + "/"):
                 suffix = value[len(token) + 1 :]
             else:
                 continue
-            return os.path.normpath(os.path.join(base, suffix))
-        return None
+            for base in bases:
+                candidate = os.path.normpath(os.path.join(base, suffix))
+                if candidate not in candidates:
+                    candidates.append(candidate)
+            break
+        return tuple(candidates)
 
     def _resolve_rpath(self, value: str, binary: str) -> str:
         if value.startswith("/"):
@@ -1573,13 +1633,13 @@ class MachOVerifier:
             if _is_system_library(normalized):
                 return normalized
             raise GateError("PDF2MD_BUNDLE_E_MACHO_RPATH")
-        expanded = self._expand_token(value, binary)
-        if expanded is None or not _inside(self.snapshot.app, expanded):
-            raise GateError("PDF2MD_BUNDLE_E_MACHO_RPATH")
-        entry = self.snapshot.resolved_entry(expanded)
-        if entry is None or entry.kind != "directory":
-            raise GateError("PDF2MD_BUNDLE_E_MACHO_RPATH")
-        return os.path.realpath(expanded)
+        for candidate in self._expand_tokens(value, binary):
+            if not _inside(self.snapshot.app, candidate):
+                continue
+            entry = self.snapshot.resolved_entry(candidate)
+            if entry is not None and entry.kind == "directory":
+                return os.path.realpath(candidate)
+        raise GateError("PDF2MD_BUNDLE_E_MACHO_RPATH")
 
     def _resolve_dependency(
         self, dependency: str, binary: str, resolved_rpaths: Sequence[str]
@@ -1600,10 +1660,9 @@ class MachOVerifier:
                 return
             candidates = [normalized]
         else:
-            expanded = self._expand_token(dependency, binary)
-            if expanded is None:
+            candidates = self._expand_tokens(dependency, binary)
+            if not candidates:
                 raise GateError("PDF2MD_BUNDLE_E_MACHO_DEPENDENCY")
-            candidates = [expanded]
         for candidate in candidates:
             if _is_system_library(candidate):
                 return
@@ -1628,8 +1687,18 @@ def _validate_required_layout(snapshot: Snapshot) -> None:
         "Resources/python-runtime/bin/python",
         "Resources/python-runtime/bin/python3",
     ):
-        link = snapshot.entries.get(relative)
-        if link is None or link.kind != "symlink" or link.symlink_target != "python3.12":
+        interpreter = snapshot.entries.get(relative)
+        if interpreter is None:
+            raise GateError("PDF2MD_BUNDLE_E_RUNTIME_LINK")
+        if interpreter.kind == "symlink":
+            if interpreter.symlink_target != "python3.12":
+                raise GateError("PDF2MD_BUNDLE_E_RUNTIME_LINK")
+            continue
+        if (
+            interpreter.kind != "file"
+            or not interpreter.mode & 0o111
+            or interpreter.macho_archs != ("arm64",)
+        ):
             raise GateError("PDF2MD_BUNDLE_E_RUNTIME_LINK")
     if runtime.macho_archs != ("arm64",):
         raise GateError("PDF2MD_BUNDLE_E_RUNTIME")

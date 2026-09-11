@@ -4111,7 +4111,98 @@ def _canonicalize_runtime_modes(runtime: Path) -> None:
             os.close(descriptor)
 
 
-def sanitize_runtime(runtime: Path, cleanup_guard: tuple[int, int]) -> None:
+FAT_MAGIC = b"\xca\xfe\xba\xbe"
+FAT_MAGIC_64 = b"\xca\xfe\xba\xbf"
+CPU_TYPE_X86_64 = 0x01000007
+CPU_TYPE_ARM64 = 0x0100000C
+MACHO_MAGICS = (
+    b"\xfe\xed\xfa\xce",
+    b"\xfe\xed\xfa\xcf",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
+)
+FAT_HEADER_PROBE_BYTES = 4096
+
+
+class _FatSlice(NamedTuple):
+    cpu_type: int
+    offset: int
+    size: int
+
+
+def _fat_slices(header: bytes, *, total_size: int) -> list[_FatSlice] | None:
+    if len(header) < 8:
+        return None
+    magic = header[:4]
+    if magic not in (FAT_MAGIC, FAT_MAGIC_64):
+        return None
+    entry_size = 32 if magic == FAT_MAGIC_64 else 20
+    count = int.from_bytes(header[4:8], "big")
+    if count <= 0 or count > 64 or len(header) < 8 + count * entry_size:
+        raise ValueError("invalid universal Mach-O architecture table")
+    slices = []
+    for index in range(count):
+        entry = 8 + index * entry_size
+        cpu_type = int.from_bytes(header[entry : entry + 4], "big")
+        if magic == FAT_MAGIC_64:
+            offset = int.from_bytes(header[entry + 8 : entry + 16], "big")
+            size = int.from_bytes(header[entry + 16 : entry + 24], "big")
+        else:
+            offset = int.from_bytes(header[entry + 8 : entry + 12], "big")
+            size = int.from_bytes(header[entry + 12 : entry + 16], "big")
+        if size <= 0 or offset + size > total_size:
+            raise ValueError("invalid universal Mach-O slice bounds")
+        slices.append(_FatSlice(cpu_type, offset, size))
+    return slices
+
+
+def thin_universal_runtime_binaries(runtime: Path) -> None:
+    for path in sorted(runtime.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError(f"unsupported runtime node: {path}")
+            header = os.read(descriptor, FAT_HEADER_PROBE_BYTES)
+            fat_slices = _fat_slices(header, total_size=before.st_size)
+            if fat_slices is None:
+                continue
+            by_cpu = {entry.cpu_type: entry for entry in fat_slices}
+            if len(by_cpu) != len(fat_slices):
+                raise ValueError("duplicate universal Mach-O architecture")
+            if CPU_TYPE_X86_64 not in by_cpu or CPU_TYPE_ARM64 not in by_cpu:
+                continue
+            arm64_slice = by_cpu[CPU_TYPE_ARM64]
+            os.lseek(descriptor, arm64_slice.offset, os.SEEK_SET)
+            payload = bytearray()
+            remaining = arm64_slice.size
+            while remaining:
+                chunk = os.read(descriptor, min(COPY_CHUNK_SIZE, remaining))
+                if not chunk:
+                    raise ValueError("truncated universal Mach-O slice")
+                payload.extend(chunk)
+                remaining -= len(chunk)
+            if bytes(payload[:4]) not in MACHO_MAGICS:
+                raise ValueError("universal Mach-O slice is not a Mach-O image")
+            if _file_observation(before) != _file_observation(os.fstat(descriptor)):
+                raise ValueError(f"runtime binary changed while thinning: {path}")
+        finally:
+            os.close(descriptor)
+        temporary = path.with_name(f".{path.name}.thin.{uuid.uuid4().hex}")
+        try:
+            _write_new_file(temporary, bytes(payload), stat.S_IMODE(before.st_mode))
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+
+def sanitize_runtime(
+    runtime: Path,
+    cleanup_guard: tuple[int, int],
+) -> None:
     for path in sorted(runtime.rglob("__pycache__"), reverse=True):
         if path.is_dir() and not path.is_symlink():
             _remove_path(path, cleanup_guard)
@@ -4145,6 +4236,7 @@ def sanitize_runtime(runtime: Path, cleanup_guard: tuple[int, int]) -> None:
     for path in bin_directory.iterdir():
         if path.name not in {"python", "python3", "python3.12"}:
             _remove_path(path, cleanup_guard)
+    thin_universal_runtime_binaries(runtime)
     _canonicalize_runtime_modes(runtime)
 
 
@@ -4371,7 +4463,7 @@ export TMPDIR="$support/tmp"
 export PDF2MD_RESOURCES="$resources"
 export PDF2MD_VISION_HELPER="${PDF2MD_VISION_HELPER:-$resources/vision-ocr}"
 
-exec "$python" -s -m parsing_core.serving.lifecycle "${arguments[@]}"
+exec "$python" -s -B -m parsing_core.serving.lifecycle "${arguments[@]}"
 """
 
 

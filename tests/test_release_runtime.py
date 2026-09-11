@@ -1922,6 +1922,79 @@ def test_production_constants_remain_pinned() -> None:
     assert platform.machine() == "arm64"
 
 
+def test_fat_header_slices_are_parsed_and_bounded() -> None:
+    helper = _load_runtime_helper()
+
+    def fat_header(*entries: tuple[int, int, int]) -> bytes:
+        header = b"\xca\xfe\xba\xbe" + len(entries).to_bytes(4, "big")
+        for cpu_type, offset, size in entries:
+            header += cpu_type.to_bytes(4, "big") + b"\x00" * 4
+            header += offset.to_bytes(4, "big") + size.to_bytes(4, "big") + b"\x00" * 4
+        return header
+
+    header = fat_header((0x0100000C, 0, 4096), (0x01000007, 4096, 4096))
+    slices = helper._fat_slices(header, total_size=8192)
+    assert [entry.cpu_type for entry in slices] == [0x0100000C, 0x01000007]
+    assert slices[1].offset == 4096 and slices[1].size == 4096
+    assert helper._fat_slices(b"\xcf\xfa\xed\xfe" + b"\x00" * 8, total_size=16) is None
+    with pytest.raises(ValueError, match="architecture table"):
+        helper._fat_slices(b"\xca\xfe\xba\xbe" + (2).to_bytes(4, "big"), total_size=8)
+    with pytest.raises(ValueError, match="slice bounds"):
+        helper._fat_slices(fat_header((0x0100000C, 0, 9999)), total_size=16)
+
+
+def test_thin_universal_runtime_binaries_extracts_arm64_slice(tmp_path: Path) -> None:
+    helper = _load_runtime_helper()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    source = tmp_path / "shim.c"
+    source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    slices = {}
+    for architecture in ("arm64", "x86_64"):
+        output = tmp_path / f"{architecture}.bin"
+        subprocess.run(
+            ["/usr/bin/clang", "-arch", architecture, "-O2", "-o", str(output), str(source)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        slices[architecture] = output
+    universal = runtime / "universal.so"
+    subprocess.run(
+        [
+            "/usr/bin/lipo",
+            "-create",
+            str(slices["arm64"]),
+            str(slices["x86_64"]),
+            "-output",
+            str(universal),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    universal.chmod(0o755)
+    arm64_only = runtime / "arm64-only.so"
+    shutil.copy2(slices["arm64"], arm64_only)
+    arm64_only.chmod(0o755)
+
+    helper.thin_universal_runtime_binaries(runtime)
+
+    def architectures(path: Path) -> list[str]:
+        result = subprocess.run(
+            ["/usr/bin/lipo", "-archs", str(path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.split()
+
+    assert architectures(universal) == ["arm64"]
+    assert stat.S_IMODE(universal.stat().st_mode) & 0o111
+    assert architectures(arm64_only) == ["arm64"]
+    assert list(runtime.glob(".*.thin.*")) == []
+
+
 @pytest.mark.skipif(
     os.environ.get("PDF2MD_RUN_REAL_RUNTIME_BUILD") != "1",
     reason="set PDF2MD_RUN_REAL_RUNTIME_BUILD=1 to run the production runtime build",

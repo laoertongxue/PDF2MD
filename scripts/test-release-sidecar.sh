@@ -20,7 +20,7 @@ case "${BASH_SOURCE[0]}" in
   *) script_parent=. ;;
 esac
 script_dir="$(cd "$script_parent" && pwd -P)" || fail "PDF2MD_RELEASE_TEST_E_INSPECTION"
-temporary="$(/usr/bin/mktemp -d /tmp/pdf2md-release-test.XXXXXX)" || {
+temporary="$(/usr/bin/mktemp -d /private/tmp/pdf2md-release-test.XXXXXX)" || {
   fail "PDF2MD_RELEASE_TEST_E_TEMPORARY"
 }
 app="$temporary/PDF2MD.app"
