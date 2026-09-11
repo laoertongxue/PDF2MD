@@ -80,7 +80,7 @@ jobs:
             PDF2MD_UV_BIN="$PDF2MD_UV_BIN" \
             PDF2MD_WHEELHOUSE_ROOT="$PDF2MD_WHEELHOUSE_ROOT" \
             TMPDIR="$RUNNER_TEMP" \
-            /bin/bash -p --noprofile --norc ./parsing-core-app/scripts/prepare-sidecar-python.sh
+            /bin/bash --noprofile --norc -p ./parsing-core-app/scripts/prepare-sidecar-python.sh
 
       - name: Build Apple Vision OCR helper
         run: ./parsing-core-app/scripts/build-vision-ocr.sh

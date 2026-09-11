@@ -77,6 +77,7 @@ def test_workflows_build_bundled_artifacts_before_quality_gates():
         workflow = workflow_path.read_text(encoding="utf-8")
         gate_index = workflow.index(gate_step)
 
+        assert "/bin/bash -p --noprofile" not in workflow
         assert workflow.index("Prepare embedded Python runtime") < gate_index
         assert workflow.index("Build Apple Vision OCR helper") < gate_index
 
