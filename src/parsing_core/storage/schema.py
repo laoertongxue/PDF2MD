@@ -1,12 +1,4 @@
 import sqlite3
-import time
-
-from parsing_core.log import get_logger
-
-log = get_logger(__name__)
-
-_WAL_RETRY_ATTEMPTS = 8
-_WAL_RETRY_DELAY_SECONDS = 0.25
 
 TASK_RECOVERY_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS task_recovery (
@@ -71,39 +63,10 @@ CREATE INDEX IF NOT EXISTS idx_sha_section ON sections(sha256);
 )
 
 
-def _open_connection(db_path: str) -> sqlite3.Connection:
-    return sqlite3.connect(db_path, check_same_thread=False)
-
-
-def _enable_write_ahead_logging(conn: sqlite3.Connection) -> None:
-    conn.execute("PRAGMA journal_mode = WAL")
-
-
-def _initialize_connection(conn: sqlite3.Connection) -> None:
+def init_db(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA_SQL)
     conn.commit()
-
-
-def init_db(db_path: str) -> sqlite3.Connection:
-    conn: sqlite3.Connection | None = None
-    for attempt in range(_WAL_RETRY_ATTEMPTS):
-        if conn is not None:
-            conn.close()
-        conn = _open_connection(db_path)
-        try:
-            _enable_write_ahead_logging(conn)
-            _initialize_connection(conn)
-            return conn
-        except sqlite3.OperationalError as error:
-            if str(error) != "locking protocol":
-                conn.close()
-                raise
-            time.sleep(_WAL_RETRY_DELAY_SECONDS * (attempt + 1))
-    assert conn is not None
-    conn.close()
-    log.warning("write_ahead_logging_unavailable db_path=%s", db_path)
-    conn = _open_connection(db_path)
-    _initialize_connection(conn)
     return conn
