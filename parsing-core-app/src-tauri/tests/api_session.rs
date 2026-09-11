@@ -211,7 +211,7 @@ fn packaged_macos_exit_paths_share_controlled_cleanup_and_preserve_exit_codes() 
         "--parent-pid",
         "--socket-fd",
         "--session-token-fd",
-        "exec \"$python\" -s -m parsing_core.serving.lifecycle",
+        "exec \"$python\" -s -B -m parsing_core.serving.lifecycle",
     ] {
         assert!(
             wrapper.contains(launcher_contract),
