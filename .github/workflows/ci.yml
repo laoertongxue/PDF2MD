@@ -50,6 +50,38 @@ jobs:
       - name: Restore locked Python environment
         run: uv sync --frozen --all-extras
 
+      - name: Prefetch locked Python wheels
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          python_path="$(/usr/bin/python3 -I -S -B -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$(command -v python3)")"
+          uv_path="$(/usr/bin/python3 -I -S -B -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$(command -v uv)")"
+          PDF2MD_WHEELHOUSE_ROOT="$RUNNER_TEMP/pdf2md-wheelhouse"
+          /usr/bin/env -i \
+            HOME="$HOME" \
+            PATH="/usr/bin:/bin" \
+            TMPDIR="$RUNNER_TEMP" \
+            /usr/bin/python3 -I -S -B \
+              ./parsing-core-app/scripts/sidecar_runtime.py prefetch-wheelhouse \
+              --repo "$GITHUB_WORKSPACE" \
+              --python-path "$python_path" \
+              --python-version "3.12.13" \
+              --uv-path "$uv_path" \
+              --uv-version "0.12.3" \
+              --wheelhouse-root "$PDF2MD_WHEELHOUSE_ROOT"
+          printf 'PDF2MD_WHEELHOUSE_ROOT=%s\n' "$PDF2MD_WHEELHOUSE_ROOT" >> "$GITHUB_ENV"
+          printf 'PDF2MD_UV_BIN=%s\n' "$uv_path" >> "$GITHUB_ENV"
+
+      - name: Prepare embedded Python runtime
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          /usr/bin/env -i \
+            HOME="$HOME" \
+            PATH="/usr/bin:/bin" \
+            PDF2MD_UV_BIN="$PDF2MD_UV_BIN" \
+            PDF2MD_WHEELHOUSE_ROOT="$PDF2MD_WHEELHOUSE_ROOT" \
+            TMPDIR="$RUNNER_TEMP" \
+            /bin/bash -p --noprofile --norc ./parsing-core-app/scripts/prepare-sidecar-python.sh
+
       - name: Build Apple Vision OCR helper
         run: ./parsing-core-app/scripts/build-vision-ocr.sh
 

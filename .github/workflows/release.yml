@@ -67,21 +67,6 @@ jobs:
             exit 1
           }
 
-      - name: Build Apple Vision OCR helper
-        run: ./parsing-core-app/scripts/build-vision-ocr.sh
-
-      - name: Run repository quality and security gates
-        run: |
-          ./scripts/verify-fast.sh
-          ./scripts/verify-architecture.sh
-          PDF2MD_NPM_BIN="$(command -v npm)" \
-            PDF2MD_UV_BIN="$(command -v uv)" \
-            ./scripts/verify-security.sh
-
-      - name: Reclaim Rust test artifacts
-        working-directory: parsing-core-app/src-tauri
-        run: cargo clean
-
       - name: Prefetch locked Python wheels
         shell: /bin/bash --noprofile --norc -euo pipefail {0}
         run: |
@@ -113,6 +98,21 @@ jobs:
             PDF2MD_WHEELHOUSE_ROOT="$PDF2MD_WHEELHOUSE_ROOT" \
             TMPDIR="$RUNNER_TEMP" \
             /bin/bash -p --noprofile --norc ./parsing-core-app/scripts/prepare-sidecar-python.sh
+
+      - name: Build Apple Vision OCR helper
+        run: ./parsing-core-app/scripts/build-vision-ocr.sh
+
+      - name: Run repository quality and security gates
+        run: |
+          ./scripts/verify-fast.sh
+          ./scripts/verify-architecture.sh
+          PDF2MD_NPM_BIN="$(command -v npm)" \
+            PDF2MD_UV_BIN="$(command -v uv)" \
+            ./scripts/verify-security.sh
+
+      - name: Reclaim Rust test artifacts
+        working-directory: parsing-core-app/src-tauri
+        run: cargo clean
 
       - name: Build desktop app natively
         working-directory: parsing-core-app

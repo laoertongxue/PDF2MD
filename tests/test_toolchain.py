@@ -69,14 +69,16 @@ def test_workflows_hand_verified_toolchain_paths_to_the_security_gate():
         assert 'PDF2MD_UV_BIN="$(command -v uv)"' in workflow
 
 
-def test_workflows_build_bundled_vision_helper_before_quality_gates():
+def test_workflows_build_bundled_artifacts_before_quality_gates():
     for workflow_path, gate_step in (
         (CI_WORKFLOW, "Run repository quality gates"),
         (RELEASE_WORKFLOW, "Run repository quality and security gates"),
     ):
         workflow = workflow_path.read_text(encoding="utf-8")
+        gate_index = workflow.index(gate_step)
 
-        assert workflow.index("Build Apple Vision OCR helper") < workflow.index(gate_step)
+        assert workflow.index("Prepare embedded Python runtime") < gate_index
+        assert workflow.index("Build Apple Vision OCR helper") < gate_index
 
 
 def test_ci_uses_current_native_apple_silicon_runner():
