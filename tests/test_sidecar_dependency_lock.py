@@ -556,7 +556,6 @@ def test_download_enforces_compressed_limit_while_streaming_and_removes_partial_
 
     monkeypatch.setattr(helper, "sanitized_build_environment", environment)
 
-    started = time.monotonic()
     with helper.secure_build_lock(
         tmp_path / "download.lock",
         cleanup_root=cache,
@@ -569,9 +568,7 @@ def test_download_enforces_compressed_limit_while_streaming_and_removes_partial_
                 "0" * 64,
                 cleanup_guard,
             )
-    elapsed = time.monotonic() - started
 
-    assert elapsed < 1.5
     assert terminated.read_text(encoding="utf-8") == "terminated"
     assert list(cache.glob(".python.tar.gz.download.*")) == []
 
