@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 _TRANSIENT_SQLITE_MESSAGE = "locking protocol"
-_RETRY_SCOPE = "tests/test_serving/test_scheduler.py::"
 
 
 def _retry_transient_sqlite(original):
+    if inspect.isgeneratorfunction(original):
+        return original
     if inspect.iscoroutinefunction(original):
 
         @functools.wraps(original)
@@ -38,8 +39,6 @@ def _retry_transient_sqlite(original):
 
 def pytest_collection_modifyitems(items):
     for item in items:
-        if not item.nodeid.startswith(_RETRY_SCOPE):
-            continue
         original = getattr(item, "obj", None)
         if callable(original):
             item.obj = _retry_transient_sqlite(original)
