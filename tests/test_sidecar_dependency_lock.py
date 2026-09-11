@@ -533,14 +533,15 @@ def test_download_enforces_compressed_limit_while_streaming_and_removes_partial_
     helper = _load_helper()
     cache = tmp_path / "cache"
     cache.mkdir(mode=0o700)
-    terminated = tmp_path / "terminated"
+    completed = tmp_path / "completed"
     fake_curl = tmp_path / "curl"
     fake_curl.write_text(
         "#!/bin/bash\n"
         "trap 'printf terminated > \"$PDF2MD_TERMINATED\"; exit 143' TERM\n"
         "i=0\n"
         "while (( i < 128 )); do printf '0123456789abcdef'; (( i += 1 )); done\n"
-        "/bin/sleep 3\n",
+        "/bin/sleep 3\n"
+        'printf completed > "$PDF2MD_COMPLETED"\n',
         encoding="utf-8",
     )
     fake_curl.chmod(0o755)
@@ -551,7 +552,8 @@ def test_download_enforces_compressed_limit_while_streaming_and_removes_partial_
 
     def environment(home: Path) -> dict[str, str]:
         result = original_environment(home)
-        result["PDF2MD_TERMINATED"] = str(terminated)
+        result["PDF2MD_TERMINATED"] = str(tmp_path / "terminated")
+        result["PDF2MD_COMPLETED"] = str(completed)
         return result
 
     monkeypatch.setattr(helper, "sanitized_build_environment", environment)
@@ -569,7 +571,7 @@ def test_download_enforces_compressed_limit_while_streaming_and_removes_partial_
                 cleanup_guard,
             )
 
-    assert terminated.read_text(encoding="utf-8") == "terminated"
+    assert not completed.exists()
     assert list(cache.glob(".python.tar.gz.download.*")) == []
 
 

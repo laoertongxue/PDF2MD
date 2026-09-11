@@ -1,4 +1,8 @@
 import sqlite3
+import time
+
+_WAL_RETRY_ATTEMPTS = 5
+_WAL_RETRY_DELAY_SECONDS = 0.05
 
 TASK_RECOVERY_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS task_recovery (
@@ -63,9 +67,20 @@ CREATE INDEX IF NOT EXISTS idx_sha_section ON sections(sha256);
 )
 
 
+def _enable_write_ahead_logging(conn: sqlite3.Connection) -> None:
+    for attempt in range(_WAL_RETRY_ATTEMPTS):
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as error:
+            if attempt + 1 == _WAL_RETRY_ATTEMPTS or str(error) != "locking protocol":
+                raise
+            time.sleep(_WAL_RETRY_DELAY_SECONDS * (attempt + 1))
+
+
 def init_db(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode = WAL")
+    _enable_write_ahead_logging(conn)
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA_SQL)
