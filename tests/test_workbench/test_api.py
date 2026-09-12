@@ -3018,7 +3018,7 @@ def test_run_hybrid_requires_deepseek_settings(tmp_path, monkeypatch):
     res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
 
     assert res.status_code == 400
-    assert res.json()["detail"] == "deepseek api key not configured"
+    assert res.json()["detail"] == {"code": "deepseek_key_missing", "params": {}}
     assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
     repo = WorkbenchRepository(init_db(str(tmp_path / "serve.db")))
     assert repo.get_chapter_generation_lease(chapter["id"]) is None
@@ -3094,7 +3094,7 @@ def test_run_hybrid_rejects_blank_deepseek_key_without_running_pipeline(tmp_path
     res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
 
     assert res.status_code == 400
-    assert res.json()["detail"] == "deepseek api key not configured"
+    assert res.json()["detail"] == {"code": "deepseek_key_missing", "params": {}}
     assert calls["run_all"] == 0
     assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
 
@@ -3647,7 +3647,7 @@ def test_workbench_settings_test_connection_requires_key(tmp_path, monkeypatch):
     res = c.post("/api/workbench/settings/deepseek/test")
 
     assert res.status_code == 400
-    assert res.json()["detail"] == "deepseek api key not configured"
+    assert res.json()["detail"] == {"code": "deepseek_key_missing", "params": {}}
 
 
 def test_environment_reports_codex_and_baidu_states(tmp_path, monkeypatch):
@@ -3812,3 +3812,43 @@ def test_ocr_without_provider_reports_structured_error(tmp_path, monkeypatch):
         lambda status: bool(status.get("error")),
     )
     assert payload["error"] == "baidu_key_missing"
+
+
+def test_missing_deepseek_key_returns_actionable_code(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    _course, _source, chapter = confirmed_chapter(test_client, root)
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "")
+    response = test_client.post(
+        f"/api/workbench/chapters/{chapter['id']}/run-hybrid",
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == {"code": "deepseek_key_missing", "params": {}}
+
+
+def test_missing_codex_maps_to_stable_error_code(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf = root / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    _course, source = _registered_pdf_source(test_client, root, pdf)
+
+    def missing(_path=None):
+        raise CodexCliError("codex cli not found")
+
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", missing)
+    monkeypatch.setattr(routes_workbench, "_find_vision_helper", lambda: tmp_path / "vision")
+    monkeypatch.setattr(workflow_module, "count_pdf_pages", lambda _source: 1)
+    response = test_client.post(
+        f"/api/workbench/sources/{source['id']}/ocr",
+        json={},
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 200
+    payload = _poll_ocr_status(
+        test_client,
+        source["id"],
+        lambda status: bool(status.get("error")),
+    )
+    assert payload["error"] == "codex_unavailable"

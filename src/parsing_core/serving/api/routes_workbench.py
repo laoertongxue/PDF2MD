@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from parsing_core import __version__
 from parsing_core.parser.markitdown_adapter import MarkItDownAdapter
 from parsing_core.serving.api.deps import SchedulerDep
+from parsing_core.serving.api.errors import api_error
 from parsing_core.serving.models.api import (
     AttachmentImportRequest,
     AttachmentResponse,
@@ -213,9 +214,9 @@ def _read_configured_deepseek_key() -> str:
     try:
         api_key = read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
     except KeychainError as exc:
-        raise HTTPException(400, "deepseek api key not configured") from exc
+        raise api_error(400, "deepseek_key_missing") from exc
     if not api_key.strip():
-        raise HTTPException(400, "deepseek api key not configured")
+        raise api_error(400, "deepseek_key_missing")
     return api_key.strip()
 
 

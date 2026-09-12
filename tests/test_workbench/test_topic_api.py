@@ -1192,7 +1192,7 @@ def test_run_hybrid_reports_missing_deepseek_key(tmp_path, monkeypatch):
     monkeypatch.setattr("parsing_core.serving.api.routes_topics.read_secret", lambda *args: "")
     response = c.post(f"/api/workbench/topics/{topic['id']}/run-hybrid")
     assert response.status_code == 400
-    assert response.json()["detail"] == "deepseek api key not configured"
+    assert response.json()["detail"] == {"code": "deepseek_key_missing", "params": {}}
 
 
 def test_run_hybrid_reports_missing_codex_cli(tmp_path, monkeypatch):
