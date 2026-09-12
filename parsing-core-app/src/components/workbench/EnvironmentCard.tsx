@@ -98,9 +98,9 @@ export default function EnvironmentCard() {
     },
   ];
 
-  const requiredStates = items.map((item) => item.state).filter((state) => state !== "optional");
-  const readyCount = requiredStates.filter((state) => state === "ready").length;
-  const allReady = readyCount === requiredStates.length;
+  const totalCount = items.length;
+  const readyCount = items.filter((item) => item.state === "ready").length;
+  const allReady = items.every((item) => item.state === "ready" || item.state === "optional");
   const expanded = expandedOverride ?? !allReady;
 
   return (
@@ -112,9 +112,7 @@ export default function EnvironmentCard() {
         aria-expanded={expanded}
       >
         <span className="text-sm font-medium text-zinc-900">
-          {allReady
-            ? `环境就绪 · ${readyCount}/${requiredStates.length}`
-            : `环境待配置 · ${readyCount}/${requiredStates.length}`}
+          {allReady ? `环境就绪 · ${readyCount}/${totalCount}` : `环境待配置 · ${readyCount}/${totalCount}`}
         </span>
         <span className="text-xs text-zinc-400">{expanded ? "收起" : "展开"}</span>
       </button>

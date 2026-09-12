@@ -17,8 +17,13 @@ vi.mock("../../store/useWorkbenchStore", () => ({
   }),
 }));
 
+vi.mock("./EnvironmentCard", () => ({ default: () => null }));
+
+const fetchSpy = vi.spyOn(globalThis, "fetch");
+
 beforeEach(() => {
   delete (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  fetchSpy.mockClear();
 });
 
 it("disables the desktop folder picker in a browser and explains the limitation as an alert", async () => {
@@ -32,4 +37,5 @@ it("disables the desktop folder picker in a browser and explains the limitation 
   expect(screen.getByText("浏览器版不支持选择本地课程目录，请使用桌面客户端或粘贴目录路径。")).toBeInTheDocument();
   await userEvent.click(picker);
   expect(screen.queryByText(/invoke|Tauri/i)).not.toBeInTheDocument();
+  expect(fetchSpy).not.toHaveBeenCalled();
 });
