@@ -252,6 +252,7 @@ def test_deepseek_settings_route_preserves_unmodified_fields_atomically(
         WorkbenchSettings(codex_cli_path="/usr/local/bin/codex-existing"),
     )
     monkeypatch.setattr(routes_workbench, "_read_masked_deepseek_key", lambda: None)
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
 
     response = asyncio.run(
         routes_workbench.save_deepseek_settings(
