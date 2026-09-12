@@ -609,7 +609,7 @@ git commit -m "feat(api): expose environment report and codex/baidu settings"
 
 说明：本任务只把解析来源改为"设置 + Keychain"；**百度缺失仍阻断**（`baidu_key_missing`），页级隔离在 Plan 2 落地后移除该阻断。
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 在 `tests/test_workbench/test_api.py` 末尾追加：
 
@@ -667,12 +667,12 @@ def test_ocr_without_provider_reports_structured_error(tmp_path, monkeypatch):
 
 说明：OCR 的 provider 失败经由工作线程写入状态并在 `status` 载荷的 `error` 字段返回（HTTP 200），不是 HTTP 错误。
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_api.py -q -k "configured_codex_path or structured_error"`
 预期：FAIL（Codex 未读取设置；百度缺失时 error 为 `ocr_provider_unavailable`）
 
-- [ ] **步骤 3：修改 factory、调用点与错误码透传**
+- [x] **步骤 3：修改 factory、调用点与错误码透传**
 
 `routes_workbench.py`：
 
@@ -736,12 +736,12 @@ def _provider_error_code(exc: BaseException) -> str:
 
 （以文件中现有函数名/位置为准；只改映射，不动其他逻辑。）
 
-- [ ] **步骤 4：运行测试验证通过**
+- [x] **步骤 4：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_api.py tests/test_workbench/test_ocr_workflow.py -q | tail -3`
 预期：PASS。既有断言 `ocr_provider_unavailable` 的用例（如 `test_ocr_workflow.py` 中合成 WorkflowBlockedError 的用例）需要按新映射更新：仅当消息不是稳定码时才回落该值。
 
-- [ ] **步骤 5：Commit**
+- [x] **步骤 5：Commit**
 
 ```bash
 git add src/parsing_core/serving/api/routes_workbench.py src/parsing_core/serving/api/routes_topics.py src/parsing_core/workbench/ocr/workflow.py tests/test_workbench/test_api.py
