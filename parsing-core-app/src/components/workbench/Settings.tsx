@@ -1,6 +1,7 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { FolderOpen, Loader2, Save, Wifi } from "lucide-react";
 import { apiErrorInfo } from "../../api/errorMessages";
+import type { ApiErrorAction } from "../../api/errorMessages";
 import { isTauriRuntime } from "../../api/runtime";
 import {
   fetchEnvironment,
@@ -14,10 +15,21 @@ import type { EnvironmentReport } from "../../api/workbenchTypes";
 
 const MODEL = "deepseek-v4-pro";
 
-function describeError(error: unknown, fallback: string): string {
+interface SectionError {
+  message: string;
+  action: ApiErrorAction;
+}
+
+interface RefreshResult {
+  stale: boolean;
+  settingsOk: boolean;
+  environmentOk: boolean;
+}
+
+function describeError(error: unknown, fallback: string): SectionError {
   const info = apiErrorInfo(error);
-  if (info) return `${info.title}：${info.description}`;
-  return error instanceof Error ? error.message : fallback;
+  if (info) return { message: `${info.title}：${info.description}`, action: info.action };
+  return { message: error instanceof Error ? error.message : fallback, action: "none" };
 }
 
 export default function Settings() {
@@ -27,6 +39,7 @@ export default function Settings() {
   const [codexPath, setCodexPath] = useState("");
   const [baiduKey, setBaiduKey] = useState("");
   const [environment, setEnvironment] = useState<EnvironmentReport | null>(null);
+  const [environmentError, setEnvironmentError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -34,23 +47,50 @@ export default function Settings() {
   const [savingBaidu, setSavingBaidu] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [codexError, setCodexError] = useState<string | null>(null);
+  const [codexError, setCodexError] = useState<SectionError | null>(null);
   const [codexMessage, setCodexMessage] = useState<string | null>(null);
-  const [baiduError, setBaiduError] = useState<string | null>(null);
+  const [baiduError, setBaiduError] = useState<SectionError | null>(null);
   const [baiduMessage, setBaiduMessage] = useState<string | null>(null);
   const desktop = isTauriRuntime();
+  const initializedRef = useRef(false);
+  const refreshSequenceRef = useRef(0);
+  const baiduInputRef = useRef<HTMLInputElement>(null);
 
-  const refresh = useCallback(async () => {
-    const [settings, report] = await Promise.all([getWorkbenchSettings(), fetchEnvironment()]);
-    setModel(MODEL);
-    setMaskedKey(settings.deepseek_key_masked);
-    setCodexPath(settings.codex_cli_path ?? report.codex.path ?? "");
-    setEnvironment(report);
+  const refresh = useCallback(async (): Promise<RefreshResult> => {
+    const sequence = ++refreshSequenceRef.current;
+    const [settingsResult, environmentResult] = await Promise.allSettled([getWorkbenchSettings(), fetchEnvironment()]);
+    if (sequence !== refreshSequenceRef.current) {
+      return { stale: true, settingsOk: false, environmentOk: false };
+    }
+    if (settingsResult.status === "fulfilled") {
+      setModel(MODEL);
+      setMaskedKey(settingsResult.value.deepseek_key_masked);
+      if (!initializedRef.current) {
+        const detectedPath = environmentResult.status === "fulfilled" ? environmentResult.value.codex.path : null;
+        const initialPath = settingsResult.value.codex_cli_path ?? detectedPath ?? "";
+        setCodexPath((current) => (current.trim() ? current : initialPath));
+        initializedRef.current = true;
+      }
+    }
+    if (environmentResult.status === "fulfilled") {
+      setEnvironment(environmentResult.value);
+      setEnvironmentError(false);
+    } else {
+      setEnvironmentError(true);
+    }
+    return {
+      stale: false,
+      settingsOk: settingsResult.status === "fulfilled",
+      environmentOk: environmentResult.status === "fulfilled",
+    };
   }, []);
 
   useEffect(() => {
     refresh()
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : "设置加载失败"))
+      .then((result) => {
+        if (result.stale) return;
+        if (!result.settingsOk) setError("设置加载失败");
+      })
       .finally(() => setLoading(false));
   }, [refresh]);
 
@@ -97,12 +137,16 @@ export default function Settings() {
     setCodexMessage(null);
     try {
       await saveCodexPath(path);
-      await refresh();
-      setCodexMessage("已保存");
     } catch (err: unknown) {
       setCodexError(describeError(err, "保存失败"));
-    } finally {
       setSavingCodex(false);
+      return;
+    }
+    setSavingCodex(false);
+    setCodexMessage("已保存");
+    const result = await refresh();
+    if (!result.stale && (!result.settingsOk || !result.environmentOk)) {
+      setCodexMessage("已保存，但状态刷新失败，可重新检测");
     }
   };
 
@@ -114,7 +158,7 @@ export default function Settings() {
       const selected = await open({ multiple: false });
       if (typeof selected === "string") setCodexPath(selected);
     } catch (err: unknown) {
-      setCodexError(err instanceof Error ? err.message : "无法打开文件选择器");
+      setCodexError(describeError(err, "无法打开文件选择器"));
     }
   };
 
@@ -126,13 +170,17 @@ export default function Settings() {
     setBaiduMessage(null);
     try {
       await saveBaiduKey(key);
-      setBaiduKey("");
-      await refresh();
-      setBaiduMessage("已保存");
     } catch (err: unknown) {
       setBaiduError(describeError(err, "保存失败"));
-    } finally {
       setSavingBaidu(false);
+      return;
+    }
+    setSavingBaidu(false);
+    setBaiduKey("");
+    setBaiduMessage("已保存");
+    const result = await refresh();
+    if (!result.stale && (!result.settingsOk || !result.environmentOk)) {
+      setBaiduMessage("已保存，但状态刷新失败，可重新检测");
     }
   };
 
@@ -142,6 +190,12 @@ export default function Settings() {
         <h1 className="text-xl font-semibold text-zinc-900">精读设置</h1>
         <p className="mt-0.5 text-sm text-zinc-500">API Key 保存在 macOS Keychain。</p>
       </div>
+
+      {!loading && environmentError && (
+        <p role="alert" className="text-sm text-amber-700">
+          环境状态加载失败，可稍后重试。
+        </p>
+      )}
 
       <form onSubmit={submit} className="space-y-4 rounded-lg border border-zinc-200 bg-white p-5">
         <div className="grid gap-4">
@@ -210,7 +264,7 @@ export default function Settings() {
           <input
             value={codexPath}
             onChange={(event) => setCodexPath(event.target.value)}
-            placeholder="/opt/homebrew/bin/codex"
+            placeholder={environment?.codex.path ?? "/opt/homebrew/bin/codex"}
             className="mt-1 w-full rounded-md border border-zinc-200 px-3 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-zinc-200"
           />
         </label>
@@ -235,9 +289,19 @@ export default function Settings() {
           </button>
         </div>
         {codexError && (
-          <p role="alert" className="text-sm text-red-500">
-            {codexError}
-          </p>
+          <div role="alert" className="text-sm text-red-500">
+            <p>{codexError.message}</p>
+            {codexError.action === "pick_codex" && (
+              <button
+                type="button"
+                onClick={handlePickCodex}
+                disabled={!desktop}
+                className="mt-1 underline disabled:cursor-not-allowed disabled:text-zinc-400"
+              >
+                选择 Codex 文件
+              </button>
+            )}
+          </div>
         )}
         {codexMessage && <p className="text-sm text-emerald-600">{codexMessage}</p>}
         {!desktop && (
@@ -259,6 +323,7 @@ export default function Settings() {
         <label className="block">
           <span className="text-xs text-zinc-500">百度 OCR Key</span>
           <input
+            ref={baiduInputRef}
             type="password"
             value={baiduKey}
             onChange={(event) => setBaiduKey(event.target.value)}
@@ -278,9 +343,14 @@ export default function Settings() {
           </button>
         </div>
         {baiduError && (
-          <p role="alert" className="text-sm text-red-500">
-            {baiduError}
-          </p>
+          <div role="alert" className="text-sm text-red-500">
+            <p>{baiduError.message}</p>
+            {baiduError.action === "open_baidu_settings" && (
+              <button type="button" onClick={() => baiduInputRef.current?.focus()} className="mt-1 underline">
+                去配置百度 Key
+              </button>
+            )}
+          </div>
         )}
         {baiduMessage && <p className="text-sm text-emerald-600">{baiduMessage}</p>}
       </section>
