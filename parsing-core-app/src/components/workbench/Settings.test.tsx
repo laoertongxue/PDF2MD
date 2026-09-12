@@ -106,3 +106,25 @@ it("keeps the saved feedback when the follow-up refresh fails", async () => {
   await userEvent.click(screen.getByRole("button", { name: "保存 Codex 路径" }));
   expect(await screen.findByText("已保存，但状态刷新失败，可重新检测")).toBeInTheDocument();
 });
+
+it("ignores a stale initial settings response that resolves after a save refresh", async () => {
+  let resolveInitialSettings!: (value: WorkbenchSettings) => void;
+  vi.mocked(workbenchApi.getWorkbenchSettings)
+    .mockImplementationOnce(
+      () =>
+        new Promise<WorkbenchSettings>((resolve) => {
+          resolveInitialSettings = resolve;
+        }),
+    )
+    .mockResolvedValue(settings);
+  vi.mocked(workbenchApi.saveCodexPath).mockResolvedValue(settings);
+  render(<Settings />);
+  const input = await screen.findByLabelText("Codex CLI 路径");
+  await userEvent.type(input, "/opt/homebrew/bin/codex");
+  await userEvent.click(screen.getByRole("button", { name: "保存 Codex 路径" }));
+  const keyInput = screen.getByLabelText("DeepSeek API Key");
+  await waitFor(() => expect(keyInput).toHaveAttribute("placeholder", "sk-****1234"));
+  resolveInitialSettings({ ...settings, deepseek_key_masked: "sk-****0000" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(keyInput).toHaveAttribute("placeholder", "sk-****1234");
+});
