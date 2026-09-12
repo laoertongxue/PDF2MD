@@ -1209,7 +1209,7 @@ def test_run_hybrid_reports_missing_codex_cli(tmp_path, monkeypatch):
     monkeypatch.setattr("parsing_core.serving.api.routes_topics.resolve_codex_path", missing)
     response = c.post(f"/api/workbench/topics/{topic['id']}/run-hybrid")
     assert response.status_code == 400
-    assert response.json()["detail"] == "codex cli not configured"
+    assert response.json()["detail"] == {"code": "codex_unavailable", "params": {}}
 
 
 def test_model_output_validation_failure_is_400_and_preserves_no_publication(tmp_path, monkeypatch):
