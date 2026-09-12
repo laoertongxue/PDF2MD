@@ -61,7 +61,12 @@ const SAFE_ERROR_MESSAGES: Record<SafeApiErrorCategory, string> = {
 };
 
 export class SafeApiError extends Error {
-  constructor(readonly category: SafeApiErrorCategory) {
+  constructor(
+    readonly category: SafeApiErrorCategory,
+    readonly code?: string,
+    readonly params?: Record<string, unknown>,
+    readonly status?: number,
+  ) {
     super(SAFE_ERROR_MESSAGES[category]);
     this.name = "SafeApiError";
   }
@@ -322,7 +327,30 @@ async function request<T>(
           502: "model_unavailable",
           507: "storage",
         };
-        throw new SafeApiError(statusCategories[res.status] ?? categories[res.status] ?? "service_unavailable");
+        let code: string | undefined;
+        let params: Record<string, unknown> | undefined;
+        try {
+          const body = (await res.json()) as { detail?: unknown };
+          const detail = body?.detail;
+          if (typeof detail === "string") {
+            code = /^[a-z][a-z0-9_]{2,64}$/.test(detail) ? detail : undefined;
+          } else if (detail && typeof detail === "object" && "code" in detail) {
+            const structured = detail as { code?: unknown; params?: unknown };
+            if (typeof structured.code === "string") code = structured.code;
+            if (structured.params && typeof structured.params === "object") {
+              params = structured.params as Record<string, unknown>;
+            }
+          }
+        } catch {
+          if (signal.aborted) throw signal.reason;
+          code = undefined;
+        }
+        throw new SafeApiError(
+          statusCategories[res.status] ?? categories[res.status] ?? "service_unavailable",
+          code,
+          params,
+          res.status,
+        );
       }
       if (res.status === 204) {
         if (allowNoContent) return undefined as T;

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Ban, CheckCircle2, Loader2, Play, RefreshCw, Sparkles, XCircle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import MermaidBlock from "../MermaidBlock";
+import { ocrErrorInfo } from "../../api/errorMessages";
 import {
   cancelSourceOcr,
   confirmSourceChapter,
@@ -13,6 +15,7 @@ import {
 import type { OcrChapter, OcrChapterTree, OcrNoteResult, OcrStatus, Source } from "../../api/workbenchTypes";
 
 export default function OcrWorkflowPanel({ source }: { source: Source }) {
+  const navigate = useNavigate();
   const [status, setStatus] = useState<OcrStatus | null>(null);
   const [tree, setTree] = useState<OcrChapterTree | null>(null);
   const [note, setNote] = useState<OcrNoteResult | null>(null);
@@ -125,9 +128,15 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
         )}
       </div>
       {status?.error && (
-        <p role="alert" className="mt-3 border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-700">
-          {status.error}
-        </p>
+        <div role="alert" className="mt-3 border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-700">
+          <p className="font-medium">{ocrErrorInfo(status.error)?.title ?? status.error}</p>
+          {ocrErrorInfo(status.error) && <p className="mt-1">{ocrErrorInfo(status.error)?.description}</p>}
+          {ocrErrorInfo(status.error)?.action !== undefined && ocrErrorInfo(status.error)?.action !== "none" && (
+            <button type="button" className="mt-2 underline" onClick={() => navigate("/workbench/settings")}>
+              去精读设置
+            </button>
+          )}
+        </div>
       )}
       {error && (
         <p role="alert" className="mt-3 border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-700">

@@ -217,4 +217,35 @@ describe("workbench environment and settings API contracts", () => {
     expect(url).toBe(`${API_CONFIG.apiBase}/api/workbench/settings/baidu`);
     expect(init.method).toBe("DELETE");
   });
+
+  it("parses structured detail into a coded SafeApiError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ detail: { code: "deepseek_key_missing", params: {} } }), { status: 400 }),
+        ),
+    );
+    const api = await import("./workbench");
+
+    await expect(api.getWorkbenchSettings()).rejects.toMatchObject({
+      code: "deepseek_key_missing",
+      status: 400,
+    });
+  });
+});
+
+describe("workbench api error messages", () => {
+  afterEach(() => {
+    vi.doUnmock("@tauri-apps/api/core");
+    vi.unstubAllGlobals();
+  });
+
+  it("maps coded errors to an action", async () => {
+    const [{ SafeApiError }, { apiErrorInfo }] = await Promise.all([import("./workbench"), import("./errorMessages")]);
+    const info = apiErrorInfo(new SafeApiError("invalid_request", "codex_unavailable"));
+    expect(info?.action).toBe("pick_codex");
+    expect(info?.title).toContain("Codex");
+  });
 });
