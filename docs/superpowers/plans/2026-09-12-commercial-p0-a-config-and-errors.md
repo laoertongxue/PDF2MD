@@ -47,7 +47,7 @@
 - 创建：`src/parsing_core/workbench/environment.py`
 - 测试：`tests/test_workbench/test_environment.py`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 创建 `tests/test_workbench/test_environment.py`：
 
@@ -155,13 +155,13 @@ def test_build_environment_report_shape(monkeypatch, tmp_path):
     assert report["data_dir"]["writable"] is True
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_environment.py -q`
 
 预期：FAIL，`ModuleNotFoundError: No module named 'parsing_core.workbench.environment'`
 
-- [ ] **步骤 3：编写最少实现代码**
+- [x] **步骤 3：编写最少实现代码**
 
 创建 `src/parsing_core/workbench/environment.py`：
 
@@ -318,17 +318,17 @@ def build_environment_report(
     }
 ```
 
-- [ ] **步骤 4：运行测试验证通过**
+- [x] **步骤 4：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_environment.py -q`
 预期：PASS（7 个用例）
 
-- [ ] **步骤 5：Lint 与类型检查**
+- [x] **步骤 5：Lint 与类型检查**
 
 运行：`.venv/bin/ruff check src/parsing_core/workbench/environment.py tests/test_workbench/test_environment.py && .venv/bin/mypy src/parsing_core`
 预期：无错误
 
-- [ ] **步骤 6：Commit**
+- [x] **步骤 6：Commit**
 
 ```bash
 git add src/parsing_core/workbench/environment.py tests/test_workbench/test_environment.py
@@ -344,7 +344,7 @@ git commit -m "feat(workbench): add provider environment probe module"
 - 修改：`src/parsing_core/serving/api/routes_workbench.py`（追加在 `/settings/deepseek/test` 路由之后）
 - 测试：`tests/test_workbench/test_api.py`（文件末尾追加）
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 在 `tests/test_workbench/test_api.py` 末尾追加（沿用文件内已有的 `client(tmp_path)`、`AUTH_HEADERS`、`course_root` helper）：
 
@@ -422,13 +422,13 @@ def test_baidu_settings_store_and_clear(tmp_path, monkeypatch):
 
 说明：若文件内 helper 名称与上述不同，按文件现状调整（不得新增重复 helper）。
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_api.py -q -k "environment_reports or codex_settings_rejects or baidu_settings_store"`
 
 预期：FAIL（404 / AttributeError）
 
-- [ ] **步骤 3：新增响应模型**
+- [x] **步骤 3：新增响应模型**
 
 在 `src/parsing_core/serving/models/api.py` 的 `BaiduSettingsRequest` 类之后追加：
 
@@ -465,7 +465,7 @@ class EnvironmentReport(BaseModel):
     vision: EnvironmentStatusItem
 ```
 
-- [ ] **步骤 4：新增路由**
+- [x] **步骤 4：新增路由**
 
 在 `src/parsing_core/serving/api/routes_workbench.py` 顶部 import 区补充：
 
@@ -582,7 +582,7 @@ async def clear_baidu_settings(sch: SchedulerDep) -> WorkbenchSettingsResponse:
 - `_read_masked_baidu_key()` 旧函数删除，统一用 `environment_module.masked_baidu_key()`。
 - `EnvironmentReport`、`CodexSettingsRequest`、`BaiduSettingsRequest` 需要加入现有 models import 列表。
 
-- [ ] **步骤 5：运行测试验证通过**
+- [x] **步骤 5：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_api.py -q -k "environment_reports or codex_settings_rejects or baidu_settings_store"`
 预期：PASS
@@ -590,7 +590,7 @@ async def clear_baidu_settings(sch: SchedulerDep) -> WorkbenchSettingsResponse:
 再跑全文件：`.venv/bin/python -m pytest tests/test_workbench/test_api.py -q`
 预期：全部 PASS（若既有 settings 测试断言旧响应形状，同步更新为四字段）
 
-- [ ] **步骤 6：Commit**
+- [x] **步骤 6：Commit**
 
 ```bash
 git add src/parsing_core/serving/models/api.py src/parsing_core/serving/api/routes_workbench.py tests/test_workbench/test_api.py
