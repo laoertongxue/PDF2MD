@@ -1165,7 +1165,7 @@ git commit -m "feat(web): map structured api errors to actionable messages"
 - 修改：`parsing-core-app/src/components/workbench/Settings.tsx`
 - 创建：`parsing-core-app/src/components/workbench/Settings.test.tsx`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 创建 `parsing-core-app/src/components/workbench/Settings.test.tsx`：
 
@@ -1218,12 +1218,12 @@ it("saves the baidu key", async () => {
 });
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`cd parsing-core-app && npx vitest run src/components/workbench/Settings.test.tsx`
 预期：FAIL（找不到 "Codex CLI"）
 
-- [ ] **步骤 3：实现设置区块**
+- [x] **步骤 3：实现设置区块**
 
 在 `Settings.tsx` 中：
 - 加载时并行调用 `fetchSettings()` 与 `fetchEnvironment()`；新增 state：`codexPath`、`baiduKey`、`environment`。
@@ -1275,12 +1275,12 @@ it("saves the baidu key", async () => {
 
 样式类沿用文件内既有 `className` 模式，不引入新样式系统。
 
-- [ ] **步骤 4：运行测试与既有设置测试**
+- [x] **步骤 4：运行测试与既有设置测试**
 
 运行：`cd parsing-core-app && npx vitest run src/components/workbench/Settings.test.tsx src/components/workbench/ChapterWorkbench.test.tsx`
 预期：PASS
 
-- [ ] **步骤 5：Tauri 能力检查**
+- [x] **步骤 5：Tauri 能力检查**
 
 确认 `parsing-core-app/src-tauri/capabilities/main.json` 的 `permissions` 包含 `dialog:allow-open`；若缺失则加入（保持 JSON 排序）：
 
@@ -1294,7 +1294,7 @@ it("saves the baidu key", async () => {
 
 若测试或构建提示 dialog 权限未注册，运行 `cd parsing-core-app/src-tauri && cargo test --locked` 复核。
 
-- [ ] **步骤 6：Commit**
+- [x] **步骤 6：Commit**
 
 ```bash
 git add parsing-core-app/src/components/workbench/Settings.tsx parsing-core-app/src/components/workbench/Settings.test.tsx parsing-core-app/src-tauri/capabilities/main.json
