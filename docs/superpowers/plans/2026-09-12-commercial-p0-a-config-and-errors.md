@@ -881,7 +881,7 @@ git commit -m "feat(web): add environment and provider settings api"
 - 修改：`src/parsing_core/serving/api/routes_workbench.py`、`routes_topics.py`
 - 测试：`tests/test_workbench/test_api.py`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 追加：
 
@@ -921,12 +921,12 @@ def test_missing_codex_maps_to_stable_error_code(tmp_path, monkeypatch):
 
 说明：`confirmed_chapter`、`_registered_pdf_source` 若文件名不同，使用文件内既有等价 helper；DeepSeek 走 HTTP detail，OCR 走状态载荷 `error`。
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_api.py -q -k "actionable_code or stable_error_code"`
 预期：FAIL（DeepSeek detail 为字符串；Codex 未映射为稳定码）
 
-- [ ] **步骤 3：实现错误 helper 与替换 raise 点**
+- [x] **步骤 3：实现错误 helper 与替换 raise 点**
 
 创建 `src/parsing_core/serving/api/errors.py`：
 
@@ -947,12 +947,12 @@ def api_error(status_code: int, code: str, **params: Any) -> HTTPException:
 - 若 `run-hybrid` 中还有字符串形态的 DeepSeek 缺失分支，一并改为 `api_error(400, "deepseek_key_missing")`
 - OCR 的 provider 稳定码在任务 3 已实现（`codex_unavailable` / `baidu_key_missing` / `ocr_provider_unavailable` 回落），本任务只验证
 
-- [ ] **步骤 4：运行测试验证通过**
+- [x] **步骤 4：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_api.py tests/test_workbench/test_topic_api.py -q | tail -3`
 预期：PASS。若有旧断言匹配字符串 detail，同步更新为结构化断言。
 
-- [ ] **步骤 5：Commit**
+- [x] **步骤 5：Commit**
 
 ```bash
 git add src/parsing_core/serving/api/errors.py src/parsing_core/serving/api/routes_workbench.py src/parsing_core/serving/api/routes_topics.py tests/test_workbench/test_api.py
