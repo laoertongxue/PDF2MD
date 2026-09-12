@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import ValidationError
 
 from parsing_core.serving.api.deps import SchedulerDep
+from parsing_core.serving.api.errors import api_error
 from parsing_core.serving.models.topics import (
     TopicCardResponse,
     TopicCreateRequest,
@@ -197,9 +198,9 @@ def _deepseek_executor(sch: SchedulerDep) -> DeepSeekExecutor:
     try:
         api_key = read_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).strip()
     except KeychainError as exc:
-        raise HTTPException(400, "deepseek api key not configured") from exc
+        raise api_error(400, "deepseek_key_missing") from exc
     if not api_key:
-        raise HTTPException(400, "deepseek api key not configured")
+        raise api_error(400, "deepseek_key_missing")
     settings = load_settings(_settings_root(sch))
     return DeepSeekExecutor(DeepSeekClient(api_key, settings.deepseek_model))
 
@@ -213,9 +214,13 @@ def _hybrid_executor(sch: SchedulerDep, topic_id: str) -> IntensiveReadingExecut
     if course is None:
         raise _not_found("course not found")
     try:
-        codex_path = resolve_codex_path()
+        settings = load_settings(_settings_root(sch))
+        if settings.codex_cli_path is None:
+            codex_path = resolve_codex_path()
+        else:
+            codex_path = resolve_codex_path(settings.codex_cli_path)
     except CodexCliError as exc:
-        raise HTTPException(400, "codex cli not configured") from exc
+        raise HTTPException(400, {"code": "codex_unavailable", "params": {}}) from exc
     run_dir = Path(course.root_dir) / ".pdf2md" / "topic-runs" / topic.id
     factory = cast(_HybridExecutorFactory, HybridIntensiveReadingExecutor)
     return factory(_deepseek_executor(sch), CodexCliExecutor(codex_path, run_dir))

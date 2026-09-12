@@ -4,6 +4,7 @@ import { BookOpen, FolderOpen, Loader2, PlusCircle } from "lucide-react";
 import { useWorkbenchStore } from "../../store/useWorkbenchStore";
 import { isTauriRuntime } from "../../api/runtime";
 import type { WorkbenchOutletContext } from "../Layout";
+import EnvironmentCard from "./EnvironmentCard";
 
 export default function CourseList() {
   const { courses, createCourse, selectCourse, selectedCourseId } = useWorkbenchStore();
@@ -49,6 +50,8 @@ export default function CourseList() {
 
   return (
     <div className="space-y-6 animate-in max-w-2xl">
+      <EnvironmentCard />
+
       <div>
         <h1 className="text-xl font-semibold text-zinc-900">课程精读</h1>
         <p className="text-sm text-zinc-500 mt-0.5">管理课程工作台入口</p>

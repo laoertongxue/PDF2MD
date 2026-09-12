@@ -6226,6 +6226,9 @@ def _atomic_bytes(path: Path, encoded: bytes) -> None:
 
 def _safe_error(exc: Exception) -> str:
     if isinstance(exc, WorkflowBlockedError):
+        message = str(exc)
+        if re.fullmatch(r"[a-z][a-z0-9_]+", message):
+            return message
         return "ocr_provider_unavailable"
     if isinstance(exc, TimeoutError):
         return "ocr_timeout"

@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +29,9 @@ from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
 from parsing_core.workbench import pipeline as workbench_pipeline
+from parsing_core.workbench.codex_cli import CodexCliError
 from parsing_core.workbench.keychain import KeychainError
+from parsing_core.workbench.ocr import workflow as workflow_module
 from parsing_core.workbench.ocr.chapters import detect_chapter_tree
 from parsing_core.workbench.ocr.workflow import OcrWorkflow, build_confirmation
 from parsing_core.workbench.repository import WorkbenchRepository
@@ -160,7 +163,9 @@ def test_ocr_chapter_route_uses_workflow_validated_snapshot(tmp_path, monkeypatc
         state_root=state_root,
         orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
     )
-    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench, "_ocr_workflow", lambda _source, _course, _settings: workflow
+    )
     monkeypatch.setattr(
         routes_workbench,
         "_ocr_final_pages",
@@ -185,7 +190,9 @@ def test_ocr_chapter_route_returns_conflict_without_completed_evidence(tmp_path,
         state_root=root / ".pdf2md" / "empty-ocr",
         orchestrator_factory=lambda _cancel: pytest.fail("missing work must not run"),
     )
-    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench, "_ocr_workflow", lambda _source, _course, _settings: workflow
+    )
 
     response = c.post(f"/api/workbench/sources/{source['id']}/ocr/chapters")
 
@@ -244,7 +251,9 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
         workflow, "completed_chapter_context", completed_chapter_context, raising=False
     )
     monkeypatch.setattr(workflow, "generate_and_publish", generate_and_publish, raising=False)
-    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench, "_ocr_workflow", lambda _source, _course, _settings: workflow
+    )
     monkeypatch.setattr(
         routes_workbench,
         "_ocr_final_pages",
@@ -304,7 +313,7 @@ def test_concurrent_generate_routes_remain_publishable_across_workflow_instances
     second_entered = threading.Event()
     release_second = threading.Event()
 
-    def select_workflow(_source, _course):
+    def select_workflow(_source, _course, _settings):
         nonlocal workflow_index
         with selection_lock:
             selected = workflows[workflow_index]
@@ -506,7 +515,9 @@ def test_ocr_generate_route_rejects_chapter_tree_outside_current_ocr_snapshot(
         build_calls += 1
         raise ValueError("untrusted tree reached note builder")
 
-    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench, "_ocr_workflow", lambda _source, _course, _settings: workflow
+    )
     monkeypatch.setattr(
         routes_workbench,
         "build_intensive_reading_note",
@@ -1114,7 +1125,7 @@ async def test_ocr_management_routes_do_not_block_health(
         def cancel(self):
             return None
 
-    def blocking_workflow(_source, _course):
+    def blocking_workflow(_source, _course, _settings):
         _block_until_released(started, release)
         return FakeWorkflow()
 
@@ -1152,7 +1163,7 @@ async def test_ocr_chapter_confirmation_does_not_block_health(tmp_path, monkeypa
     monkeypatch.setattr(
         routes_workbench,
         "_ocr_workflow",
-        lambda _source, _course: BlockingWorkflow(),
+        lambda _source, _course, _settings: BlockingWorkflow(),
     )
     transport = ASGITransport(app=test_client.app)
     async with AsyncClient(
@@ -1470,6 +1481,7 @@ async def test_settings_file_and_keychain_operations_do_not_block_health(
     tmp_path, monkeypatch, operation
 ):
     test_client = client(tmp_path)
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
     started = threading.Event()
     release = threading.Event()
     if operation == "get":
@@ -1493,6 +1505,7 @@ async def test_settings_file_and_keychain_operations_do_not_block_health(
 
         monkeypatch.setattr(routes_workbench, "save_settings", blocking_operation)
         monkeypatch.setattr(routes_workbench, "save_secret", lambda *_args: None)
+        monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "")
         request_method = "post"
         request_path = "/api/workbench/settings/deepseek"
         request_json = {"api_key": "sk-test", "model": "deepseek-v4-pro"}
@@ -3005,7 +3018,7 @@ def test_run_hybrid_requires_deepseek_settings(tmp_path, monkeypatch):
     res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
 
     assert res.status_code == 400
-    assert res.json()["detail"] == "deepseek api key not configured"
+    assert res.json()["detail"] == {"code": "deepseek_key_missing", "params": {}}
     assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
     repo = WorkbenchRepository(init_db(str(tmp_path / "serve.db")))
     assert repo.get_chapter_generation_lease(chapter["id"]) is None
@@ -3039,6 +3052,7 @@ def test_save_deepseek_settings_allows_model_only_update_with_existing_key(tmp_p
     settings_path = tmp_path / "fs" / "workbench-settings.json"
 
     monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-existing-key")
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
 
     def fake_save_secret(service, account, api_key):
         save_calls["count"] += 1
@@ -3080,7 +3094,7 @@ def test_run_hybrid_rejects_blank_deepseek_key_without_running_pipeline(tmp_path
     res = c.post(f"/api/workbench/chapters/{chapter['id']}/run-hybrid")
 
     assert res.status_code == 400
-    assert res.json()["detail"] == "deepseek api key not configured"
+    assert res.json()["detail"] == {"code": "deepseek_key_missing", "params": {}}
     assert calls["run_all"] == 0
     assert c.get(f"/api/workbench/chapters/{chapter['id']}").json()["status"] == "FAILED"
 
@@ -3504,6 +3518,7 @@ def test_workbench_settings_save_and_get(tmp_path, monkeypatch):
 
     monkeypatch.setattr(routes_workbench, "save_secret", fake_save_secret)
     monkeypatch.setattr(routes_workbench, "read_secret", fake_read_secret)
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
 
     post_res = c.post(
         "/api/workbench/settings/deepseek",
@@ -3546,6 +3561,7 @@ def test_workbench_settings_get_without_key_returns_none(tmp_path, monkeypatch):
         raise KeychainError("missing")
 
     monkeypatch.setattr(routes_workbench, "read_secret", fake_read_secret)
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
 
     res = c.get("/api/workbench/settings")
 
@@ -3631,4 +3647,208 @@ def test_workbench_settings_test_connection_requires_key(tmp_path, monkeypatch):
     res = c.post("/api/workbench/settings/deepseek/test")
 
     assert res.status_code == 400
-    assert res.json()["detail"] == "deepseek api key not configured"
+    assert res.json()["detail"] == {"code": "deepseek_key_missing", "params": {}}
+
+
+def test_environment_reports_codex_and_baidu_states(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    monkeypatch.setattr(
+        routes_workbench.environment_module,
+        "read_secret",
+        lambda *_args: "deepseek-key-1234",
+    )
+    response = test_client.get("/api/workbench/environment", headers=AUTH_HEADERS)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["deepseek"]["state"] == "ready"
+    assert payload["baidu"]["state"] in {"optional", "ready"}
+    assert payload["codex"]["state"] in {"ready", "missing", "invalid"}
+
+
+def test_codex_settings_rejects_invalid_path_and_accepts_valid_file(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "")
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
+    real = tmp_path / "codex"
+    real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real.chmod(0o755)
+    missing = tmp_path / "missing-codex"
+
+    def fake_resolve(path=None):
+        if path is not None and not Path(path).is_file():
+            raise CodexCliError("codex cli not found")
+        return str(path or "codex")
+
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", fake_resolve)
+    rejected = test_client.post(
+        "/api/workbench/settings/codex",
+        json={"path": str(missing)},
+        headers=AUTH_HEADERS,
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"]["code"] == "codex_invalid"
+    saved = test_client.post(
+        "/api/workbench/settings/codex",
+        json={"path": str(real)},
+        headers=AUTH_HEADERS,
+    )
+    assert saved.status_code == 200
+    assert saved.json()["codex_cli_path"] == str(real)
+    cleared = test_client.delete("/api/workbench/settings/codex", headers=AUTH_HEADERS)
+    assert cleared.status_code == 200
+    assert cleared.json()["codex_cli_path"] is None
+
+
+def test_baidu_settings_store_and_clear(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    monkeypatch.delenv("PDF2MD_BAIDU_API_KEY", raising=False)
+    stored: dict[str, str] = {}
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "")
+    monkeypatch.setattr(
+        routes_workbench,
+        "save_secret",
+        lambda service, account, secret: stored.setdefault("value", secret),
+    )
+    monkeypatch.setattr(
+        routes_workbench.environment_module,
+        "read_secret",
+        lambda *_args: stored.get("value", ""),
+    )
+    monkeypatch.setattr(routes_workbench, "delete_secret", lambda *_args: stored.clear())
+    saved = test_client.post(
+        "/api/workbench/settings/baidu",
+        json={"api_key": "baidu-key-1234"},
+        headers=AUTH_HEADERS,
+    )
+    assert saved.status_code == 200
+    assert saved.json()["baidu_key_masked"] == "bai****1234"
+    cleared = test_client.delete("/api/workbench/settings/baidu", headers=AUTH_HEADERS)
+    assert cleared.status_code == 200
+    assert cleared.json()["baidu_key_masked"] is None
+
+
+def _poll_ocr_status(
+    test_client: TestClient,
+    source_id: str,
+    until: Callable[[dict], bool],
+    *,
+    timeout: float = 5.0,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    payload: dict = {}
+    while time.monotonic() < deadline:
+        payload = test_client.get(
+            f"/api/workbench/sources/{source_id}/ocr/status",
+            headers=AUTH_HEADERS,
+        ).json()
+        if until(payload):
+            return payload
+        time.sleep(0.05)
+    return payload
+
+
+def test_ocr_uses_configured_codex_path_from_settings(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf = root / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    _course, source = _registered_pdf_source(test_client, root, pdf)
+    real = tmp_path / "codex"
+    real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real.chmod(0o755)
+    monkeypatch.setattr(
+        routes_workbench,
+        "resolve_codex_path",
+        lambda path=None: str(path or "codex"),
+    )
+    saved = test_client.post(
+        "/api/workbench/settings/codex",
+        json={"path": str(real)},
+        headers=AUTH_HEADERS,
+    )
+    assert saved.status_code == 200
+    observed: list[str | None] = []
+    monkeypatch.setattr(
+        routes_workbench,
+        "resolve_codex_path",
+        lambda path=None: observed.append(path) or str(real),
+    )
+    monkeypatch.setattr(routes_workbench, "_find_vision_helper", lambda: tmp_path / "vision")
+    monkeypatch.setattr(workflow_module, "count_pdf_pages", lambda _source: 1)
+    response = test_client.post(
+        f"/api/workbench/sources/{source['id']}/ocr",
+        json={},
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 200
+    _poll_ocr_status(
+        test_client,
+        source["id"],
+        lambda payload: bool(observed) or payload.get("status") in {"blocked", "failed"},
+    )
+    assert observed == [str(real)]
+
+
+def test_ocr_without_provider_reports_structured_error(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf = root / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    _course, source = _registered_pdf_source(test_client, root, pdf)
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
+    monkeypatch.delenv("PDF2MD_BAIDU_API_KEY", raising=False)
+    monkeypatch.setattr(routes_workbench, "_find_vision_helper", lambda: tmp_path / "vision")
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda path=None: "codex")
+    monkeypatch.setattr(workflow_module, "count_pdf_pages", lambda _source: 1)
+    response = test_client.post(
+        f"/api/workbench/sources/{source['id']}/ocr",
+        json={},
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 200
+    payload = _poll_ocr_status(
+        test_client,
+        source["id"],
+        lambda status: bool(status.get("error")),
+    )
+    assert payload["error"] == "baidu_key_missing"
+
+
+def test_missing_deepseek_key_returns_actionable_code(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    _course, _source, chapter = confirmed_chapter(test_client, root)
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "")
+    response = test_client.post(
+        f"/api/workbench/chapters/{chapter['id']}/run-hybrid",
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == {"code": "deepseek_key_missing", "params": {}}
+
+
+def test_missing_codex_maps_to_stable_error_code(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf = root / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    _course, source = _registered_pdf_source(test_client, root, pdf)
+
+    def missing(_path=None):
+        raise CodexCliError("codex cli not found")
+
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", missing)
+    monkeypatch.setattr(routes_workbench, "_find_vision_helper", lambda: tmp_path / "vision")
+    monkeypatch.setattr(workflow_module, "count_pdf_pages", lambda _source: 1)
+    response = test_client.post(
+        f"/api/workbench/sources/{source['id']}/ocr",
+        json={},
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 200
+    payload = _poll_ocr_status(
+        test_client,
+        source["id"],
+        lambda status: bool(status.get("error")),
+    )
+    assert payload["error"] == "codex_unavailable"
