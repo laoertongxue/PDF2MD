@@ -69,6 +69,7 @@ def test_codex_state_reports_layout_unsupported(monkeypatch, tmp_path):
 
 def test_codex_state_detects_common_directories(monkeypatch, tmp_path):
     tool = _fake_codex(tmp_path)
+    monkeypatch.delenv("CODEX_CLI_PATH", raising=False)
     monkeypatch.setattr(environment_module, "CODEX_DETECTION_DIRECTORIES", (str(tmp_path),))
     monkeypatch.setattr(codex_cli, "resolve_codex_path", lambda path=None: str(path or "codex"))
     state = environment_module.codex_state(WorkbenchSettings())
