@@ -757,7 +757,7 @@ git commit -m "feat(api): wire codex path and keychain baidu key into runners"
 - 修改：`parsing-core-app/src/api/workbench.ts`
 - 测试：`parsing-core-app/src/api/workbench.test.ts`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 在 `parsing-core-app/src/api/workbench.test.ts` 追加（沿用文件内 mock `apiFetch` 的既有方式）：
 
@@ -797,12 +797,12 @@ it("saveCodexPath posts the selected path", async () => {
 
 若文件没有 `apiFetchMock`，按文件现有 mock 变量名替换。
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`cd parsing-core-app && npx vitest run src/api/workbench.test.ts`
 预期：FAIL（`fetchEnvironment is not defined`）
 
-- [ ] **步骤 3：类型与实现**
+- [x] **步骤 3：类型与实现**
 
 `workbenchTypes.ts` 修改 `WorkbenchSettings`：
 
@@ -860,12 +860,12 @@ export async function clearBaiduKey(): Promise<WorkbenchSettings> {
 
 注意：`request` 为非导出函数，新 API 必须写在 `workbench.ts` 内；`WorkbenchSettings`、`EnvironmentReport` 加入类型 import。
 
-- [ ] **步骤 4：运行测试验证通过**
+- [x] **步骤 4：运行测试验证通过**
 
 运行：`cd parsing-core-app && npx vitest run src/api/workbench.test.ts`
 预期：PASS
 
-- [ ] **步骤 5：Commit**
+- [x] **步骤 5：Commit**
 
 ```bash
 git add parsing-core-app/src/api/workbenchTypes.ts parsing-core-app/src/api/workbench.ts parsing-core-app/src/api/workbench.test.ts
