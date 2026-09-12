@@ -3040,6 +3040,7 @@ def test_save_deepseek_settings_allows_model_only_update_with_existing_key(tmp_p
     settings_path = tmp_path / "fs" / "workbench-settings.json"
 
     monkeypatch.setattr(routes_workbench, "read_secret", lambda service, account: "sk-existing-key")
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
 
     def fake_save_secret(service, account, api_key):
         save_calls["count"] += 1
@@ -3505,6 +3506,7 @@ def test_workbench_settings_save_and_get(tmp_path, monkeypatch):
 
     monkeypatch.setattr(routes_workbench, "save_secret", fake_save_secret)
     monkeypatch.setattr(routes_workbench, "read_secret", fake_read_secret)
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
 
     post_res = c.post(
         "/api/workbench/settings/deepseek",
@@ -3547,6 +3549,7 @@ def test_workbench_settings_get_without_key_returns_none(tmp_path, monkeypatch):
         raise KeychainError("missing")
 
     monkeypatch.setattr(routes_workbench, "read_secret", fake_read_secret)
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
 
     res = c.get("/api/workbench/settings")
 
