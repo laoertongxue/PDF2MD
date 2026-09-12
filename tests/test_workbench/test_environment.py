@@ -50,9 +50,26 @@ def test_codex_state_reports_symlink(monkeypatch, tmp_path):
     real = _fake_codex(tmp_path)
     link = tmp_path / "codex-link"
     link.symlink_to(real)
+
+    def reject(_path=None):
+        raise codex_cli.CodexCliError("codex cli not found")
+
+    monkeypatch.setattr(codex_cli, "resolve_codex_path", reject)
     state = environment_module.codex_state(WorkbenchSettings(codex_cli_path=str(link)))
     assert state["state"] == "invalid"
     assert state["detail_code"] == "codex_is_symlink"
+
+
+def test_codex_state_accepts_symlink_when_resolver_accepts(monkeypatch, tmp_path):
+    real = _fake_codex(tmp_path)
+    link = tmp_path / "codex-link"
+    link.symlink_to(real)
+    monkeypatch.setattr(codex_cli, "resolve_codex_path", lambda path=None: str(path or "codex"))
+    state = environment_module.codex_state(WorkbenchSettings(codex_cli_path=str(link)))
+    assert state["state"] == "ready"
+    assert state["path"] == str(link)
+    assert state["source"] == "settings"
+    assert state["detail_code"] is None
 
 
 def test_codex_state_reports_layout_unsupported(monkeypatch, tmp_path):

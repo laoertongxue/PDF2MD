@@ -60,6 +60,13 @@ def _codex_candidates(configured: str | None) -> list[tuple[str, str]]:
 def _codex_candidate_state(source: str, candidate: str) -> dict[str, Any]:
     path = Path(candidate).expanduser()
     try:
+        codex_cli.resolve_codex_path(candidate)
+    except codex_cli.CodexCliError:
+        pass
+    else:
+        return {"state": READY, "path": str(path), "source": source, "detail_code": None}
+
+    try:
         info = path.lstat()
     except OSError:
         return {
@@ -69,36 +76,19 @@ def _codex_candidate_state(source: str, candidate: str) -> dict[str, Any]:
             "detail_code": "codex_not_found",
         }
     if stat.S_ISLNK(info.st_mode):
-        return {
-            "state": INVALID,
-            "path": str(path),
-            "source": source,
-            "detail_code": "codex_is_symlink",
-        }
-    if not stat.S_ISREG(info.st_mode):
-        return {
-            "state": INVALID,
-            "path": str(path),
-            "source": source,
-            "detail_code": "codex_not_regular_file",
-        }
-    if not stat.S_IMODE(info.st_mode) & 0o111:
-        return {
-            "state": INVALID,
-            "path": str(path),
-            "source": source,
-            "detail_code": "codex_not_executable",
-        }
-    try:
-        codex_cli.resolve_codex_path(str(path))
-    except codex_cli.CodexCliError:
-        return {
-            "state": MISSING,
-            "path": str(path),
-            "source": source,
-            "detail_code": "codex_layout_unsupported",
-        }
-    return {"state": READY, "path": str(path), "source": source, "detail_code": None}
+        detail_code = "codex_is_symlink"
+    elif not stat.S_ISREG(info.st_mode):
+        detail_code = "codex_not_regular_file"
+    elif not stat.S_IMODE(info.st_mode) & 0o111:
+        detail_code = "codex_not_executable"
+    else:
+        detail_code = "codex_layout_unsupported"
+    return {
+        "state": MISSING if detail_code == "codex_layout_unsupported" else INVALID,
+        "path": str(path),
+        "source": source,
+        "detail_code": detail_code,
+    }
 
 
 def codex_state(settings: WorkbenchSettings) -> dict[str, Any]:

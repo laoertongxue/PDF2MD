@@ -1154,7 +1154,12 @@ async def save_codex_settings(
 @router.delete("/settings/codex", response_model=WorkbenchSettingsResponse)
 async def clear_codex_settings(sch: SchedulerDep) -> WorkbenchSettingsResponse:
     def clear() -> WorkbenchSettingsResponse:
-        settings = update_settings_fields(_settings_root(sch), codex_cli_path=None)
+        try:
+            settings = update_settings_fields(_settings_root(sch), codex_cli_path=None)
+        except SettingsError as exc:
+            raise HTTPException(
+                422, {"code": "settings_invalid", "params": {"reason": "codex_cli_path"}}
+            ) from exc
         return _settings_response(settings)
 
     return await run_in_threadpool(clear)
@@ -1181,7 +1186,10 @@ async def save_baidu_settings(
 @router.delete("/settings/baidu", response_model=WorkbenchSettingsResponse)
 async def clear_baidu_settings(sch: SchedulerDep) -> WorkbenchSettingsResponse:
     def clear() -> WorkbenchSettingsResponse:
-        delete_secret(BAIDU_KEYCHAIN_SERVICE, BAIDU_KEYCHAIN_ACCOUNT)
+        try:
+            delete_secret(BAIDU_KEYCHAIN_SERVICE, BAIDU_KEYCHAIN_ACCOUNT)
+        except KeychainError as exc:
+            raise HTTPException(500, {"code": "storage", "params": {}}) from exc
         return _settings_response(load_settings(_settings_root(sch)))
 
     return await run_in_threadpool(clear)

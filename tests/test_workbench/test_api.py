@@ -1471,6 +1471,7 @@ async def test_settings_file_and_keychain_operations_do_not_block_health(
     tmp_path, monkeypatch, operation
 ):
     test_client = client(tmp_path)
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
     started = threading.Event()
     release = threading.Event()
     if operation == "get":
@@ -1494,6 +1495,7 @@ async def test_settings_file_and_keychain_operations_do_not_block_health(
 
         monkeypatch.setattr(routes_workbench, "save_settings", blocking_operation)
         monkeypatch.setattr(routes_workbench, "save_secret", lambda *_args: None)
+        monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "")
         request_method = "post"
         request_path = "/api/workbench/settings/deepseek"
         request_json = {"api_key": "sk-test", "model": "deepseek-v4-pro"}
@@ -3653,23 +3655,24 @@ def test_environment_reports_codex_and_baidu_states(tmp_path, monkeypatch):
     assert payload["codex"]["state"] in {"ready", "missing", "invalid"}
 
 
-def test_codex_settings_rejects_symlink_and_accepts_valid_file(tmp_path, monkeypatch):
+def test_codex_settings_rejects_invalid_path_and_accepts_valid_file(tmp_path, monkeypatch):
     test_client = client(tmp_path)
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "")
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
     real = tmp_path / "codex"
     real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     real.chmod(0o755)
-    link = tmp_path / "codex-link"
-    link.symlink_to(real)
+    missing = tmp_path / "missing-codex"
 
     def fake_resolve(path=None):
-        if path is not None and Path(path).is_symlink():
+        if path is not None and not Path(path).is_file():
             raise CodexCliError("codex cli not found")
         return str(path or "codex")
 
     monkeypatch.setattr(routes_workbench, "resolve_codex_path", fake_resolve)
     rejected = test_client.post(
         "/api/workbench/settings/codex",
-        json={"path": str(link)},
+        json={"path": str(missing)},
         headers=AUTH_HEADERS,
     )
     assert rejected.status_code == 422
@@ -3690,6 +3693,7 @@ def test_baidu_settings_store_and_clear(tmp_path, monkeypatch):
     test_client = client(tmp_path)
     monkeypatch.delenv("PDF2MD_BAIDU_API_KEY", raising=False)
     stored: dict[str, str] = {}
+    monkeypatch.setattr(routes_workbench, "read_secret", lambda *_args: "")
     monkeypatch.setattr(
         routes_workbench,
         "save_secret",
