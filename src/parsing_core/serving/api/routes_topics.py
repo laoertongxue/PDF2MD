@@ -213,9 +213,13 @@ def _hybrid_executor(sch: SchedulerDep, topic_id: str) -> IntensiveReadingExecut
     if course is None:
         raise _not_found("course not found")
     try:
-        codex_path = resolve_codex_path()
+        settings = load_settings(_settings_root(sch))
+        if settings.codex_cli_path is None:
+            codex_path = resolve_codex_path()
+        else:
+            codex_path = resolve_codex_path(settings.codex_cli_path)
     except CodexCliError as exc:
-        raise HTTPException(400, "codex cli not configured") from exc
+        raise HTTPException(400, {"code": "codex_unavailable", "params": {}}) from exc
     run_dir = Path(course.root_dir) / ".pdf2md" / "topic-runs" / topic.id
     factory = cast(_HybridExecutorFactory, HybridIntensiveReadingExecutor)
     return factory(_deepseek_executor(sch), CodexCliExecutor(codex_path, run_dir))

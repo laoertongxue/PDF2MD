@@ -52,6 +52,7 @@ from parsing_core.workbench.environment import (
     BAIDU_KEYCHAIN_ACCOUNT,
     BAIDU_KEYCHAIN_SERVICE,
     build_environment_report,
+    resolve_baidu_api_key,
 )
 from parsing_core.workbench.executors import (
     IntensiveReadingExecutor,
@@ -86,7 +87,7 @@ from parsing_core.workbench.ocr.orchestrator import (
     OcrOrchestrator,
 )
 from parsing_core.workbench.ocr.vision import RegisteredPdfSources, VisionClient
-from parsing_core.workbench.ocr.workflow import OcrWorkflow
+from parsing_core.workbench.ocr.workflow import OcrWorkflow, WorkflowBlockedError
 from parsing_core.workbench.pipeline import (
     FIXED_CHAPTER_KINDS,
     IntensiveReadingPipeline,
@@ -332,7 +333,9 @@ def _load_ocr_image(
     return OcrOrchestrator._load_image(path, deadline=deadline, cancel_event=cancel_event)
 
 
-def _ocr_workflow(source: Source, course: Course) -> OcrWorkflow:
+def _ocr_workflow(
+    source: Source, course: Course, settings: WorkbenchSettings | None = None
+) -> OcrWorkflow:
     with _OCR_WORKFLOWS_LOCK:
         existing = _OCR_WORKFLOWS.get(source.id)
         if existing is not None:
@@ -346,10 +349,13 @@ def _ocr_workflow(source: Source, course: Course) -> OcrWorkflow:
             cancel_signal = CancellationSignal(is_cancelled)
             try:
                 helper = _find_vision_helper()
-                codex_path = resolve_codex_path()
-                baidu_key = os.environ.get("PDF2MD_BAIDU_API_KEY", "").strip()
+                if settings is None:
+                    codex_path = resolve_codex_path()
+                else:
+                    codex_path = resolve_codex_path(settings.codex_cli_path)
+                baidu_key = resolve_baidu_api_key()
                 if not baidu_key:
-                    raise RuntimeError("百度 OCR 未配置，任务已阻断")
+                    raise WorkflowBlockedError("baidu_key_missing")
                 validator = RegisteredPdfSources([pdf_path])
                 vision = VisionClient(
                     helper_path=helper,
@@ -366,12 +372,14 @@ def _ocr_workflow(source: Source, course: Course) -> OcrWorkflow:
                     cancel_event=cancel_signal,
                 )
                 baidu = BaiduOcrClient(api_key=baidu_key)
+            except WorkflowBlockedError:
+                raise
             except Exception as exc:
                 if cancel_signal.is_set():
                     raise RuntimeError("OCR cancelled") from None
-                from parsing_core.workbench.ocr.workflow import WorkflowBlockedError
-
-                raise WorkflowBlockedError(str(exc)) from exc
+                if isinstance(exc, CodexCliError):
+                    raise WorkflowBlockedError("codex_unavailable") from exc
+                raise WorkflowBlockedError("ocr_provider_unavailable") from exc
             return OcrOrchestrator(
                 vision=_DeadlineAdapter(vision),
                 codex=_DeadlineAdapter(codex),
@@ -618,7 +626,8 @@ async def start_source_ocr(source_id: str, sch: SchedulerDep) -> dict[str, objec
         course = repo.get_course(source.course_id)
         if course is None:
             raise HTTPException(404, "course not found")
-        workflow = _ocr_workflow(source, course)
+        settings = load_settings(_settings_root(sch))
+        workflow = _ocr_workflow(source, course, settings)
         try:
             workflow.start()
         except ValueError as exc:
@@ -638,7 +647,8 @@ async def source_ocr_status(source_id: str, sch: SchedulerDep) -> dict[str, obje
         course = repo.get_course(source.course_id)
         if course is None:
             raise HTTPException(404, "course not found")
-        return _ocr_workflow(source, course).status()
+        settings = load_settings(_settings_root(sch))
+        return _ocr_workflow(source, course, settings).status()
 
     return await run_in_threadpool(ocr_status_transaction)
 
@@ -653,7 +663,8 @@ async def cancel_source_ocr(source_id: str, sch: SchedulerDep) -> dict[str, obje
         course = repo.get_course(source.course_id)
         if course is None:
             raise HTTPException(404, "course not found")
-        workflow = _ocr_workflow(source, course)
+        settings = load_settings(_settings_root(sch))
+        workflow = _ocr_workflow(source, course, settings)
         workflow.cancel()
         return workflow.status()
 
@@ -670,7 +681,8 @@ async def recognize_source_chapters(source_id: str, sch: SchedulerDep) -> dict[s
         course = repo.get_course(source.course_id)
         if course is None:
             raise HTTPException(404, "course not found")
-        workflow = _ocr_workflow(source, course)
+        settings = load_settings(_settings_root(sch))
+        workflow = _ocr_workflow(source, course, settings)
         try:
             return workflow.detect_chapters()
         except ValueError as exc:
@@ -691,7 +703,8 @@ async def confirm_source_chapter(
         course = repo.get_course(source.course_id)
         if course is None:
             raise HTTPException(404, "course not found")
-        return _ocr_workflow(source, course).confirm_chapter(req.chapter_id)
+        settings = load_settings(_settings_root(sch))
+        return _ocr_workflow(source, course, settings).confirm_chapter(req.chapter_id)
 
     try:
         return await run_in_threadpool(confirm_selected_chapter)
@@ -711,7 +724,8 @@ async def generate_source_note(
         course = repo.get_course(source.course_id)
         if course is None:
             raise HTTPException(404, "course not found")
-        workflow = _ocr_workflow(source, course)
+        settings = load_settings(_settings_root(sch))
+        workflow = _ocr_workflow(source, course, settings)
         final, pages, tree = workflow.completed_chapter_context()
         confirmation = load_chapter_confirmation(workflow.paths.confirmation)
         validate_chapter_confirmation(confirmation, tree)
@@ -724,7 +738,6 @@ async def generate_source_note(
             source_id=source.id,
         )
         api_key = _read_configured_deepseek_key()
-        settings = load_settings(_settings_root(sch))
         generator = DeepSeekIntensiveReadingGenerator(
             DeepSeekClient(api_key, settings.deepseek_model)
         )

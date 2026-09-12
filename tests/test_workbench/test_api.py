@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from parsing_core.storage.schema_ext import apply_serve_schema
 from parsing_core.workbench import pipeline as workbench_pipeline
 from parsing_core.workbench.codex_cli import CodexCliError
 from parsing_core.workbench.keychain import KeychainError
+from parsing_core.workbench.ocr import workflow as workflow_module
 from parsing_core.workbench.ocr.chapters import detect_chapter_tree
 from parsing_core.workbench.ocr.workflow import OcrWorkflow, build_confirmation
 from parsing_core.workbench.repository import WorkbenchRepository
@@ -161,7 +163,9 @@ def test_ocr_chapter_route_uses_workflow_validated_snapshot(tmp_path, monkeypatc
         state_root=state_root,
         orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
     )
-    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench, "_ocr_workflow", lambda _source, _course, _settings: workflow
+    )
     monkeypatch.setattr(
         routes_workbench,
         "_ocr_final_pages",
@@ -186,7 +190,9 @@ def test_ocr_chapter_route_returns_conflict_without_completed_evidence(tmp_path,
         state_root=root / ".pdf2md" / "empty-ocr",
         orchestrator_factory=lambda _cancel: pytest.fail("missing work must not run"),
     )
-    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench, "_ocr_workflow", lambda _source, _course, _settings: workflow
+    )
 
     response = c.post(f"/api/workbench/sources/{source['id']}/ocr/chapters")
 
@@ -245,7 +251,9 @@ def test_ocr_generate_route_uses_one_workflow_evidence_snapshot(tmp_path, monkey
         workflow, "completed_chapter_context", completed_chapter_context, raising=False
     )
     monkeypatch.setattr(workflow, "generate_and_publish", generate_and_publish, raising=False)
-    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench, "_ocr_workflow", lambda _source, _course, _settings: workflow
+    )
     monkeypatch.setattr(
         routes_workbench,
         "_ocr_final_pages",
@@ -305,7 +313,7 @@ def test_concurrent_generate_routes_remain_publishable_across_workflow_instances
     second_entered = threading.Event()
     release_second = threading.Event()
 
-    def select_workflow(_source, _course):
+    def select_workflow(_source, _course, _settings):
         nonlocal workflow_index
         with selection_lock:
             selected = workflows[workflow_index]
@@ -507,7 +515,9 @@ def test_ocr_generate_route_rejects_chapter_tree_outside_current_ocr_snapshot(
         build_calls += 1
         raise ValueError("untrusted tree reached note builder")
 
-    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda _source, _course: workflow)
+    monkeypatch.setattr(
+        routes_workbench, "_ocr_workflow", lambda _source, _course, _settings: workflow
+    )
     monkeypatch.setattr(
         routes_workbench,
         "build_intensive_reading_note",
@@ -1115,7 +1125,7 @@ async def test_ocr_management_routes_do_not_block_health(
         def cancel(self):
             return None
 
-    def blocking_workflow(_source, _course):
+    def blocking_workflow(_source, _course, _settings):
         _block_until_released(started, release)
         return FakeWorkflow()
 
@@ -1153,7 +1163,7 @@ async def test_ocr_chapter_confirmation_does_not_block_health(tmp_path, monkeypa
     monkeypatch.setattr(
         routes_workbench,
         "_ocr_workflow",
-        lambda _source, _course: BlockingWorkflow(),
+        lambda _source, _course, _settings: BlockingWorkflow(),
     )
     transport = ASGITransport(app=test_client.app)
     async with AsyncClient(
@@ -3715,3 +3725,90 @@ def test_baidu_settings_store_and_clear(tmp_path, monkeypatch):
     cleared = test_client.delete("/api/workbench/settings/baidu", headers=AUTH_HEADERS)
     assert cleared.status_code == 200
     assert cleared.json()["baidu_key_masked"] is None
+
+
+def _poll_ocr_status(
+    test_client: TestClient,
+    source_id: str,
+    until: Callable[[dict], bool],
+    *,
+    timeout: float = 5.0,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    payload: dict = {}
+    while time.monotonic() < deadline:
+        payload = test_client.get(
+            f"/api/workbench/sources/{source_id}/ocr/status",
+            headers=AUTH_HEADERS,
+        ).json()
+        if until(payload):
+            return payload
+        time.sleep(0.05)
+    return payload
+
+
+def test_ocr_uses_configured_codex_path_from_settings(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf = root / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    _course, source = _registered_pdf_source(test_client, root, pdf)
+    real = tmp_path / "codex"
+    real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real.chmod(0o755)
+    monkeypatch.setattr(
+        routes_workbench,
+        "resolve_codex_path",
+        lambda path=None: str(path or "codex"),
+    )
+    saved = test_client.post(
+        "/api/workbench/settings/codex",
+        json={"path": str(real)},
+        headers=AUTH_HEADERS,
+    )
+    assert saved.status_code == 200
+    observed: list[str | None] = []
+    monkeypatch.setattr(
+        routes_workbench,
+        "resolve_codex_path",
+        lambda path=None: observed.append(path) or str(real),
+    )
+    monkeypatch.setattr(routes_workbench, "_find_vision_helper", lambda: tmp_path / "vision")
+    monkeypatch.setattr(workflow_module, "count_pdf_pages", lambda _source: 1)
+    response = test_client.post(
+        f"/api/workbench/sources/{source['id']}/ocr",
+        json={},
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 200
+    _poll_ocr_status(
+        test_client,
+        source["id"],
+        lambda payload: bool(observed) or payload.get("status") in {"blocked", "failed"},
+    )
+    assert observed == [str(real)]
+
+
+def test_ocr_without_provider_reports_structured_error(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf = root / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    _course, source = _registered_pdf_source(test_client, root, pdf)
+    monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
+    monkeypatch.delenv("PDF2MD_BAIDU_API_KEY", raising=False)
+    monkeypatch.setattr(routes_workbench, "_find_vision_helper", lambda: tmp_path / "vision")
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda path=None: "codex")
+    monkeypatch.setattr(workflow_module, "count_pdf_pages", lambda _source: 1)
+    response = test_client.post(
+        f"/api/workbench/sources/{source['id']}/ocr",
+        json={},
+        headers=AUTH_HEADERS,
+    )
+    assert response.status_code == 200
+    payload = _poll_ocr_status(
+        test_client,
+        source["id"],
+        lambda status: bool(status.get("error")),
+    )
+    assert payload["error"] == "baidu_key_missing"
