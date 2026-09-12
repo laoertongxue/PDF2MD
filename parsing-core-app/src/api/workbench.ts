@@ -7,6 +7,7 @@ import type {
   ChapterRun,
   Course,
   CourseTopic,
+  EnvironmentReport,
   ImportedSource,
   NoteBlock,
   Source,
@@ -478,6 +479,26 @@ export function saveDeepSeekSettings(api_key: string | null, model: string): Pro
 
 export function testDeepSeekSettings(): Promise<{ status: string }> {
   return post<{ status: string }>("/api/workbench/settings/deepseek/test");
+}
+
+export async function fetchEnvironment(): Promise<EnvironmentReport> {
+  return request<EnvironmentReport>("/api/workbench/environment");
+}
+
+export async function saveCodexPath(path: string): Promise<WorkbenchSettings> {
+  return post<WorkbenchSettings>("/api/workbench/settings/codex", { path });
+}
+
+export async function clearCodexPath(): Promise<WorkbenchSettings> {
+  return request<WorkbenchSettings>("/api/workbench/settings/codex", { method: "DELETE" });
+}
+
+export async function saveBaiduKey(apiKey: string): Promise<WorkbenchSettings> {
+  return post<WorkbenchSettings>("/api/workbench/settings/baidu", { api_key: apiKey });
+}
+
+export async function clearBaiduKey(): Promise<WorkbenchSettings> {
+  return request<WorkbenchSettings>("/api/workbench/settings/baidu", { method: "DELETE" });
 }
 
 export function runHybridChapter(chapterId: string): Promise<Chapter> {

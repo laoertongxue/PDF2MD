@@ -145,6 +145,27 @@ export interface ChapterRun {
 export interface WorkbenchSettings {
   deepseek_model: string;
   deepseek_key_masked: string | null;
+  codex_cli_path: string | null;
+  baidu_key_masked: string | null;
+}
+
+export interface EnvironmentStatusItem {
+  state: "ready" | "missing" | "invalid" | "optional";
+  detail_code: string | null;
+}
+
+export interface CodexStatusItem extends EnvironmentStatusItem {
+  path: string | null;
+  source: "settings" | "environment" | "detected" | null;
+}
+
+export interface EnvironmentReport {
+  app_version: string;
+  data_dir: { path: string; writable: boolean };
+  deepseek: EnvironmentStatusItem & { last_test_ok: boolean | null };
+  codex: CodexStatusItem;
+  baidu: EnvironmentStatusItem & { masked: string | null };
+  vision: EnvironmentStatusItem;
 }
 
 export type TopicOutlineExecutor = "stub" | "deepseek" | "hybrid";

@@ -82,6 +82,59 @@ describe("workbench API error boundaries", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("fetchEnvironment returns structured dependency states", async () => {
+    Reflect.set(globalThis, TAURI_INTERNALS, {});
+    vi.doMock("@tauri-apps/api/core", () => ({
+      invoke: vi.fn().mockResolvedValue(API_CONFIG),
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            app_version: "0.1.4",
+            data_dir: { path: "/tmp/data", writable: true },
+            deepseek: { state: "ready", last_test_ok: null, detail_code: null },
+            codex: { state: "missing", path: null, source: null, detail_code: "codex_not_found" },
+            baidu: { state: "optional", masked: null, detail_code: null },
+            vision: { state: "ready", detail_code: null },
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    const api = await import("./workbench");
+
+    const report = await api.fetchEnvironment();
+    expect(report.codex.detail_code).toBe("codex_not_found");
+  });
+
+  it("saveCodexPath posts the selected path", async () => {
+    Reflect.set(globalThis, TAURI_INTERNALS, {});
+    vi.doMock("@tauri-apps/api/core", () => ({
+      invoke: vi.fn().mockResolvedValue(API_CONFIG),
+    }));
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          deepseek_model: "deepseek-v4-pro",
+          deepseek_key_masked: null,
+          codex_cli_path: "/opt/homebrew/bin/codex",
+          baidu_key_masked: null,
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await import("./workbench");
+
+    const settings = await api.saveCodexPath("/opt/homebrew/bin/codex");
+    expect(settings.codex_cli_path).toBe("/opt/homebrew/bin/codex");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${API_CONFIG.apiBase}/api/workbench/settings/codex`);
+    expect(JSON.parse(String(init.body))).toEqual({ path: "/opt/homebrew/bin/codex" });
+  });
+
   it("propagates a caller cancellation through course list requests", async () => {
     Reflect.set(globalThis, TAURI_INTERNALS, {});
     vi.doMock("@tauri-apps/api/core", () => ({
