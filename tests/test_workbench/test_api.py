@@ -28,6 +28,7 @@ from parsing_core.storage.repository import Repository
 from parsing_core.storage.schema import init_db
 from parsing_core.storage.schema_ext import apply_serve_schema
 from parsing_core.workbench import pipeline as workbench_pipeline
+from parsing_core.workbench.codex_cli import CodexCliError
 from parsing_core.workbench.keychain import KeychainError
 from parsing_core.workbench.ocr.chapters import detect_chapter_tree
 from parsing_core.workbench.ocr.workflow import OcrWorkflow, build_confirmation
@@ -3632,3 +3633,78 @@ def test_workbench_settings_test_connection_requires_key(tmp_path, monkeypatch):
 
     assert res.status_code == 400
     assert res.json()["detail"] == "deepseek api key not configured"
+
+
+def test_environment_reports_codex_and_baidu_states(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    monkeypatch.setattr(
+        routes_workbench.environment_module,
+        "read_secret",
+        lambda *_args: "deepseek-key-1234",
+    )
+    response = test_client.get("/api/workbench/environment", headers=AUTH_HEADERS)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["deepseek"]["state"] == "ready"
+    assert payload["baidu"]["state"] in {"optional", "ready"}
+    assert payload["codex"]["state"] in {"ready", "missing", "invalid"}
+
+
+def test_codex_settings_rejects_symlink_and_accepts_valid_file(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    real = tmp_path / "codex"
+    real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real.chmod(0o755)
+    link = tmp_path / "codex-link"
+    link.symlink_to(real)
+
+    def fake_resolve(path=None):
+        if path is not None and Path(path).is_symlink():
+            raise CodexCliError("codex cli not found")
+        return str(path or "codex")
+
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", fake_resolve)
+    rejected = test_client.post(
+        "/api/workbench/settings/codex",
+        json={"path": str(link)},
+        headers=AUTH_HEADERS,
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"]["code"] == "codex_invalid"
+    saved = test_client.post(
+        "/api/workbench/settings/codex",
+        json={"path": str(real)},
+        headers=AUTH_HEADERS,
+    )
+    assert saved.status_code == 200
+    assert saved.json()["codex_cli_path"] == str(real)
+    cleared = test_client.delete("/api/workbench/settings/codex", headers=AUTH_HEADERS)
+    assert cleared.status_code == 200
+    assert cleared.json()["codex_cli_path"] is None
+
+
+def test_baidu_settings_store_and_clear(tmp_path, monkeypatch):
+    test_client = client(tmp_path)
+    monkeypatch.delenv("PDF2MD_BAIDU_API_KEY", raising=False)
+    stored: dict[str, str] = {}
+    monkeypatch.setattr(
+        routes_workbench,
+        "save_secret",
+        lambda service, account, secret: stored.setdefault("value", secret),
+    )
+    monkeypatch.setattr(
+        routes_workbench.environment_module,
+        "read_secret",
+        lambda *_args: stored.get("value", ""),
+    )
+    monkeypatch.setattr(routes_workbench, "delete_secret", lambda *_args: stored.clear())
+    saved = test_client.post(
+        "/api/workbench/settings/baidu",
+        json={"api_key": "baidu-key-1234"},
+        headers=AUTH_HEADERS,
+    )
+    assert saved.status_code == 200
+    assert saved.json()["baidu_key_masked"] == "bai****1234"
+    cleared = test_client.delete("/api/workbench/settings/baidu", headers=AUTH_HEADERS)
+    assert cleared.status_code == 200
+    assert cleared.json()["baidu_key_masked"] is None

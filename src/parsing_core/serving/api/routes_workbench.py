@@ -14,21 +14,25 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
+from parsing_core import __version__
 from parsing_core.parser.markitdown_adapter import MarkItDownAdapter
 from parsing_core.serving.api.deps import SchedulerDep
 from parsing_core.serving.models.api import (
     AttachmentImportRequest,
     AttachmentResponse,
+    BaiduSettingsRequest,
     ChapterDraftReplaceRequest,
     ChapterDraftResponse,
     ChapterDraftState,
     ChapterResponse,
+    CodexSettingsRequest,
     CourseCardFavoriteRequest,
     CourseCardPatchRequest,
     CourseCardResponse,
     CourseCreateRequest,
     CourseResponse,
     DeepSeekSettingsRequest,
+    EnvironmentReport,
     FingerprintRequest,
     ImportedSourceResponse,
     NoteBlockResponse,
@@ -40,15 +44,27 @@ from parsing_core.serving.models.api import (
     WorkbenchSettingsResponse,
 )
 from parsing_core.storage.fs_layout import FsLayout
+from parsing_core.workbench import environment as environment_module
 from parsing_core.workbench.chapter_detection import detect_chapters
 from parsing_core.workbench.codex_cli import CodexCliError, CodexCliExecutor, resolve_codex_path
 from parsing_core.workbench.deepseek import DeepSeekClient, DeepSeekError, DeepSeekExecutor
+from parsing_core.workbench.environment import (
+    BAIDU_KEYCHAIN_ACCOUNT,
+    BAIDU_KEYCHAIN_SERVICE,
+    build_environment_report,
+)
 from parsing_core.workbench.executors import (
     IntensiveReadingExecutor,
     StubIntensiveReadingExecutor,
 )
 from parsing_core.workbench.hybrid import HybridIntensiveReadingExecutor
-from parsing_core.workbench.keychain import KeychainError, mask_secret, read_secret, save_secret
+from parsing_core.workbench.keychain import (
+    KeychainError,
+    delete_secret,
+    mask_secret,
+    read_secret,
+    save_secret,
+)
 from parsing_core.workbench.markdown_sync import (
     ChapterMarkdownSyncError,
     sync_chapter_markdown,
@@ -78,6 +94,7 @@ from parsing_core.workbench.pipeline import (
 from parsing_core.workbench.repository import ChapterGenerationConflictError, WorkbenchRepository
 from parsing_core.workbench.schema import CHAPTER_SYNC_PENDING
 from parsing_core.workbench.settings import (
+    SettingsError,
     WorkbenchSettings,
     load_settings,
     update_settings_fields,
@@ -220,11 +237,6 @@ def _read_masked_deepseek_key() -> str | None:
     except KeychainError:
         return None
     return mask_secret(api_key.strip()) if api_key.strip() else None
-
-
-def _read_masked_baidu_key() -> str | None:
-    api_key = os.environ.get("PDF2MD_BAIDU_API_KEY", "").strip()
-    return mask_secret(api_key) if api_key else None
 
 
 def _resolve_inside(path: str, base: Path) -> Path:
@@ -1038,13 +1050,7 @@ async def get_chapter(chapter_id: str, sch: SchedulerDep) -> ChapterResponse:
 @router.get("/settings", response_model=WorkbenchSettingsResponse)
 async def get_workbench_settings(sch: SchedulerDep) -> WorkbenchSettingsResponse:
     def load_settings_transaction() -> WorkbenchSettingsResponse:
-        settings = load_settings(_settings_root(sch))
-        return WorkbenchSettingsResponse(
-            deepseek_model=settings.deepseek_model,
-            deepseek_key_masked=_read_masked_deepseek_key(),
-            codex_cli_path=settings.codex_cli_path,
-            baidu_key_masked=_read_masked_baidu_key(),
-        )
+        return _settings_response(load_settings(_settings_root(sch)))
 
     return await run_in_threadpool(load_settings_transaction)
 
@@ -1070,15 +1076,7 @@ async def save_deepseek_settings(
                 save_secret(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, api_key)
             except KeychainError as exc:
                 raise HTTPException(500, str(exc)) from exc
-            masked_key = mask_secret(api_key)
-        else:
-            masked_key = _read_masked_deepseek_key()
-        return WorkbenchSettingsResponse(
-            deepseek_model=settings.deepseek_model,
-            deepseek_key_masked=masked_key,
-            codex_cli_path=settings.codex_cli_path,
-            baidu_key_masked=_read_masked_baidu_key(),
-        )
+        return _settings_response(settings)
 
     return await run_in_threadpool(save_settings_transaction)
 
@@ -1095,6 +1093,98 @@ async def test_deepseek_settings(sch: SchedulerDep) -> dict[str, str]:
     except DeepSeekError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"status": "ok"}
+
+
+def _settings_response(settings: WorkbenchSettings) -> WorkbenchSettingsResponse:
+    return WorkbenchSettingsResponse(
+        deepseek_model=settings.deepseek_model,
+        deepseek_key_masked=_read_masked_deepseek_key(),
+        codex_cli_path=settings.codex_cli_path,
+        baidu_key_masked=environment_module.masked_baidu_key(),
+    )
+
+
+def _vision_available() -> bool:
+    try:
+        _find_vision_helper()
+    except Exception:
+        return False
+    return True
+
+
+@router.get("/environment", response_model=EnvironmentReport)
+async def get_environment(sch: SchedulerDep) -> EnvironmentReport:
+    def collect() -> EnvironmentReport:
+        settings = load_settings(_settings_root(sch))
+        return EnvironmentReport.model_validate(
+            build_environment_report(
+                settings=settings,
+                app_version=__version__,
+                data_dir=Path(_settings_root(sch).base_dir),
+                vision_available=_vision_available(),
+            )
+        )
+
+    return await run_in_threadpool(collect)
+
+
+@router.post("/settings/codex", response_model=WorkbenchSettingsResponse)
+async def save_codex_settings(
+    req: CodexSettingsRequest, sch: SchedulerDep
+) -> WorkbenchSettingsResponse:
+    def save() -> WorkbenchSettingsResponse:
+        try:
+            resolve_codex_path(req.path)
+        except CodexCliError as exc:
+            raise HTTPException(
+                422,
+                {"code": "codex_invalid", "params": {"reason": "codex_layout_unsupported"}},
+            ) from exc
+        try:
+            settings = update_settings_fields(_settings_root(sch), codex_cli_path=req.path)
+        except SettingsError as exc:
+            raise HTTPException(
+                422, {"code": "settings_invalid", "params": {"reason": "codex_cli_path"}}
+            ) from exc
+        return _settings_response(settings)
+
+    return await run_in_threadpool(save)
+
+
+@router.delete("/settings/codex", response_model=WorkbenchSettingsResponse)
+async def clear_codex_settings(sch: SchedulerDep) -> WorkbenchSettingsResponse:
+    def clear() -> WorkbenchSettingsResponse:
+        settings = update_settings_fields(_settings_root(sch), codex_cli_path=None)
+        return _settings_response(settings)
+
+    return await run_in_threadpool(clear)
+
+
+@router.post("/settings/baidu", response_model=WorkbenchSettingsResponse)
+async def save_baidu_settings(
+    req: BaiduSettingsRequest, sch: SchedulerDep
+) -> WorkbenchSettingsResponse:
+    api_key = (req.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(422, {"code": "settings_invalid", "params": {"reason": "api_key"}})
+
+    def save() -> WorkbenchSettingsResponse:
+        try:
+            save_secret(BAIDU_KEYCHAIN_SERVICE, BAIDU_KEYCHAIN_ACCOUNT, api_key)
+        except KeychainError as exc:
+            raise HTTPException(500, {"code": "storage", "params": {}}) from exc
+        return _settings_response(load_settings(_settings_root(sch)))
+
+    return await run_in_threadpool(save)
+
+
+@router.delete("/settings/baidu", response_model=WorkbenchSettingsResponse)
+async def clear_baidu_settings(sch: SchedulerDep) -> WorkbenchSettingsResponse:
+    def clear() -> WorkbenchSettingsResponse:
+        delete_secret(BAIDU_KEYCHAIN_SERVICE, BAIDU_KEYCHAIN_ACCOUNT)
+        return _settings_response(load_settings(_settings_root(sch)))
+
+    return await run_in_threadpool(clear)
 
 
 @router.post("/chapters/{chapter_id}/confirm", response_model=ChapterResponse)

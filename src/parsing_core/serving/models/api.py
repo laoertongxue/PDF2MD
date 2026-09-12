@@ -243,6 +243,38 @@ class BaiduSettingsRequest(BaseModel):
         return _normalize_secret(api_key)
 
 
+class EnvironmentStatusItem(BaseModel):
+    state: str
+    detail_code: str | None = None
+
+
+class CodexStatusItem(EnvironmentStatusItem):
+    path: str | None = None
+    source: str | None = None
+
+
+class DeepSeekStatusItem(EnvironmentStatusItem):
+    last_test_ok: bool | None = None
+
+
+class BaiduStatusItem(EnvironmentStatusItem):
+    masked: str | None = None
+
+
+class DataDirStatus(BaseModel):
+    path: str
+    writable: bool
+
+
+class EnvironmentReport(BaseModel):
+    app_version: str
+    data_dir: DataDirStatus
+    deepseek: DeepSeekStatusItem
+    codex: CodexStatusItem
+    baidu: BaiduStatusItem
+    vision: EnvironmentStatusItem
+
+
 def _normalize_secret(value: str | None) -> str | None:
     if value is None:
         return None
