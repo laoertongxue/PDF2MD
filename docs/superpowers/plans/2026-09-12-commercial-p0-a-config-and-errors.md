@@ -968,7 +968,7 @@ git commit -m "feat(api): return structured actionable error codes"
 - 修改：`parsing-core-app/src/api/workbench.ts`
 - 测试：`parsing-core-app/src/api/workbench.test.ts`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 追加：
 
@@ -992,12 +992,12 @@ it("maps coded errors to an action", () => {
 });
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`cd parsing-core-app && npx vitest run src/api/workbench.test.ts`
 预期：FAIL
 
-- [ ] **步骤 3：扩展 SafeApiError 与解析**
+- [x] **步骤 3：扩展 SafeApiError 与解析**
 
 `workbench.ts`：
 
@@ -1116,7 +1116,7 @@ export function ocrErrorInfo(code: string | null | undefined): ApiErrorInfo | nu
 }
 ```
 
-- [ ] **步骤 4：接入 OCR 面板**
+- [x] **步骤 4：接入 OCR 面板**
 
 修改 `parsing-core-app/src/components/workbench/OcrWorkflowPanel.tsx`：
 - import `{ ocrErrorInfo }` 自 `"../../api/errorMessages"`，import `useNavigate`。
@@ -1145,12 +1145,12 @@ export function ocrErrorInfo(code: string | null | undefined): ApiErrorInfo | nu
 
 - 在组件内声明 `const navigate = useNavigate();`。
 
-- [ ] **步骤 5：运行测试验证通过**
+- [x] **步骤 5：运行测试验证通过**
 
 运行：`cd parsing-core-app && npx vitest run src/api/workbench.test.ts src/api/client.test.ts src/components/workbench/ChapterWorkbench.test.tsx`
 预期：PASS
 
-- [ ] **步骤 6：Commit**
+- [x] **步骤 6：Commit**
 
 ```bash
 git add parsing-core-app/src/api/errorMessages.ts parsing-core-app/src/api/workbench.ts parsing-core-app/src/api/workbench.test.ts parsing-core-app/src/components/workbench/OcrWorkflowPanel.tsx
