@@ -154,9 +154,10 @@ export default function Settings() {
     if (!desktop) return;
     setCodexError(null);
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({ multiple: false });
-      if (typeof selected === "string") setCodexPath(selected);
+      const { invoke } = await import("@tauri-apps/api/core");
+      const selected = await invoke<string[]>("pick_files");
+      const [first] = selected;
+      if (first) setCodexPath(first);
     } catch (err: unknown) {
       setCodexError(describeError(err, "无法打开文件选择器"));
     }
