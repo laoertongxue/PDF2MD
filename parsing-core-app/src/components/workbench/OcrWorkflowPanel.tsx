@@ -3,9 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { AlertTriangle, Ban, CheckCircle2, Loader2, Play, RefreshCw, Sparkles, XCircle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import MermaidBlock from "../MermaidBlock";
-import { ocrErrorInfo } from "../../api/errorMessages";
+import { apiErrorInfo, ocrErrorInfo } from "../../api/errorMessages";
 import {
-  SafeApiError,
   cancelSourceOcr,
   confirmSourceChapter,
   generateSourceNote,
@@ -14,13 +13,24 @@ import {
   reviewSourceOcr,
   startSourceOcr,
 } from "../../api/workbench";
-import type { OcrChapter, OcrChapterTree, OcrNoteResult, OcrStatus, Source } from "../../api/workbenchTypes";
+import type {
+  OcrChapter,
+  OcrChapterTree,
+  OcrNoteResult,
+  OcrReviewReason,
+  OcrStatus,
+  Source,
+} from "../../api/workbenchTypes";
 
-const REVIEW_REASON_LABELS: Record<string, string> = {
+const REVIEW_REASON_LABELS: Record<OcrReviewReason, string> = {
   conflict: "冲突",
   complex: "复杂版式",
   sampled: "抽样",
 };
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : "操作失败，请重试";
+}
 
 export default function OcrWorkflowPanel({ source }: { source: Source }) {
   const navigate = useNavigate();
@@ -29,14 +39,13 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
   const [note, setNote] = useState<OcrNoteResult | null>(null);
   const [selectedChapter, setSelectedChapter] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [needsBaiduKey, setNeedsBaiduKey] = useState(false);
+  const [error, setError] = useState<unknown>(null);
 
   const refresh = useCallback(async () => {
     try {
       setStatus(await getSourceOcrStatus(source.id));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "无法读取 OCR 状态");
+      setError(reason);
     }
   }, [source.id]);
 
@@ -52,12 +61,11 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
   const run = async (operation: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
-    setNeedsBaiduKey(false);
     try {
       await operation();
       await refresh();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "操作失败，请重试");
+      setError(reason);
     } finally {
       setBusy(false);
     }
@@ -72,17 +80,7 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
       await startSourceOcr(source.id);
     });
   const cancel = () => void run(() => cancelSourceOcr(source.id));
-  const review = () =>
-    void run(async () => {
-      try {
-        await reviewSourceOcr(source.id);
-      } catch (reason) {
-        if (reason instanceof SafeApiError && reason.code === "ocr_review_not_ready") {
-          setNeedsBaiduKey(true);
-        }
-        throw reason;
-      }
-    });
+  const review = () => void run(() => reviewSourceOcr(source.id));
   const detect = () =>
     void run(async () => {
       const next = await recognizeSourceChapters(source.id);
@@ -93,6 +91,7 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
     selectedChapter ? void run(() => confirmSourceChapter(source.id, selectedChapter)) : undefined;
   const generate = () =>
     selectedChapter ? void run(async () => setNote(await generateSourceNote(source.id, selectedChapter))) : undefined;
+  const errorInfo = apiErrorInfo(error);
 
   return (
     <section aria-label={`无人值守 OCR：${source.title}`} className="border-t border-zinc-200 pt-5">
@@ -167,7 +166,7 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
           <ul className="mt-2 space-y-0.5">
             {reviewPages.map((item) => (
               <li key={item.page}>
-                第 {item.page} 页 · {REVIEW_REASON_LABELS[item.reason] ?? item.reason}
+                第 {item.page} 页 · {REVIEW_REASON_LABELS[item.reason]}
               </li>
             ))}
           </ul>
@@ -184,10 +183,11 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
           )}
         </div>
       )}
-      {error && (
+      {error !== null && (
         <div role="alert" className="mt-3 border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-700">
-          <p>{error}</p>
-          {needsBaiduKey && (
+          <p className="font-medium">{errorInfo?.title ?? errorText(error)}</p>
+          {errorInfo && <p className="mt-1">{errorInfo.description}</p>}
+          {errorInfo?.action === "open_baidu_settings" && (
             <button type="button" className="mt-2 underline" onClick={() => navigate("/workbench/settings")}>
               去配置百度 Key
             </button>

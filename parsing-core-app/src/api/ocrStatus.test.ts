@@ -1,5 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+function stubReviewStatusFetch(review_pages: unknown, review_pending: unknown): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: "review_required",
+        source_path: "/tmp/book.pdf",
+        state_path: "/tmp/state/batch-state.json",
+        error: null,
+        publishable: true,
+        markdown_path: null,
+        chapter_tree_path: null,
+        review_pages,
+        review_pending,
+      }),
+    }),
+  );
+}
+
 describe("OCR status publication gate", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -89,7 +110,41 @@ describe("OCR status publication gate", () => {
     const { getSourceOcrStatus } = await import("./workbench");
     await expect(getSourceOcrStatus("source-1")).resolves.toMatchObject({
       status: "review_required",
+      review_pages: [
+        { page: 3, reason: "conflict", alignment_status: "conflict" },
+        { page: 7, reason: "sampled", alignment_status: "consistent" },
+      ],
       review_pending: 2,
+    });
+  });
+
+  it.each([0, 1.5])("rejects a review page with an invalid page number (%s)", async (page) => {
+    stubReviewStatusFetch([{ page, reason: "conflict", alignment_status: "conflict" }], 1);
+
+    const { getSourceOcrStatus } = await import("./workbench");
+    await expect(getSourceOcrStatus("source-1")).rejects.toMatchObject({
+      name: "SafeApiError",
+      category: "protocol",
+    });
+  });
+
+  it("rejects a review page with an unknown reason", async () => {
+    stubReviewStatusFetch([{ page: 3, reason: "unknown", alignment_status: "conflict" }], 1);
+
+    const { getSourceOcrStatus } = await import("./workbench");
+    await expect(getSourceOcrStatus("source-1")).rejects.toMatchObject({
+      name: "SafeApiError",
+      category: "protocol",
+    });
+  });
+
+  it.each([-1, 1.5])("rejects an invalid review_pending count (%s)", async (review_pending) => {
+    stubReviewStatusFetch(null, review_pending);
+
+    const { getSourceOcrStatus } = await import("./workbench");
+    await expect(getSourceOcrStatus("source-1")).rejects.toMatchObject({
+      name: "SafeApiError",
+      category: "protocol",
     });
   });
 });

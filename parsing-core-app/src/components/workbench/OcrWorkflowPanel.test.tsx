@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -74,10 +74,12 @@ it("lists review pages and requests a review rerun", async () => {
   expect(await screen.findByText("待复核 2 页")).toBeInTheDocument();
   expect(screen.getByText("第 3 页 · 冲突")).toBeInTheDocument();
   expect(screen.getByText("第 7 页 · 抽样")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "启动 OCR" })).not.toBeInTheDocument();
 
   await userEvent.click(screen.getByRole("button", { name: "配置百度 Key 并继续复核" }));
 
   expect(mocks.reviewSourceOcr).toHaveBeenCalledWith("source-1");
+  await waitFor(() => expect(mocks.getSourceOcrStatus).toHaveBeenCalledTimes(2));
 });
 
 it("links to settings when a review rerun is not ready", async () => {
@@ -91,5 +93,7 @@ it("links to settings when a review rerun is not ready", async () => {
   await screen.findByText("待复核 2 页");
   await userEvent.click(screen.getByRole("button", { name: "配置百度 Key 并继续复核" }));
 
-  expect(await screen.findByRole("button", { name: "去配置百度 Key" })).toBeInTheDocument();
+  expect(await screen.findByText("暂时无法继续复核")).toBeInTheDocument();
+  expect(screen.getByText("请先配置百度 OCR Key 并确认任务存在待复核页面。")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "去配置百度 Key" })).toBeInTheDocument();
 });
