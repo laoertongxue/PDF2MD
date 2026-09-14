@@ -476,13 +476,6 @@ def _status_payload_from_snapshot(
     }
 
 
-def _read_completed_ocr_final(final_path: Path, source_path: str | Path) -> dict[str, Any]:
-    final = _read_regular_json(final_path)
-    if not _completed_ocr_final_is_valid(final, source_path):
-        raise ValueError("OCR final evidence is invalid")
-    return final
-
-
 def _completed_ocr_final_is_valid(final: dict[str, Any], source_path: str | Path) -> bool:
     try:
         if final.get("status") != BatchStatus.COMPLETED.value or not _is_batch_state(final):
