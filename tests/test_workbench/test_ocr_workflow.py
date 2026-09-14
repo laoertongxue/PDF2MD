@@ -6988,3 +6988,57 @@ def test_detect_chapters_accepts_review_final(tmp_path: Path):
 
     assert tree["input_fingerprint"]
     assert isinstance(tree["chapters"], list)
+
+
+def test_publication_metadata_accepts_review_pending_fields(tmp_path: Path):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    metadata["review_pending"] = 2
+    metadata["review_pages"] = [2]
+
+    workflow_module._validate_publication_metadata(
+        metadata,
+        input_fingerprint=final["input_fingerprint"],
+        evidence_fingerprint=tree["evidence_fingerprint"],
+        chapter=confirmation["chapter"],
+    )
+
+    metadata["review_pending"] = 0
+    with pytest.raises(ValueError, match="review metadata"):
+        workflow_module._validate_publication_metadata(
+            metadata,
+            input_fingerprint=final["input_fingerprint"],
+            evidence_fingerprint=tree["evidence_fingerprint"],
+            chapter=confirmation["chapter"],
+        )
+
+
+def test_markdown_publication_requires_review_markup(tmp_path: Path):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    metadata["review_pending"] = 1
+    metadata["review_pages"] = [2]
+    markdown = _valid_markdown(final, tree, confirmation)
+    digest = hashlib.sha256(markdown.encode()).hexdigest()
+
+    assert (
+        workflow_module._markdown_publication_is_valid(
+            metadata, markdown, final["input_fingerprint"], expected_sha256=digest
+        )
+        is False
+    )
+
+    reviewed = _valid_markdown(final, tree, confirmation).replace(
+        "## 原文证据\n",
+        "## 原文证据\n<!-- pdf2md: review pending page 2 -->\n",
+    )
+    reviewed = "<!-- pdf2md: review_pending=1 -->\n" + reviewed
+    reviewed_digest = hashlib.sha256(reviewed.encode()).hexdigest()
+    assert (
+        workflow_module._markdown_publication_is_valid(
+            metadata, reviewed, final["input_fingerprint"], expected_sha256=reviewed_digest
+        )
+        is True
+    )

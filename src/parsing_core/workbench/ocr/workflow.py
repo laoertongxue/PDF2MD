@@ -66,6 +66,12 @@ _PUBLICATION_METADATA_FIELDS = {
     "citation_ids",
     "model",
     "prompt_fingerprint",
+    "review_pending",
+    "review_pages",
+}
+_REQUIRED_PUBLICATION_METADATA_FIELDS = _PUBLICATION_METADATA_FIELDS - {
+    "review_pending",
+    "review_pages",
 }
 _PUBLICATION_THREAD_LOCKS: dict[Path, threading.RLock] = {}
 _PUBLICATION_THREAD_LOCKS_GUARD = threading.Lock()
@@ -2735,8 +2741,24 @@ def _validate_publication_metadata(
     unexpected = fields - _PUBLICATION_METADATA_FIELDS
     if unexpected:
         raise ValueError("published metadata has unexpected fields")
-    if fields != _PUBLICATION_METADATA_FIELDS:
+    if not _REQUIRED_PUBLICATION_METADATA_FIELDS <= fields:
         raise ValueError("published metadata is incomplete")
+    review_pending = metadata.get("review_pending", 0)
+    review_pages = metadata.get("review_pages", [])
+    if (
+        not isinstance(review_pending, int)
+        or isinstance(review_pending, bool)
+        or review_pending < 0
+        or not isinstance(review_pages, list)
+        or any(
+            not isinstance(page, int) or isinstance(page, bool) or page < 1
+            for page in review_pages
+        )
+        or len(review_pages) != len(set(review_pages))
+        or review_pages != sorted(review_pages)
+        or len(review_pages) > review_pending
+    ):
+        raise ValueError("published review metadata is invalid")
     if metadata.get("model") != "deepseek-v4-pro":
         raise ValueError("published model is invalid")
     if metadata.get("prompt_rules_version") != "mba-intensive-reading-v1":
@@ -2832,6 +2854,18 @@ def _markdown_publication_is_valid(
         validate_mermaid_block(diagrams[0], expected_type="flowchart")
         validate_mermaid_block(diagrams[1], expected_type="flowchart")
     except Exception:
+        return False
+    review_pending = metadata.get("review_pending", 0)
+    review_pages = metadata.get("review_pages", [])
+    if review_pending:
+        if f"<!-- pdf2md: review_pending={review_pending} -->" not in markdown:
+            return False
+        if any(
+            f"<!-- pdf2md: review pending page {page} -->" not in markdown
+            for page in review_pages
+        ):
+            return False
+    elif "<!-- pdf2md:" in markdown:
         return False
     return "[src:" in markdown
 
