@@ -16,6 +16,7 @@ from test_ocr_workflow import (
     _complete_workflow_fixture,
     _note_metadata,
     _prepare_chapter_context,
+    _review_workflow_fixture,
     _valid_markdown,
 )
 
@@ -3789,7 +3790,7 @@ def test_ocr_uses_configured_codex_path_from_settings(tmp_path, monkeypatch):
     assert observed == [str(real)]
 
 
-def test_ocr_without_provider_reports_structured_error(tmp_path, monkeypatch):
+def test_ocr_without_baidu_no_longer_blocks_start(tmp_path, monkeypatch):
     test_client = client(tmp_path)
     root = course_root(tmp_path)
     pdf = root / "book.pdf"
@@ -3797,21 +3798,25 @@ def test_ocr_without_provider_reports_structured_error(tmp_path, monkeypatch):
     _course, source = _registered_pdf_source(test_client, root, pdf)
     monkeypatch.setattr(routes_workbench.environment_module, "read_secret", lambda *_args: "")
     monkeypatch.delenv("PDF2MD_BAIDU_API_KEY", raising=False)
-    monkeypatch.setattr(routes_workbench, "_find_vision_helper", lambda: tmp_path / "vision")
-    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda path=None: "codex")
-    monkeypatch.setattr(workflow_module, "count_pdf_pages", lambda _source: 1)
+    observed: dict[str, object] = {}
+
+    class StubWorkflow:
+        def start(self):
+            observed["started"] = True
+
+        def status(self):
+            return {"status": "running"}
+
+    monkeypatch.setattr(routes_workbench, "OcrWorkflow", lambda **kwargs: StubWorkflow())
     response = test_client.post(
         f"/api/workbench/sources/{source['id']}/ocr",
         json={},
         headers=AUTH_HEADERS,
     )
+
     assert response.status_code == 200
-    payload = _poll_ocr_status(
-        test_client,
-        source["id"],
-        lambda status: bool(status.get("error")),
-    )
-    assert payload["error"] == "baidu_key_missing"
+    assert response.json()["status"] == "running"
+    assert observed == {"started": True}
 
 
 def test_missing_deepseek_key_returns_actionable_code(tmp_path, monkeypatch):
@@ -3852,3 +3857,145 @@ def test_missing_codex_maps_to_stable_error_code(tmp_path, monkeypatch):
         lambda status: bool(status.get("error")),
     )
     assert payload["error"] == "codex_unavailable"
+
+
+def test_ocr_factory_tolerates_missing_baidu_key(tmp_path, monkeypatch):
+    routes_workbench._OCR_WORKFLOWS.clear()
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    source = SimpleNamespace(id="source-baidu-optional", file_path=str(pdf))
+    course = SimpleNamespace(root_dir=str(tmp_path))
+    captured: dict[str, object] = {}
+
+    class StubWorkflow:
+        def __init__(self, *, source_path, state_root, orchestrator_factory):
+            captured["factory"] = orchestrator_factory
+
+    monkeypatch.setattr(routes_workbench, "OcrWorkflow", StubWorkflow)
+    monkeypatch.setattr(routes_workbench, "_find_vision_helper", lambda: tmp_path / "vision")
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda path=None: "codex")
+    monkeypatch.setattr(routes_workbench, "resolve_baidu_api_key", lambda: None)
+    monkeypatch.setattr(
+        routes_workbench,
+        "VisionClient",
+        lambda **kwargs: SimpleNamespace(cache=SimpleNamespace(pages_dir=tmp_path / "pages")),
+    )
+    monkeypatch.setattr(routes_workbench, "CodexVisionExecutor", lambda **kwargs: SimpleNamespace())
+    monkeypatch.setattr(
+        routes_workbench,
+        "BaiduOcrClient",
+        lambda **kwargs: pytest.fail("baidu client must not be constructed without a key"),
+    )
+    monkeypatch.setattr(routes_workbench, "RegisteredPdfSources", lambda paths: object())
+
+    workflow = routes_workbench._ocr_workflow(source, course)
+
+    assert workflow.__class__ is StubWorkflow
+    orchestrator = captured["factory"](lambda: False)
+    assert orchestrator.baidu is None
+
+
+def test_ocr_factory_uses_baidu_when_key_present(tmp_path, monkeypatch):
+    routes_workbench._OCR_WORKFLOWS.clear()
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    source = SimpleNamespace(id="source-baidu-present", file_path=str(pdf))
+    course = SimpleNamespace(root_dir=str(tmp_path))
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    class StubWorkflow:
+        def __init__(self, *, source_path, state_root, orchestrator_factory):
+            captured["factory"] = orchestrator_factory
+
+    monkeypatch.setattr(routes_workbench, "OcrWorkflow", StubWorkflow)
+    monkeypatch.setattr(routes_workbench, "_find_vision_helper", lambda: tmp_path / "vision")
+    monkeypatch.setattr(routes_workbench, "resolve_codex_path", lambda path=None: "codex")
+    monkeypatch.setattr(routes_workbench, "resolve_baidu_api_key", lambda: "baidu-key")
+    monkeypatch.setattr(
+        routes_workbench,
+        "VisionClient",
+        lambda **kwargs: SimpleNamespace(cache=SimpleNamespace(pages_dir=tmp_path / "pages")),
+    )
+    monkeypatch.setattr(routes_workbench, "CodexVisionExecutor", lambda **kwargs: SimpleNamespace())
+    monkeypatch.setattr(routes_workbench, "BaiduOcrClient", lambda **kwargs: sentinel)
+    monkeypatch.setattr(routes_workbench, "RegisteredPdfSources", lambda paths: object())
+
+    routes_workbench._ocr_workflow(source, course)
+
+    orchestrator = captured["factory"](lambda: False)
+    assert orchestrator.baidu is not None
+    assert orchestrator.baidu.client is sentinel
+
+
+def test_ocr_review_route_requires_baidu_key(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    fixture_root = root / "ocr-fixture"
+    fixture_root.mkdir()
+    _engines, state_root, _result = _review_workflow_fixture(fixture_root)
+    _course, source = _registered_pdf_source(c, root, fixture_root / "book.pdf")
+    workflow = OcrWorkflow(
+        source_path=fixture_root / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("review work must not rerun"),
+    )
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda *args, **kwargs: workflow)
+    monkeypatch.setattr(routes_workbench, "resolve_baidu_api_key", lambda: None)
+
+    response = c.post(f"/api/workbench/sources/{source['id']}/ocr/review")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "ocr_review_not_ready",
+        "params": {"reason": "baidu_key_missing"},
+    }
+
+
+def test_ocr_review_route_rejects_without_review_final(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    pdf = root / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    _course, source = _registered_pdf_source(c, root, pdf)
+    workflow = OcrWorkflow(
+        source_path=pdf,
+        state_root=root / ".pdf2md" / "empty-review",
+        orchestrator_factory=lambda _cancel: pytest.fail("review work must not run"),
+    )
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda *args, **kwargs: workflow)
+    monkeypatch.setattr(routes_workbench, "resolve_baidu_api_key", lambda: "baidu-key")
+
+    response = c.post(f"/api/workbench/sources/{source['id']}/ocr/review")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "ocr_review_not_ready"
+
+
+def test_ocr_review_route_starts_review_with_persisted_config(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    fixture_root = root / "ocr-fixture"
+    fixture_root.mkdir()
+    _engines, state_root, _result = _review_workflow_fixture(fixture_root)
+    _course, source = _registered_pdf_source(c, root, fixture_root / "book.pdf")
+    workflow = OcrWorkflow(
+        source_path=fixture_root / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("stub start must intercept"),
+    )
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(workflow, "start", lambda **kwargs: recorded.update(kwargs))
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda *args, **kwargs: workflow)
+    monkeypatch.setattr(routes_workbench, "resolve_baidu_api_key", lambda: "baidu-key")
+
+    response = c.post(f"/api/workbench/sources/{source['id']}/ocr/review")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "review_required"
+    assert recorded == {
+        "dpi": 300,
+        "languages": ("zh-Hans",),
+        "pages": (1,),
+        "sample_rate": 0.0,
+    }

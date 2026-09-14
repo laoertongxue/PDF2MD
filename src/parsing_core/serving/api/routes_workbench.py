@@ -355,8 +355,6 @@ def _ocr_workflow(
                 else:
                     codex_path = resolve_codex_path(settings.codex_cli_path)
                 baidu_key = resolve_baidu_api_key()
-                if not baidu_key:
-                    raise WorkflowBlockedError("baidu_key_missing")
                 validator = RegisteredPdfSources([pdf_path])
                 vision = VisionClient(
                     helper_path=helper,
@@ -372,7 +370,11 @@ def _ocr_workflow(
                     timeout=180,
                     cancel_event=cancel_signal,
                 )
-                baidu = BaiduOcrClient(api_key=baidu_key)
+                baidu = (
+                    _DeadlineAdapter(BaiduOcrClient(api_key=baidu_key))
+                    if baidu_key
+                    else None
+                )
             except WorkflowBlockedError:
                 raise
             except Exception as exc:
@@ -384,7 +386,7 @@ def _ocr_workflow(
             return OcrOrchestrator(
                 vision=_DeadlineAdapter(vision),
                 codex=_DeadlineAdapter(codex),
-                baidu=_DeadlineAdapter(baidu),
+                baidu=baidu,
                 state_root=state_root,
                 image_loader=_load_ocr_image,
                 is_cancelled=is_cancelled,
@@ -672,6 +674,29 @@ async def cancel_source_ocr(source_id: str, sch: SchedulerDep) -> dict[str, obje
     return await run_in_threadpool(cancel_ocr_transaction)
 
 
+@router.post("/sources/{source_id}/ocr/review")
+async def review_source_ocr(source_id: str, sch: SchedulerDep) -> dict[str, object]:
+    def review_ocr_transaction() -> dict[str, object]:
+        repo = _repo(sch)
+        source = repo.get_source(source_id)
+        if source is None:
+            raise HTTPException(404, "source not found")
+        course = repo.get_course(source.course_id)
+        if course is None:
+            raise HTTPException(404, "course not found")
+        settings = load_settings(_settings_root(sch))
+        if resolve_baidu_api_key() is None:
+            raise api_error(409, "ocr_review_not_ready", reason="baidu_key_missing")
+        workflow = _ocr_workflow(source, course, settings)
+        try:
+            workflow.start_review()
+        except ValueError as exc:
+            raise api_error(409, "ocr_review_not_ready", reason=str(exc)) from exc
+        return workflow.status()
+
+    return await run_in_threadpool(review_ocr_transaction)
+
+
 @router.post("/sources/{source_id}/ocr/chapters")
 async def recognize_source_chapters(source_id: str, sch: SchedulerDep) -> dict[str, object]:
     def detect_ocr_chapters_transaction() -> dict[str, object]:
@@ -732,11 +757,14 @@ async def generate_source_note(
         validate_chapter_confirmation(confirmation, tree)
         if confirmation["chapter_id"] != req.chapter_id:
             raise ValueError("chapter confirmation target mismatch")
+        review_pages = final.get("review_pages")
+        review_pending = len(review_pages) if isinstance(review_pages, list) else 0
         base = build_intensive_reading_note(
             tree,
             confirmation,
             pages,
             source_id=source.id,
+            review_pending=review_pending,
         )
         api_key = _read_configured_deepseek_key()
         generator = DeepSeekIntensiveReadingGenerator(
