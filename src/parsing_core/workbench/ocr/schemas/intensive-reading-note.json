@@ -35,7 +35,12 @@
         "page_start": {"type": "integer", "minimum": 1},
         "page_end": {"type": "integer", "minimum": 1},
         "citation_ids": {"type": "array", "maxItems": 4096, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
-        "note_fingerprint": {"type": "string", "minLength": 1, "maxLength": 128}
+        "note_fingerprint": {"type": "string", "minLength": 1, "maxLength": 128},
+        "review_pending": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "review_pages": {
+          "type": "array", "maxItems": 10000, "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1}
+        }
       }
     },
     "section": {

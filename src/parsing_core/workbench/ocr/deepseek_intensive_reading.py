@@ -163,11 +163,15 @@ def _finalize_generated_note(
         "citation_ids",
         "model",
         "prompt_fingerprint",
+        "review_pending",
+        "review_pages",
     }
     if set(metadata) - allowed_metadata:
         raise DeepSeekGenerationError("generated note metadata has unexpected fields")
     for key, value in base_metadata.items():
-        if key != "note_fingerprint" and metadata.get(key) != value:
+        if key in {"note_fingerprint", "review_pending", "review_pages"}:
+            continue
+        if metadata.get(key) != value:
             raise DeepSeekGenerationError("generated note metadata is not bound to input")
     if metadata.get("model") != MODEL_NAME or metadata.get(
         "prompt_fingerprint"
@@ -255,6 +259,8 @@ def _finalize_generated_note(
     metadata["page_start"] = base_metadata.get("page_start")
     metadata["page_end"] = base_metadata.get("page_end")
     metadata["citation_ids"] = list(citation_ids)
+    metadata["review_pending"] = base_metadata.get("review_pending", 0)
+    metadata["review_pages"] = list(base_metadata.get("review_pages", []))
     metadata["note_fingerprint"] = _digest(
         {"metadata": metadata, "sections": sections, "mermaid": mermaid}
     )

@@ -18,6 +18,7 @@ from jsonschema import Draft202012Validator
 
 from .chapters import validate_chapter_confirmation, validate_chapter_tree
 from .codex_vision import CodexVisionError, validate_persisted_payload
+from .orchestrator import PageStatus
 
 NOTE_SCHEMA_VERSION = 1
 DEFAULT_PROMPT_RULES_VERSION = "mba-intensive-reading-v1"
@@ -45,6 +46,9 @@ _FLOW_LINE_RE = re.compile(
 _MINDMAP_LINE_RE = re.compile(
     r"^(?: {2,}[A-Za-z0-9_.-]+(?:\(\([^\r\n]*\)\))?|"
     r" {2,}[\u4e00-\u9fff][^\r\n]*)$"
+)
+_REVIEW_COMMENT_RE = re.compile(
+    r"<!-- pdf2md: (?:review_pending=\d+|review pending page \d+) -->"
 )
 
 
@@ -139,6 +143,7 @@ def build_intensive_reading_note(
     *,
     source_id: str,
     prompt_rules_version: str = DEFAULT_PROMPT_RULES_VERSION,
+    review_pending: int | None = None,
 ) -> dict[str, Any]:
     """Build a stable note skeleton from accepted OCR evidence only.
 
@@ -161,9 +166,25 @@ def build_intensive_reading_note(
     )
     if not page_records:
         raise MarkdownNoteError("accepted OCR pages are required")
+    chapter_review_pages = tuple(
+        page for page, _evidence, _input, blocks in page_records if not blocks
+    )
+    if review_pending is None:
+        review_pending = len(chapter_review_pages)
+    if (
+        not isinstance(review_pending, int)
+        or isinstance(review_pending, bool)
+        or review_pending < len(chapter_review_pages)
+    ):
+        raise MarkdownNoteError("review pending count is invalid")
     source_refs: list[str] = []
     evidence_lines: list[str] = []
+    accepted_pages = 0
     for page, evidence, page_input, blocks in page_records:
+        if not blocks:
+            evidence_lines.append(f"- <!-- pdf2md: review pending page {page} -->")
+            continue
+        accepted_pages += 1
         for block in blocks:
             block_id = block.id
             citation = f"[src:{source_id}:p{page}:{block_id}]"
@@ -174,6 +195,8 @@ def build_intensive_reading_note(
                     f"- {citation}（PDF 第 {page} 页；OCR 输入指纹 `{page_input}`；"
                     f"证据指纹 `{evidence}`）：{text}"
                 )
+    if not accepted_pages:
+        raise MarkdownNoteError("chapter requires accepted OCR pages")
     if not evidence_lines:
         raise MarkdownNoteError("accepted OCR contains no text evidence")
 
@@ -189,6 +212,8 @@ def build_intensive_reading_note(
         "page_start": chapter["page_start"],
         "page_end": chapter["page_end"],
         "citation_ids": source_refs,
+        "review_pending": review_pending,
+        "review_pages": list(chapter_review_pages),
     }
     sections: list[dict[str, object]] = [
         {
@@ -256,7 +281,8 @@ def validate_intensive_reading_note(value: Any) -> None:
     for diagram in value["mermaid"]:
         validate_mermaid_block(diagram["source"], expected_type=diagram["type"])
     markdown = value["markdown"]
-    if _DANGEROUS_RE.search(markdown) or "<" in markdown:
+    sanitized = _REVIEW_COMMENT_RE.sub("", markdown)
+    if _DANGEROUS_RE.search(sanitized) or "<" in sanitized:
         raise MarkdownNoteError("markdown contains unsafe markup")
     if markdown.count("```") != 4:
         raise MarkdownNoteError("markdown fence count is invalid")
@@ -268,6 +294,36 @@ def validate_intensive_reading_note(value: Any) -> None:
         raise MarkdownNoteError("markdown citation is missing")
     if set(item["key"] for item in value["sections"]) != {item[0] for item in SECTION_ORDER}:
         raise MarkdownNoteError("note sections are incomplete")
+    review_pending = metadata.get("review_pending", 0)
+    review_pages = metadata.get("review_pages", [])
+    if (
+        not isinstance(review_pending, int)
+        or isinstance(review_pending, bool)
+        or review_pending < 0
+    ):
+        raise MarkdownNoteError("review pending count is invalid")
+    if (
+        not isinstance(review_pages, list)
+        or review_pages != sorted(review_pages)
+        or len(review_pages) != len(set(review_pages))
+        or any(
+            not isinstance(page, int) or isinstance(page, bool) or page < 1
+            for page in review_pages
+        )
+        or len(review_pages) > review_pending
+    ):
+        raise MarkdownNoteError("review pages are invalid")
+    if review_pending:
+        if (
+            markdown.splitlines()[0].strip()
+            != f"<!-- pdf2md: review_pending={review_pending} -->"
+        ):
+            raise MarkdownNoteError("review pending header is missing")
+        for page in review_pages:
+            if f"<!-- pdf2md: review pending page {page} -->" not in markdown:
+                raise MarkdownNoteError("review placeholder is missing")
+    elif review_pages or "<!-- pdf2md:" in markdown:
+        raise MarkdownNoteError("unexpected review markup")
 
 
 def validate_mermaid_block(source: str, *, expected_type: str | None = None) -> str:
@@ -381,6 +437,16 @@ def _accepted_pages(
         raise MarkdownNoteError("chapter OCR page sequence is incomplete")
     result: list[_AcceptedPage] = []
     for record in selected:
+        if record.get("status") == PageStatus.REVIEW_PENDING.value:
+            result.append(
+                _AcceptedPage(
+                    page=_page_number(record),
+                    evidence="",
+                    input_fingerprint="",
+                    blocks=(),
+                )
+            )
+            continue
         decision = record.get("decision")
         payload = decision.get("payload") if isinstance(decision, dict) else None
         if not isinstance(payload, dict) or payload.get("status") != "accepted":
@@ -446,15 +512,25 @@ def _render_markdown(
     sections: Iterable[Mapping[str, object]],
     mermaid: Sequence[Mapping[str, object]],
 ) -> str:
-    lines = [
-        f"# {_safe_markdown_text(chapter['number'])} {_safe_markdown_text(chapter['title'])}",
-        "",
-        f"> 来源：PDF 第 {metadata['page_start']}–{metadata['page_end']} 页",
-        f"> 输入指纹：`{metadata['input_fingerprint']}`",
-        f"> 章节指纹：`{metadata['chapter_fingerprint']}`",
-        f"> OCR 证据指纹：`{metadata['evidence_fingerprint']}`",
-        f"> 精读规则版本：`{metadata['prompt_rules_version']}`",
-    ]
+    lines: list[str] = []
+    review_pending = metadata.get("review_pending", 0)
+    if (
+        isinstance(review_pending, int)
+        and not isinstance(review_pending, bool)
+        and review_pending > 0
+    ):
+        lines.extend([f"<!-- pdf2md: review_pending={review_pending} -->", ""])
+    lines.extend(
+        [
+            f"# {_safe_markdown_text(chapter['number'])} {_safe_markdown_text(chapter['title'])}",
+            "",
+            f"> 来源：PDF 第 {metadata['page_start']}–{metadata['page_end']} 页",
+            f"> 输入指纹：`{metadata['input_fingerprint']}`",
+            f"> 章节指纹：`{metadata['chapter_fingerprint']}`",
+            f"> OCR 证据指纹：`{metadata['evidence_fingerprint']}`",
+            f"> 精读规则版本：`{metadata['prompt_rules_version']}`",
+        ]
+    )
     if metadata.get("model"):
         lines.append(f"> 模型：`{metadata['model']}`")
     if metadata.get("prompt_fingerprint"):

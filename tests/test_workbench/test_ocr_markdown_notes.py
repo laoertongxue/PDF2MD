@@ -108,6 +108,15 @@ def _inputs() -> tuple[dict, dict, list[dict]]:
     )
 
 
+def _review_page(number: int) -> dict:
+    return {
+        "page": number,
+        "status": "review_pending",
+        "page_input_fingerprint": "book-input",
+        "evidence_fingerprint": "",
+    }
+
+
 def test_builds_stable_note_with_citations_slots_and_previewable_mermaid():
     tree, confirmation, pages = _inputs()
     first = build_intensive_reading_note(
@@ -311,3 +320,50 @@ def test_validation_rejects_tampered_metadata_or_fences():
     note["markdown"] = note["markdown"].replace("```mermaid", "```python", 1)
     with pytest.raises(MarkdownNoteError):
         validate_intensive_reading_note(note)
+
+
+def test_review_pending_page_becomes_placeholder_with_top_counter():
+    tree, confirmation, _pages = _inputs()
+    pages = [_page(2, "第一章 战略管理", "战略是组织的长期方向。"), _review_page(3)]
+
+    note = build_intensive_reading_note(
+        tree,
+        confirmation,
+        pages,
+        source_id="source-1",
+        review_pending=1,
+    )
+
+    assert note["markdown"].startswith("<!-- pdf2md: review_pending=1 -->\n")
+    assert "<!-- pdf2md: review pending page 3 -->" in note["markdown"]
+    assert "[src:source-1:p2" in note["markdown"]
+    assert note["metadata"]["review_pending"] == 1
+    assert note["metadata"]["review_pages"] == [3]
+    validate_intensive_reading_note(note)
+
+
+def test_review_only_chapter_is_rejected():
+    tree, confirmation, _pages = _inputs()
+    pages = [_review_page(2), _review_page(3)]
+
+    with pytest.raises(MarkdownNoteError, match="accepted OCR pages"):
+        build_intensive_reading_note(tree, confirmation, pages, source_id="source-1")
+
+
+def test_validate_rejects_missing_review_placeholder():
+    tree, confirmation, _pages = _inputs()
+    pages = [_page(2, "第一章 战略管理", "战略是组织的长期方向。"), _review_page(3)]
+    note = build_intensive_reading_note(
+        tree,
+        confirmation,
+        pages,
+        source_id="source-1",
+        review_pending=1,
+    )
+    broken = dict(note)
+    broken["markdown"] = note["markdown"].replace(
+        "<!-- pdf2md: review pending page 3 -->", ""
+    )
+
+    with pytest.raises(MarkdownNoteError, match="review placeholder"):
+        validate_intensive_reading_note(broken)

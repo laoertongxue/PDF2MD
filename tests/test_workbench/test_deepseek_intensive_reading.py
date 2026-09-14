@@ -116,6 +116,22 @@ def _accepted_base_note():
     return build_intensive_reading_note(tree, confirmation, pages, source_id="book-1")
 
 
+def _accepted_review_base_note():
+    tree, confirmation, pages = _inputs()
+    pages = [
+        pages[0],
+        {
+            "page": 3,
+            "status": "review_pending",
+            "page_input_fingerprint": "book-input",
+            "evidence_fingerprint": "",
+        },
+    ]
+    return build_intensive_reading_note(
+        tree, confirmation, pages, source_id="book-1", review_pending=1
+    )
+
+
 class FakeClient:
     model = MODEL_NAME
 
@@ -259,3 +275,18 @@ def test_client_rejects_non_canonical_model_and_non_https_url():
         DeepSeekClient("sk-test", "deepseek-chat")
     with pytest.raises(DeepSeekError, match="HTTPS"):
         DeepSeekClient("sk-test", MODEL_NAME, base_url="http://localhost")
+
+
+def test_generator_preserves_review_pending_markup():
+    base = _accepted_review_base_note()
+    output = _generated(base)
+    prompt = build_generation_prompt(base)
+    output["metadata"]["prompt_fingerprint"] = prompt_fingerprint(prompt)
+    client = FakeClient(json.dumps(output, ensure_ascii=False))
+
+    result = DeepSeekIntensiveReadingGenerator(client).generate(base)
+
+    assert result["metadata"]["review_pending"] == 1
+    assert result["metadata"]["review_pages"] == [3]
+    assert "<!-- pdf2md: review_pending=1 -->" in result["markdown"]
+    assert "<!-- pdf2md: review pending page 3 -->" in result["markdown"]
