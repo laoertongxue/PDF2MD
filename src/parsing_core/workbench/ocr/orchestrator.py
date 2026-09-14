@@ -802,7 +802,6 @@ class OcrOrchestrator:
             raise _BatchCancelled() from None
         else:
             if value["input_fingerprint"] == fingerprint and value["run_config"] == run_config:
-                value["schema_version"] = _BATCH_STATE_SCHEMA_VERSION
                 return value
         return {
             "schema_version": _BATCH_STATE_SCHEMA_VERSION,
