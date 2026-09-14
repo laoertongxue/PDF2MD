@@ -1310,7 +1310,7 @@ git commit -m "feat(web): configure codex path and baidu key in settings"
 - 创建：`parsing-core-app/src/components/workbench/EnvironmentCard.test.tsx`
 - 修改：`parsing-core-app/src/components/workbench/CourseList.tsx`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 创建 `EnvironmentCard.test.tsx`：
 
@@ -1365,12 +1365,12 @@ it("collapses when every dependency is ready or optional", async () => {
 });
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`cd parsing-core-app && npx vitest run src/components/workbench/EnvironmentCard.test.tsx`
 预期：FAIL（模块不存在）
 
-- [ ] **步骤 3：实现自检卡**
+- [x] **步骤 3：实现自检卡**
 
 创建 `EnvironmentCard.tsx`：
 
@@ -1482,16 +1482,16 @@ export default function EnvironmentCard() {
 
 说明：`detail_code` 的 `DETAIL_LABELS` 映射在列表项中作为辅助说明展示（实现时挂在对应项下，测试只断言核心文案）。
 
-- [ ] **步骤 4：挂载到工作台首页**
+- [x] **步骤 4：挂载到工作台首页**
 
 在 `CourseList.tsx` 顶部（标题/创建表单上方）渲染 `<EnvironmentCard />`，import 路径 `./EnvironmentCard`。
 
-- [ ] **步骤 5：运行测试验证通过**
+- [x] **步骤 5：运行测试验证通过**
 
 运行：`cd parsing-core-app && npx vitest run src/components/workbench/EnvironmentCard.test.tsx src/components/workbench/CourseList.test.tsx`
 预期：PASS
 
-- [ ] **步骤 6：Commit**
+- [x] **步骤 6：Commit**
 
 ```bash
 git add parsing-core-app/src/components/workbench/EnvironmentCard.tsx parsing-core-app/src/components/workbench/EnvironmentCard.test.tsx parsing-core-app/src/components/workbench/CourseList.tsx
@@ -1502,7 +1502,7 @@ git commit -m "feat(web): add environment readiness card"
 
 ## 任务 9：全量验证
 
-- [ ] **步骤 1：后端门禁**
+- [x] **步骤 1：后端门禁**
 
 ```bash
 .venv/bin/ruff format --check src tests
@@ -1511,21 +1511,21 @@ git commit -m "feat(web): add environment readiness card"
 .venv/bin/python -m pytest tests/ -q --cov=parsing_core --cov-fail-under=85
 ```
 
-- [ ] **步骤 2：前端与 Rust 门禁**
+- [x] **步骤 2：前端与 Rust 门禁**
 
 ```bash
 cd parsing-core-app && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build
 cd src-tauri && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
 ```
 
-- [ ] **步骤 3：手工验收**
+- [x] **步骤 3：手工验收**
 
 1. 在未配置 Codex 的环境启动应用：首页自检卡显示 Codex 待配置；进入设置选择文件并保存后状态变为已就绪。
 2. 清空百度 Key：自检卡百度显示"可选"；保存任意 Key 后显示掩码。
 3. 未配置 DeepSeek 时触发章节精读：错误提示包含"去配置 DeepSeek"按钮。
 4. 记录结果；若失败，回到对应任务修复。
 
-- [ ] **步骤 4：Commit（如手工验收有修正）**
+- [x] **步骤 4：Commit（如手工验收有修正）**
 
 ```bash
 git add -A
