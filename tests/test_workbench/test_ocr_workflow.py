@@ -15,7 +15,11 @@ from test_ocr_orchestrator import FakeEngines, _orchestrator, _run
 
 from parsing_core.workbench.ocr import workflow as workflow_module
 from parsing_core.workbench.ocr.chapters import detect_chapter_tree
-from parsing_core.workbench.ocr.orchestrator import BatchRun, BatchStatus
+from parsing_core.workbench.ocr.markdown_notes import (
+    build_intensive_reading_note,
+    validate_intensive_reading_note,
+)
+from parsing_core.workbench.ocr.orchestrator import BatchRun, BatchStatus, PageStatus
 from parsing_core.workbench.ocr.workflow import (
     OcrWorkflow,
     WorkflowBlockedError,
@@ -131,6 +135,60 @@ def _review_workflow_fixture(tmp_path: Path):
     orchestrator.baidu = None
     result = _run(orchestrator, engines)
     assert result.status is BatchStatus.REVIEW_REQUIRED
+    return engines, tmp_path / "ocr-state", result
+
+
+class MixedReviewEngines(FakeEngines):
+    def _vision(self, pdf_path, *, page, dpi, languages, **_control):
+        result = super()._vision(pdf_path, page=page, dpi=dpi, languages=languages, **_control)
+        result.observation["page"] = {
+            "number": page,
+            "width": result.width,
+            "height": result.height,
+        }
+        if page == 2:
+            block = result.observation["blocks"][0]
+            block["text"] = "冲突文本"
+            block["candidates"] = [{"text": "冲突文本", "confidence": 0.99}]
+        return result
+
+    def _transcribe(
+        self, image_path, *, page_number, width, height, expected_image_sha256, **_control
+    ):
+        result = super()._transcribe(
+            image_path,
+            page_number=page_number,
+            width=width,
+            height=height,
+            expected_image_sha256=expected_image_sha256,
+            **_control,
+        )
+        result.payload["page"] = {"number": page_number, "width": width, "height": height}
+        if page_number == 2:
+            result.payload["blocks"][0]["text"] = "一致文本"
+        return result
+
+    def _adjudicate(self, *args, page_number, **kwargs):
+        result = super()._adjudicate(*args, page_number=page_number, **kwargs)
+        if page_number == 1:
+            result.payload["final_blocks"][0]["text"] = "1 战略管理"
+        return result
+
+
+def _mixed_review_fixture(tmp_path: Path):
+    engines = MixedReviewEngines()
+    orchestrator = _orchestrator(tmp_path, engines)
+    orchestrator.baidu = None
+    result = orchestrator.run_batch(
+        engines.pdf_path,
+        pages=[1, 2],
+        dpi=300,
+        languages=["zh-Hans"],
+        sample_rate=0.0,
+    )
+    assert result.status is BatchStatus.REVIEW_REQUIRED
+    assert result.pages[1].status is PageStatus.COMPLETED
+    assert result.pages[2].status is PageStatus.REVIEW_PENDING
     return engines, tmp_path / "ocr-state", result
 
 
@@ -7042,3 +7100,85 @@ def test_markdown_publication_requires_review_markup(tmp_path: Path):
         )
         is True
     )
+
+
+def test_mixed_batch_isolates_only_conflict_pages(tmp_path: Path):
+    _engines, state_root, _result = _mixed_review_fixture(tmp_path)
+
+    final = json.loads((state_root / "batch-final.json").read_text(encoding="utf-8"))
+
+    assert final["status"] == "review_required"
+    assert final["pages"]["1"]["status"] == "completed"
+    assert final["pages"]["2"]["status"] == "review_pending"
+    assert final["review_pages"] == [
+        {"page": 2, "reason": "conflict", "alignment_status": "conflict"}
+    ]
+
+
+def test_review_note_marks_pending_pages_and_keeps_comment_contract(tmp_path: Path):
+    _engines, state_root, _result = _mixed_review_fixture(tmp_path)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("review work must not rerun"),
+    )
+    final, pages = workflow.completed_evidence()
+    tree = workflow.detect_chapters()
+    confirmation = build_confirmation(tree, tree["chapters"][0]["id"])
+
+    note = build_intensive_reading_note(
+        tree,
+        confirmation,
+        pages,
+        source_id="source-1",
+        review_pending=len(final["review_pages"]),
+    )
+
+    assert "<!-- pdf2md: review_pending=1 -->" in note["markdown"]
+    assert "<!-- pdf2md: review pending page 2 -->" in note["markdown"]
+    assert "1 战略管理" in note["markdown"]
+    assert note["metadata"]["review_pending"] == 1
+    assert note["metadata"]["review_pages"] == [2]
+    validate_intensive_reading_note(note)
+
+
+def test_publish_review_note_records_pending_pages(tmp_path: Path):
+    _engines, state_root, _result = _mixed_review_fixture(tmp_path)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("review work must not rerun"),
+    )
+    final, _pages = workflow.completed_evidence()
+    tree = workflow.detect_chapters()
+    confirmation = build_confirmation(tree, tree["chapters"][0]["id"])
+    workflow_module.persist_chapter_confirmation(workflow.paths.confirmation, confirmation)
+    metadata = _note_metadata(final, tree, confirmation)
+    metadata["review_pending"] = 1
+    metadata["review_pages"] = [2]
+    markdown = _valid_markdown(final, tree, confirmation).replace(
+        "## 原文证据\n",
+        "## 原文证据\n<!-- pdf2md: review pending page 2 -->\n",
+    )
+    markdown = "<!-- pdf2md: review_pending=1 -->\n" + markdown
+
+    def generate(output_path: Path):
+        output_path.write_text(markdown, encoding="utf-8")
+        return {"markdown": markdown, "metadata": metadata}
+
+    _note, artifact = workflow.generate_and_publish(
+        generate,
+        expected_final=final,
+        expected_tree=tree,
+        confirmation=confirmation,
+    )
+
+    assert "<!-- pdf2md: review pending page 2 -->" in artifact.read_text(encoding="utf-8")
+    manifest = json.loads((state_root / "note-publication.json").read_text(encoding="utf-8"))
+    assert manifest["metadata"]["review_pending"] == 1
+    payload = workflow.status()
+    assert payload["status"] == "review_required"
+    assert payload["publishable"] is True
+    assert payload["review_pages"] == [
+        {"page": 2, "reason": "conflict", "alignment_status": "conflict"}
+    ]

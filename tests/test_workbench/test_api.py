@@ -12,8 +12,10 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+from test_ocr_orchestrator import _orchestrator
 from test_ocr_workflow import (
     _complete_workflow_fixture,
+    _mixed_review_fixture,
     _note_metadata,
     _prepare_chapter_context,
     _review_workflow_fixture,
@@ -3999,3 +4001,34 @@ def test_ocr_review_route_starts_review_with_persisted_config(tmp_path, monkeypa
         "pages": (1,),
         "sample_rate": 0.0,
     }
+
+
+def test_ocr_review_route_upgrades_mixed_review_final(tmp_path, monkeypatch):
+    c = client(tmp_path)
+    root = course_root(tmp_path)
+    fixture_root = root / "ocr-fixture"
+    fixture_root.mkdir()
+    engines, state_root, _result = _mixed_review_fixture(fixture_root)
+    _course, source = _registered_pdf_source(c, root, fixture_root / "book.pdf")
+    workflow = OcrWorkflow(
+        source_path=fixture_root / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: _orchestrator(fixture_root, engines),
+    )
+    monkeypatch.setattr(routes_workbench, "_ocr_workflow", lambda *args, **kwargs: workflow)
+    monkeypatch.setattr(routes_workbench, "resolve_baidu_api_key", lambda: "baidu-key")
+
+    response = c.post(f"/api/workbench/sources/{source['id']}/ocr/review")
+
+    assert response.status_code == 200
+    payload = _poll_ocr_status(c, source["id"], lambda value: value["status"] == "completed")
+    assert payload["status"] == "completed"
+    assert payload["review_pending"] == 0
+    assert payload["review_pages"] is None
+    final = json.loads((state_root / "batch-final.json").read_text(encoding="utf-8"))
+    assert final["status"] == "completed"
+    assert final["pages"]["1"]["status"] == "completed"
+    assert final["pages"]["2"]["status"] == "completed"
+    assert engines.calls.count("vision:1") == 1
+    assert engines.calls.count("vision:2") == 2
+    assert "baidu:2" in engines.calls
