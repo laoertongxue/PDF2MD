@@ -232,6 +232,7 @@ class WorkflowStatus(StrEnum):
     IDLE = "idle"
     RUNNING = "running"
     COMPLETED = "completed"
+    REVIEW_REQUIRED = "review_required"
     BLOCKED = "blocked"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -416,11 +417,11 @@ def status_payload(
     error: str | None = None,
 ) -> dict[str, Any]:
     paths = workflow_paths(state_root)
-    completed_final = None
-    if status is WorkflowStatus.COMPLETED:
+    final: dict[str, Any] | None = None
+    if status in {WorkflowStatus.COMPLETED, WorkflowStatus.REVIEW_REQUIRED}:
         try:
             _validate_finalized_migration_receipts(paths)
-            completed_final = _read_completed_ocr_final(paths.final, source_path)
+            status, final = _read_ocr_final(paths.final, source_path)
         except _LegacyMigrationError as exc:
             status = WorkflowStatus.BLOCKED
             error = exc.code
@@ -432,7 +433,7 @@ def status_payload(
         source_path=source_path,
         paths=paths,
         error=error,
-        completed_final=completed_final,
+        completed_final=final,
     )
 
 
@@ -446,12 +447,22 @@ def _status_payload_from_snapshot(
 ) -> dict[str, Any]:
     published = False
     published_path: Path | None = None
+    review_pages: list[dict[str, Any]] | None = None
+    review_pending = 0
     if status is WorkflowStatus.COMPLETED:
         if completed_final is None:
             status = WorkflowStatus.BLOCKED
             error = "ocr_evidence_invalid"
         else:
             published, error, published_path = _publication_status(completed_final, paths)
+    elif status is WorkflowStatus.REVIEW_REQUIRED:
+        if completed_final is None:
+            status = WorkflowStatus.BLOCKED
+            error = "ocr_evidence_invalid"
+        else:
+            published = True
+            review_pages = list(completed_final.get("review_pages") or [])
+            review_pending = int(completed_final.get("review_pending") or 0)
     return {
         "status": status.value,
         "source_path": str(Path(source_path).expanduser()),
@@ -460,6 +471,8 @@ def _status_payload_from_snapshot(
         "publishable": published,
         "markdown_path": str(published_path) if published_path is not None else None,
         "chapter_tree_path": str(paths.chapter_tree) if paths.chapter_tree.is_file() else None,
+        "review_pages": review_pages,
+        "review_pending": review_pending,
     }
 
 
@@ -503,6 +516,41 @@ def _completed_ocr_final_is_valid(final: dict[str, Any], source_path: str | Path
         return True
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
         return False
+
+
+def _review_ocr_final_is_valid(final: dict[str, Any], source_path: str | Path) -> bool:
+    try:
+        if final.get("status") != BatchStatus.REVIEW_REQUIRED.value or not _is_batch_state(final):
+            return False
+        snapshot = final.get("pdf_snapshot")
+        if not isinstance(snapshot, dict) or snapshot != _snapshot_pdf(source_path):
+            return False
+        input_fingerprint = final.get("input_fingerprint")
+        pages = final.get("pages")
+        if not isinstance(input_fingerprint, str) or not input_fingerprint:
+            return False
+        if not isinstance(pages, dict) or not pages:
+            return False
+        page_numbers = sorted(int(key) for key in pages)
+        if page_numbers != list(range(1, len(page_numbers) + 1)):
+            return False
+        validator = OcrOrchestrator(
+            vision=None, codex=None, baidu=None, state_root=Path(source_path).parent
+        )
+        return validator._review_final_is_valid(final)
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return False
+
+
+def _read_ocr_final(
+    final_path: Path, source_path: str | Path
+) -> tuple[WorkflowStatus, dict[str, Any]]:
+    final = _read_regular_json(final_path)
+    if _completed_ocr_final_is_valid(final, source_path):
+        return WorkflowStatus.COMPLETED, final
+    if _review_ocr_final_is_valid(final, source_path):
+        return WorkflowStatus.REVIEW_REQUIRED, final
+    raise ValueError("OCR final evidence is invalid")
 
 
 def _legacy_v1_core_is_valid(
@@ -5872,7 +5920,14 @@ class OcrWorkflow:
             return
         self._resume_interrupted_state()
 
-    def start(self, *, dpi: int = 300, languages: tuple[str, ...] = ("zh-Hans", "en-US")) -> None:
+    def start(
+        self,
+        *,
+        dpi: int = 300,
+        languages: tuple[str, ...] = ("zh-Hans", "en-US"),
+        pages: tuple[int, ...] | None = None,
+        sample_rate: float = 0.05,
+    ) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise ValueError("OCR 任务正在运行")
@@ -5884,11 +5939,31 @@ class OcrWorkflow:
                 self._cancel.clear()
                 self._error = None
                 self._status = WorkflowStatus.RUNNING
-                self._launch_thread(dpi=dpi, languages=languages)
+                self._launch_thread(
+                    dpi=dpi,
+                    languages=languages,
+                    pages=pages,
+                    sample_rate=sample_rate,
+                )
             except Exception:
                 self._status = WorkflowStatus.IDLE
                 self._release_worker_claim()
                 raise
+
+    def start_review(self) -> None:
+        try:
+            status, final = _read_ocr_final(self.paths.final, self.source_path)
+        except (OSError, ValueError) as exc:
+            raise ValueError("ocr_review_not_ready") from exc
+        if status is not WorkflowStatus.REVIEW_REQUIRED or final is None:
+            raise ValueError("ocr_review_not_ready")
+        run_config = final["run_config"]
+        self.start(
+            dpi=int(run_config["dpi"]),
+            languages=tuple(str(language) for language in run_config["languages"]),
+            pages=tuple(int(page) for page in run_config["pages"]),
+            sample_rate=float(run_config["sample_rate"]),
+        )
 
     def _resume_interrupted_state(self) -> None:
         try:
@@ -5982,6 +6057,7 @@ class OcrWorkflow:
                 status
                 in {
                     WorkflowStatus.COMPLETED,
+                    WorkflowStatus.REVIEW_REQUIRED,
                     WorkflowStatus.BLOCKED,
                     WorkflowStatus.FAILED,
                     WorkflowStatus.CANCELLED,
@@ -5992,12 +6068,12 @@ class OcrWorkflow:
                 return WorkflowStatus.RUNNING, None, None
             if status is WorkflowStatus.IDLE:
                 return self._persisted_status()
-            if status is WorkflowStatus.COMPLETED:
+            if status in {WorkflowStatus.COMPLETED, WorkflowStatus.REVIEW_REQUIRED}:
                 try:
-                    final = _read_completed_ocr_final(self.paths.final, self.source_path)
+                    final_status, final = _read_ocr_final(self.paths.final, self.source_path)
                 except (OSError, ValueError):
                     return WorkflowStatus.BLOCKED, "ocr_evidence_invalid", None
-                return WorkflowStatus.COMPLETED, None, final
+                return final_status, None, final
             return status, error, None
 
     def _run(
@@ -6049,7 +6125,10 @@ class OcrWorkflow:
     def completed_evidence(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         with self._lock:
             status, _error, final = self._effective_status()
-            if status is not WorkflowStatus.COMPLETED or final is None:
+            if (
+                status not in {WorkflowStatus.COMPLETED, WorkflowStatus.REVIEW_REQUIRED}
+                or final is None
+            ):
                 raise ValueError("OCR 尚未完成，不能读取证据")
             return final, _normalized_completed_pages(final)
 
@@ -6129,13 +6208,13 @@ class OcrWorkflow:
         if self._migration_error is not None:
             return WorkflowStatus.BLOCKED, self._migration_error, None
         try:
-            final = _read_completed_ocr_final(self.paths.final, self.source_path)
+            final_status, final = _read_ocr_final(self.paths.final, self.source_path)
         except FileNotFoundError:
             pass
         except (OSError, ValueError):
             return WorkflowStatus.BLOCKED, "ocr_evidence_invalid", None
         else:
-            return WorkflowStatus.COMPLETED, None, final
+            return final_status, None, final
 
         try:
             value = _read_regular_json(self.paths.state)
@@ -6146,7 +6225,7 @@ class OcrWorkflow:
         status, error = restored_workflow_status(value)
         if status is WorkflowStatus.RUNNING:
             return WorkflowStatus.BLOCKED, "ocr_state_interrupted", None
-        if status is WorkflowStatus.COMPLETED:
+        if status in {WorkflowStatus.COMPLETED, WorkflowStatus.REVIEW_REQUIRED}:
             return WorkflowStatus.BLOCKED, "ocr_evidence_invalid", None
         return status, error, None
 

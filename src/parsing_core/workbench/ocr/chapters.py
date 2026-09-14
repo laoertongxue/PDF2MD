@@ -16,6 +16,7 @@ from typing import Any, Literal, TypedDict
 from jsonschema import Draft202012Validator
 
 from .atomic_io import atomic_replace_bytes
+from .orchestrator import PageStatus
 
 
 class ChapterConfirmationError(ValueError):
@@ -323,6 +324,8 @@ def _extract_page(record: object) -> _PageEvidence:
     page = _page_number(record)
     if not isinstance(record, dict):
         raise ChapterConfirmationError("OCR page number is invalid")
+    if record.get("status") == PageStatus.REVIEW_PENDING.value:
+        return _PageEvidence(page, (), "review_pending", "review_pending")
     decision = record.get("decision") if isinstance(record, dict) else None
     payload = decision.get("payload") if isinstance(decision, dict) else None
     if not isinstance(payload, dict) or payload.get("status") != "accepted":

@@ -15,7 +15,7 @@ from test_ocr_orchestrator import FakeEngines, _orchestrator, _run
 
 from parsing_core.workbench.ocr import workflow as workflow_module
 from parsing_core.workbench.ocr.chapters import detect_chapter_tree
-from parsing_core.workbench.ocr.orchestrator import BatchStatus
+from parsing_core.workbench.ocr.orchestrator import BatchRun, BatchStatus
 from parsing_core.workbench.ocr.workflow import (
     OcrWorkflow,
     WorkflowBlockedError,
@@ -123,6 +123,15 @@ def _complete_workflow_fixture(tmp_path: Path, *, publish_note: bool = True):
         confirmation=confirmation,
     )
     return engines, state_root, final
+
+
+def _review_workflow_fixture(tmp_path: Path):
+    engines = FakeEngines(codex_text="不同文本")
+    orchestrator = _orchestrator(tmp_path, engines)
+    orchestrator.baidu = None
+    result = _run(orchestrator, engines)
+    assert result.status is BatchStatus.REVIEW_REQUIRED
+    return engines, tmp_path / "ocr-state", result
 
 
 def _legacy_v1_final(final: dict) -> dict:
@@ -6869,3 +6878,113 @@ def test_build_confirmation_rejects_unknown_chapter():
     }
     with pytest.raises(ValueError, match="chapter not found"):
         build_confirmation(tree, "missing")
+
+
+def test_review_required_status_payload_lists_review_pages(tmp_path: Path):
+    _engines, state_root, _result = _review_workflow_fixture(tmp_path)
+
+    payload = status_payload(
+        status=WorkflowStatus.REVIEW_REQUIRED,
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+    )
+
+    assert payload["status"] == "review_required"
+    assert payload["publishable"] is True
+    assert payload["error"] is None
+    assert payload["review_pending"] == 1
+    assert payload["review_pages"] == [
+        {"page": 1, "reason": "conflict", "alignment_status": "conflict"}
+    ]
+
+
+def test_review_workflow_restart_reports_review_required(tmp_path: Path):
+    _engines, state_root, _result = _review_workflow_fixture(tmp_path)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("review work must not rerun"),
+    )
+
+    payload = workflow.status()
+
+    assert payload["status"] == "review_required"
+    assert payload["publishable"] is True
+    assert payload["review_pending"] == 1
+    final, pages = workflow.completed_evidence()
+    assert final["status"] == "review_required"
+    assert pages[0]["status"] == "review_pending"
+
+
+def test_review_required_final_validation_rejects_tampering(tmp_path: Path):
+    _engines, state_root, _result = _review_workflow_fixture(tmp_path)
+    final_path = state_root / "batch-final.json"
+    final = json.loads(final_path.read_text(encoding="utf-8"))
+    final["review_pending"] = 2
+    workflow_module._atomic_json(final_path, final)
+
+    payload = status_payload(
+        status=WorkflowStatus.REVIEW_REQUIRED,
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["error"] == "ocr_evidence_invalid"
+
+
+def test_start_review_uses_persisted_run_config(tmp_path: Path):
+    _engines, state_root, _result = _review_workflow_fixture(tmp_path)
+    observed: list[dict[str, object]] = []
+
+    class StubOrchestrator:
+        def run_batch(self, source_path, *, pages, dpi, languages, sample_rate, **kwargs):
+            observed.append(
+                {
+                    "pages": tuple(pages),
+                    "dpi": dpi,
+                    "languages": tuple(languages),
+                    "sample_rate": sample_rate,
+                }
+            )
+            return BatchRun(BatchStatus.COMPLETED, {})
+
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: StubOrchestrator(),
+    )
+
+    workflow.start_review()
+    assert workflow._thread is not None
+    workflow._thread.join(timeout=5)
+
+    assert observed == [
+        {"pages": (1,), "dpi": 300, "languages": ("zh-Hans",), "sample_rate": 0}
+    ]
+
+
+def test_start_review_rejects_completed_final(tmp_path: Path):
+    _engines, state_root, _final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("completed work must not rerun"),
+    )
+
+    with pytest.raises(ValueError, match="ocr_review_not_ready"):
+        workflow.start_review()
+
+
+def test_detect_chapters_accepts_review_final(tmp_path: Path):
+    _engines, state_root, _result = _review_workflow_fixture(tmp_path)
+    workflow = OcrWorkflow(
+        source_path=tmp_path / "book.pdf",
+        state_root=state_root,
+        orchestrator_factory=lambda _cancel: pytest.fail("review work must not rerun"),
+    )
+
+    tree = workflow.detect_chapters()
+
+    assert tree["input_fingerprint"]
+    assert isinstance(tree["chapters"], list)
