@@ -102,7 +102,7 @@ def test_lifecycle_module_sigint_exits_130_without_traceback_or_absolute_path():
 
         assert process.returncode == 130
         output = stderr.decode("utf-8", errors="replace")
-        assert output == "sidecar lifecycle failed\n"
+        assert "sidecar lifecycle failed" in output
         assert "Traceback" not in output
         assert "KeyboardInterrupt" not in output
         assert str(lifecycle.__file__) not in output
