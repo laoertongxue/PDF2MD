@@ -58,7 +58,7 @@
 - 修改：`src/parsing_core/workbench/ocr/orchestrator.py`（枚举 69-87、`run_batch` 294-440、`_run_page` 533-548、`_completed_final_for_request` 714-766、`_completed_evidence_is_valid` 773-893、`_is_batch_state` 1265-1358、`_is_page_state` 1361-1374）
 - 测试：`tests/test_workbench/test_ocr_orchestrator.py`（文件末尾追加；顶部补 `import copy`）
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 在 `tests/test_workbench/test_ocr_orchestrator.py` 顶部把 `import hashlib` 之前的 import 区补一行（保持字母序放在 `import json` 之后的位置不重要，只要存在）：
 
@@ -198,13 +198,13 @@ def test_legacy_schema_two_state_without_review_fields_still_loads(tmp_path):
     assert state["schema_version"] == 3
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_ocr_orchestrator.py -q -k "isolated or review_final or legacy_schema_two or exact_versioned"`
 
 预期：FAIL（`AttributeError: REVIEW_REQUIRED`、`PageStatus` 无 `REVIEW_PENDING`）。
 
-- [ ] **步骤 3：实现状态、隔离原因与 `_run_page` 隔离**
+- [x] **步骤 3：实现状态、隔离原因与 `_run_page` 隔离**
 
 在 `src/parsing_core/workbench/ocr/orchestrator.py` 中做以下修改。
 
@@ -329,7 +329,7 @@ class _BatchState(TypedDict):
                 image = self._call_engine(self.image_loader, image_path, deadline=deadline)
 ```
 
-- [ ] **步骤 4：实现批次循环、final 发布与校验**
+- [x] **步骤 4：实现批次循环、final 发布与校验**
 
 （a）`run_batch` 开头（现 294-322 行）替换为：
 
@@ -811,13 +811,13 @@ def _is_page_state(value: object) -> TypeGuard[_PageState]:
                 return value
 ```
 
-- [ ] **步骤 5：运行测试验证通过**
+- [x] **步骤 5：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_ocr_orchestrator.py -q`
 
 预期：PASS（原有用例 + 6 个新用例；`exact_versioned` 断言已改为 3）。
 
-- [ ] **步骤 6：Lint 与类型检查**
+- [x] **步骤 6：Lint 与类型检查**
 
 运行：
 
@@ -828,7 +828,7 @@ def _is_page_state(value: object) -> TypeGuard[_PageState]:
 
 预期：无错误。
 
-- [ ] **步骤 7：Commit**
+- [x] **步骤 7：Commit**
 
 ```bash
 git add src/parsing_core/workbench/ocr/orchestrator.py tests/test_workbench/test_ocr_orchestrator.py
@@ -844,7 +844,7 @@ git commit -m "feat(ocr): isolate baidu-required pages as review pending"
 - 修改：`src/parsing_core/workbench/ocr/chapters.py`（`_extract_page` 322-351）
 - 测试：`tests/test_workbench/test_ocr_workflow.py`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 在 `tests/test_workbench/test_ocr_workflow.py` 顶部把 orchestrator 的 import 改为：
 
@@ -979,13 +979,13 @@ def test_detect_chapters_accepts_review_final(tmp_path: Path):
     assert isinstance(tree["chapters"], list)
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_ocr_workflow.py -q -k "review_required_status or review_workflow_restart or start_review or detect_chapters_accepts_review"`
 
 预期：FAIL（`WorkflowStatus` 无 `REVIEW_REQUIRED`；`start_review` 不存在）。
 
-- [ ] **步骤 3：实现工作流状态、读取器、payload 与 `start_review`**
+- [x] **步骤 3：实现工作流状态、读取器、payload 与 `start_review`**
 
 （a）`WorkflowStatus`（现 231-238 行）替换为：
 
@@ -1260,19 +1260,19 @@ def _extract_page(record: object) -> _PageEvidence:
     decision = record.get("decision") if isinstance(record, dict) else None
 ```
 
-- [ ] **步骤 4：运行测试验证通过**
+- [x] **步骤 4：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_ocr_workflow.py tests/test_workbench/test_ocr_orchestrator.py -q`
 
 预期：PASS。既有 `test_restored_workflow_status_preserves_known_enum_values` 会自动覆盖新增枚举值。
 
-- [ ] **步骤 5：运行章节/笔记相关既有用例确认无回归**
+- [x] **步骤 5：运行章节/笔记相关既有用例确认无回归**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_ocr_markdown_notes.py tests/test_workbench/test_ocr_orchestrator.py -q`
 
 预期：PASS（此时 `chapters.py` 只多接受一种页状态，不影响旧路径）。
 
-- [ ] **步骤 6：Lint 与类型检查**
+- [x] **步骤 6：Lint 与类型检查**
 
 运行：
 
@@ -1283,7 +1283,7 @@ def _extract_page(record: object) -> _PageEvidence:
 
 预期：无错误。
 
-- [ ] **步骤 7：Commit**
+- [x] **步骤 7：Commit**
 
 ```bash
 git add src/parsing_core/workbench/ocr/workflow.py src/parsing_core/workbench/ocr/chapters.py tests/test_workbench/test_ocr_workflow.py
@@ -1300,7 +1300,7 @@ git commit -m "feat(ocr): expose review-required workflow state and review resum
 - 修改：`src/parsing_core/workbench/ocr/deepseek_intensive_reading.py`（`_finalize_generated_note` 139-276）
 - 测试：`tests/test_workbench/test_ocr_markdown_notes.py`、`tests/test_workbench/test_deepseek_intensive_reading.py`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 在 `tests/test_workbench/test_ocr_markdown_notes.py` 的 `_inputs()` 之后新增 helper，并在文件末尾追加用例：
 
@@ -1395,13 +1395,13 @@ def test_generator_preserves_review_pending_markup():
     assert "<!-- pdf2md: review pending page 3 -->" in result["markdown"]
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_ocr_markdown_notes.py tests/test_workbench/test_deepseek_intensive_reading.py -q -k "review"`
 
 预期：FAIL（`build_intensive_reading_note() got an unexpected keyword argument 'review_pending'`）。
 
-- [ ] **步骤 3：实现笔记占位符、顶部计数与元数据**
+- [x] **步骤 3：实现笔记占位符、顶部计数与元数据**
 
 （a）`markdown_notes.py` 的 import 区加入：
 
@@ -1600,7 +1600,7 @@ def _render_markdown(
         }
 ```
 
-- [ ] **步骤 4：实现 DeepSeek 生成阶段的 review 绑定**
+- [x] **步骤 4：实现 DeepSeek 生成阶段的 review 绑定**
 
 （a）`deepseek_intensive_reading.py` 的 `allowed_metadata`（现 152-166 行）在 `"prompt_fingerprint"` 之后加两项：
 
@@ -1628,13 +1628,13 @@ def _render_markdown(
     metadata["review_pages"] = list(base_metadata.get("review_pages", []))
 ```
 
-- [ ] **步骤 5：运行测试验证通过**
+- [x] **步骤 5：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_ocr_markdown_notes.py tests/test_workbench/test_deepseek_intensive_reading.py -q`
 
 预期：PASS（既有 6 段笔记结构、Mermaid 校验与生成绑定用例全部保持）。
 
-- [ ] **步骤 6：Lint 与类型检查**
+- [x] **步骤 6：Lint 与类型检查**
 
 运行：
 
@@ -1645,7 +1645,7 @@ def _render_markdown(
 
 预期：无错误。
 
-- [ ] **步骤 7：Commit**
+- [x] **步骤 7：Commit**
 
 ```bash
 git add src/parsing_core/workbench/ocr/markdown_notes.py src/parsing_core/workbench/ocr/schemas/intensive-reading-note.json src/parsing_core/workbench/ocr/deepseek_intensive_reading.py tests/test_workbench/test_ocr_markdown_notes.py tests/test_workbench/test_deepseek_intensive_reading.py
@@ -1660,7 +1660,7 @@ git commit -m "feat(ocr): preserve review placeholders in intensive-reading note
 - 修改：`src/parsing_core/workbench/ocr/workflow.py`（`_PUBLICATION_METADATA_FIELDS` 55-69、`_validate_publication_metadata` 2686-2738、`_markdown_publication_is_valid` 2741-2795）
 - 测试：`tests/test_workbench/test_ocr_workflow.py`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 在 `tests/test_workbench/test_ocr_workflow.py` 末尾追加：
 
@@ -1719,13 +1719,13 @@ def test_markdown_publication_requires_review_markup(tmp_path: Path):
     )
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_ocr_workflow.py -q -k "publication_metadata_accepts_review or markdown_publication_requires_review"`
 
 预期：FAIL（`_validate_publication_metadata` 对 `review_pending` 报 unexpected fields；markdown 校验忽略注释要求）。
 
-- [ ] **步骤 3：实现发布 metadata 与 markdown 校验**
+- [x] **步骤 3：实现发布 metadata 与 markdown 校验**
 
 （a）`_PUBLICATION_METADATA_FIELDS`（现 55-69 行）替换为：
 
@@ -1807,7 +1807,7 @@ _REQUIRED_PUBLICATION_METADATA_FIELDS = _PUBLICATION_METADATA_FIELDS - {
     return "[src:" in markdown
 ```
 
-- [ ] **步骤 4：运行测试验证通过**
+- [x] **步骤 4：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_ocr_workflow.py -q`
 
@@ -1815,7 +1815,7 @@ _REQUIRED_PUBLICATION_METADATA_FIELDS = _PUBLICATION_METADATA_FIELDS - {
 
 预期：全部 PASS（旧笔记不含 review 字段时按 0 处理；旧 legacy 迁移发布路径的 metadata 不含 review 字段，仍满足 required 子集校验）。
 
-- [ ] **步骤 5：Lint 与类型检查**
+- [x] **步骤 5：Lint 与类型检查**
 
 运行：
 
@@ -1826,7 +1826,7 @@ _REQUIRED_PUBLICATION_METADATA_FIELDS = _PUBLICATION_METADATA_FIELDS - {
 
 预期：无错误。
 
-- [ ] **步骤 6：Commit**
+- [x] **步骤 6：Commit**
 
 ```bash
 git add src/parsing_core/workbench/ocr/workflow.py tests/test_workbench/test_ocr_workflow.py
@@ -1841,7 +1841,7 @@ git commit -m "feat(ocr): record review_pending count in publication contract"
 - 修改：`src/parsing_core/serving/api/routes_workbench.py`（factory 337-398、OCR 路由 620-760）
 - 测试：`tests/test_workbench/test_api.py`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 （a）把 `tests/test_workbench/test_api.py` 顶部从 `test_ocr_workflow` 的 import 改为：
 
@@ -2032,13 +2032,13 @@ def test_ocr_without_baidu_no_longer_blocks_start(tmp_path, monkeypatch):
     assert observed == {"started": True}
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_api.py -q -k "factory_tolerates or factory_uses_baidu or review_route or no_longer_blocks"`
 
 预期：FAIL（factory 仍抛 `WorkflowBlockedError("baidu_key_missing")`；`/ocr/review` 404）。
 
-- [ ] **步骤 3：实现 factory 可选百度引擎**
+- [x] **步骤 3：实现 factory 可选百度引擎**
 
 把 `_ocr_workflow` 中（现 351-383 行）的 `try` 块替换为：
 
@@ -2082,7 +2082,7 @@ def test_ocr_without_baidu_no_longer_blocks_start(tmp_path, monkeypatch):
 
 （`_find_vision_helper` 与 Codex 错误映射逻辑保持不变；`baidu_key` 必须在 factory 闭包内解析，保证缓存过 workflow 后新配置的 Key 在下次运行时生效。）
 
-- [ ] **步骤 4：实现 `/ocr/review` 路由与 generate 透传**
+- [x] **步骤 4：实现 `/ocr/review` 路由与 generate 透传**
 
 （a）在 `cancel_source_ocr` 路由（现 657-672 行）之后新增：
 
@@ -2124,13 +2124,13 @@ async def review_source_ocr(source_id: str, sch: SchedulerDep) -> dict[str, obje
         )
 ```
 
-- [ ] **步骤 5：运行测试验证通过**
+- [x] **步骤 5：运行测试验证通过**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_api.py tests/test_workbench/test_ocr_workflow.py -q`
 
 预期：PASS。注意 `test_missing_codex_maps_to_stable_error_code` 仍应返回 `codex_unavailable`（factory 在百度解析前先解析 Codex）。
 
-- [ ] **步骤 6：Lint 与类型检查**
+- [x] **步骤 6：Lint 与类型检查**
 
 运行：
 
@@ -2141,7 +2141,7 @@ async def review_source_ocr(source_id: str, sch: SchedulerDep) -> dict[str, obje
 
 预期：无错误。
 
-- [ ] **步骤 7：Commit**
+- [x] **步骤 7：Commit**
 
 ```bash
 git add src/parsing_core/serving/api/routes_workbench.py tests/test_workbench/test_api.py
@@ -2159,7 +2159,7 @@ git commit -m "feat(api): start ocr without baidu and add review resume endpoint
 - 修改：`parsing-core-app/src/components/workbench/OcrWorkflowPanel.tsx`（整文件替换）
 - 创建：`parsing-core-app/src/components/workbench/OcrWorkflowPanel.test.tsx`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 （a）更新 `parsing-core-app/src/api/ocrStatus.test.ts`：把 `it.each` 列表改为
 
@@ -2306,13 +2306,13 @@ it("links to settings when a review rerun is not ready", async () => {
 });
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`npm test --prefix parsing-core-app -- --run src/api/ocrStatus.test.ts src/components/workbench/OcrWorkflowPanel.test.tsx`
 
 预期：FAIL（`review_required` 未在 `OCR_STATUSES`；`reviewSourceOcr` 未导出；清单文案不存在）。
 
-- [ ] **步骤 3：实现类型与 API 解析**
+- [x] **步骤 3：实现类型与 API 解析**
 
 （a）`workbenchTypes.ts` 中把 `OcrWorkflowStatus` 与 `OcrStatus` 替换为：
 
@@ -2401,7 +2401,7 @@ export function reviewSourceOcr(sourceId: string): Promise<OcrStatus> {
 }
 ```
 
-- [ ] **步骤 4：实现面板（整文件替换）**
+- [x] **步骤 4：实现面板（整文件替换）**
 
 用以下内容覆盖 `parsing-core-app/src/components/workbench/OcrWorkflowPanel.tsx`：
 
@@ -2748,7 +2748,7 @@ function NotePreview({ markdown }: { markdown: string }) {
 }
 ```
 
-- [ ] **步骤 5：运行测试验证通过**
+- [x] **步骤 5：运行测试验证通过**
 
 运行：`npm test --prefix parsing-core-app -- --run src/api/ocrStatus.test.ts src/components/workbench/OcrWorkflowPanel.test.tsx src/api/workbench.test.ts`
 
@@ -2756,7 +2756,7 @@ function NotePreview({ markdown }: { markdown: string }) {
 
 预期：PASS。
 
-- [ ] **步骤 6：Lint 与类型检查**
+- [x] **步骤 6：Lint 与类型检查**
 
 运行：
 
@@ -2767,7 +2767,7 @@ npm --prefix parsing-core-app run typecheck
 
 预期：无错误。
 
-- [ ] **步骤 7：Commit**
+- [x] **步骤 7：Commit**
 
 ```bash
 git add parsing-core-app/src/api/workbenchTypes.ts parsing-core-app/src/api/workbench.ts parsing-core-app/src/api/ocrStatus.test.ts parsing-core-app/src/components/workbench/OcrWorkflowPanel.tsx parsing-core-app/src/components/workbench/OcrWorkflowPanel.test.tsx
@@ -2781,7 +2781,7 @@ git commit -m "feat(web): show review pending pages and resume review"
 **文件：**
 - 测试：`tests/test_workbench/test_ocr_workflow.py`、`tests/test_workbench/test_api.py`
 
-- [ ] **步骤 1：编写混合批次夹具与工作流级用例**
+- [x] **步骤 1：编写混合批次夹具与工作流级用例**
 
 （a）`tests/test_workbench/test_ocr_workflow.py` 顶部 import 调整为：
 
@@ -2928,7 +2928,7 @@ def test_publish_review_note_records_pending_pages(tmp_path: Path):
     ]
 ```
 
-- [ ] **步骤 2：编写 API 级复核升级用例**
+- [x] **步骤 2：编写 API 级复核升级用例**
 
 在 `tests/test_workbench/test_api.py` 顶部 import 区补充：
 
@@ -2975,13 +2975,13 @@ def test_ocr_review_route_upgrades_mixed_review_final(tmp_path, monkeypatch):
     assert final["pages"]["2"]["status"] == "completed"
 ```
 
-- [ ] **步骤 3：运行端到端用例**
+- [x] **步骤 3：运行端到端用例**
 
 运行：`.venv/bin/python -m pytest tests/test_workbench/test_ocr_workflow.py tests/test_workbench/test_api.py -q -k "mixed or review_note or publish_review_note or upgrades_mixed"`
 
 预期：PASS。若失败，优先核对 `MixedReviewEngines` 的页 1/页 2 语义（页 1 为已终审章节页，页 2 为冲突隔离页）。
 
-- [ ] **步骤 4：全量回归**
+- [x] **步骤 4：全量回归**
 
 运行：
 
@@ -2991,7 +2991,7 @@ def test_ocr_review_route_upgrades_mixed_review_final(tmp_path, monkeypatch):
 
 预期：全部 PASS。
 
-- [ ] **步骤 5：Lint、类型与前端门禁**
+- [x] **步骤 5：Lint、类型与前端门禁**
 
 运行：
 
@@ -3005,13 +3005,13 @@ npm test --prefix parsing-core-app -- --run src/api/ocrStatus.test.ts src/compon
 
 预期：无错误、PASS。
 
-- [ ] **步骤 6：手工验收（本机，可选但建议）**
+- [x] **步骤 6：手工验收（本机，可选但建议）**
 
 1. 不配置百度 Key 启动 OCR：完成后面板显示“待复核 N 页”与页码/原因列表，章节笔记 markdown 顶部含 `<!-- pdf2md: review_pending=N -->` 且隔离页位置含占位注释。
 2. 在设置页保存百度 Key 后点击“配置百度 Key 并继续复核”：仅隔离页重跑（非隔离页不重新识别），成功后状态变为“OCR 已完成”。
 3. 复核过程中取消：状态为已取消，隔离清单保留在 `batch-state.json`，再次点击复核会从头重跑隔离页（不消耗失败页 attempts 上限之外的次数）。
 
-- [ ] **步骤 7：Commit**
+- [x] **步骤 7：Commit**
 
 ```bash
 git add tests/test_workbench/test_ocr_workflow.py tests/test_workbench/test_api.py
