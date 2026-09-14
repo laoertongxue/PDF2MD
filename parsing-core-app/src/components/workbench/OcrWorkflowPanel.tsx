@@ -1,18 +1,26 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Ban, CheckCircle2, Loader2, Play, RefreshCw, Sparkles, XCircle } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, Loader2, Play, RefreshCw, Sparkles, XCircle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import MermaidBlock from "../MermaidBlock";
 import { ocrErrorInfo } from "../../api/errorMessages";
 import {
+  SafeApiError,
   cancelSourceOcr,
   confirmSourceChapter,
   generateSourceNote,
   getSourceOcrStatus,
   recognizeSourceChapters,
+  reviewSourceOcr,
   startSourceOcr,
 } from "../../api/workbench";
 import type { OcrChapter, OcrChapterTree, OcrNoteResult, OcrStatus, Source } from "../../api/workbenchTypes";
+
+const REVIEW_REASON_LABELS: Record<string, string> = {
+  conflict: "冲突",
+  complex: "复杂版式",
+  sampled: "抽样",
+};
 
 export default function OcrWorkflowPanel({ source }: { source: Source }) {
   const navigate = useNavigate();
@@ -22,6 +30,7 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
   const [selectedChapter, setSelectedChapter] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [needsBaiduKey, setNeedsBaiduKey] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -43,6 +52,7 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
   const run = async (operation: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
+    setNeedsBaiduKey(false);
     try {
       await operation();
       await refresh();
@@ -54,6 +64,7 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
   };
 
   const chapters = tree?.chapters ?? [];
+  const reviewPages = status?.review_pages ?? [];
   const start = () =>
     void run(async () => {
       setTree(null);
@@ -61,6 +72,17 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
       await startSourceOcr(source.id);
     });
   const cancel = () => void run(() => cancelSourceOcr(source.id));
+  const review = () =>
+    void run(async () => {
+      try {
+        await reviewSourceOcr(source.id);
+      } catch (reason) {
+        if (reason instanceof SafeApiError && reason.code === "ocr_review_not_ready") {
+          setNeedsBaiduKey(true);
+        }
+        throw reason;
+      }
+    });
   const detect = () =>
     void run(async () => {
       const next = await recognizeSourceChapters(source.id);
@@ -82,7 +104,7 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
         <StatusBadge status={status} />
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
-        {status?.status !== "running" && (
+        {status?.status !== "running" && status?.status !== "review_required" && (
           <button
             type="button"
             onClick={start}
@@ -104,7 +126,18 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
             取消任务
           </button>
         )}
-        {status?.status === "completed" && (
+        {status?.status === "review_required" && (
+          <button
+            type="button"
+            onClick={review}
+            disabled={busy}
+            className="inline-flex items-center gap-1.5 bg-amber-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-40"
+          >
+            <AlertTriangle size={14} />
+            配置百度 Key 并继续复核
+          </button>
+        )}
+        {(status?.status === "completed" || status?.status === "review_required") && (
           <button
             type="button"
             onClick={detect}
@@ -127,6 +160,19 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
           </button>
         )}
       </div>
+      {status?.status === "review_required" && (
+        <div className="mt-3 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <p className="font-medium">待复核 {status.review_pending} 页</p>
+          <p className="mt-1">隔离页面不会进入正文，也不计入完成；配置百度 OCR Key 后只会重跑这些页面。</p>
+          <ul className="mt-2 space-y-0.5">
+            {reviewPages.map((item) => (
+              <li key={item.page}>
+                第 {item.page} 页 · {REVIEW_REASON_LABELS[item.reason] ?? item.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {status?.error && (
         <div role="alert" className="mt-3 border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-700">
           <p className="font-medium">{ocrErrorInfo(status.error)?.title ?? status.error}</p>
@@ -139,9 +185,14 @@ export default function OcrWorkflowPanel({ source }: { source: Source }) {
         </div>
       )}
       {error && (
-        <p role="alert" className="mt-3 border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-700">
-          {error}
-        </p>
+        <div role="alert" className="mt-3 border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-700">
+          <p>{error}</p>
+          {needsBaiduKey && (
+            <button type="button" className="mt-2 underline" onClick={() => navigate("/workbench/settings")}>
+              去配置百度 Key
+            </button>
+          )}
+        </div>
       )}
       {status?.status === "completed" && !status.publishable && (
         <p className="mt-3 text-xs text-amber-700">OCR 已结束，但尚未发布完整精读结果，不能标记为完成。</p>
@@ -193,6 +244,7 @@ function StatusBadge({ status }: { status: OcrStatus | null }) {
     idle: "未启动",
     running: "处理中",
     completed: "OCR 已完成",
+    review_required: "待复核",
     blocked: "已阻断",
     failed: "失败",
     cancelled: "已取消",
@@ -202,12 +254,22 @@ function StatusBadge({ status }: { status: OcrStatus | null }) {
       ? Loader2
       : value === "completed"
         ? CheckCircle2
-        : ["failed", "blocked", "cancelled"].includes(value)
-          ? XCircle
-          : RefreshCw;
+        : value === "review_required"
+          ? AlertTriangle
+          : ["failed", "blocked", "cancelled"].includes(value)
+            ? XCircle
+            : RefreshCw;
   return (
     <span
-      className={`inline-flex items-center gap-1.5 text-xs ${value === "completed" ? "text-emerald-700" : ["failed", "blocked"].includes(value) ? "text-red-700" : "text-zinc-500"}`}
+      className={`inline-flex items-center gap-1.5 text-xs ${
+        value === "completed"
+          ? "text-emerald-700"
+          : value === "review_required"
+            ? "text-amber-700"
+            : ["failed", "blocked"].includes(value)
+              ? "text-red-700"
+              : "text-zinc-500"
+      }`}
     >
       <Icon size={14} className={value === "running" ? "animate-spin" : ""} />
       {label}

@@ -6,7 +6,7 @@ describe("OCR status publication gate", () => {
     vi.resetModules();
   });
 
-  it.each(["idle", "running", "completed", "blocked", "failed", "cancelled"])(
+  it.each(["idle", "running", "completed", "review_required", "blocked", "failed", "cancelled"])(
     "preserves the backend %s status after protocol validation",
     async (status) => {
       vi.stubGlobal(
@@ -22,6 +22,8 @@ describe("OCR status publication gate", () => {
             publishable: false,
             markdown_path: null,
             chapter_tree_path: null,
+            review_pages: null,
+            review_pending: 0,
           }),
         }),
       );
@@ -48,6 +50,8 @@ describe("OCR status publication gate", () => {
           publishable: false,
           markdown_path: null,
           chapter_tree_path: null,
+          review_pages: null,
+          review_pending: 0,
         }),
       }),
     );
@@ -56,6 +60,36 @@ describe("OCR status publication gate", () => {
     await expect(getSourceOcrStatus("source-1")).rejects.toMatchObject({
       name: "SafeApiError",
       category: "protocol",
+    });
+  });
+
+  it("accepts review_required with a review page list", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: "review_required",
+          source_path: "/tmp/book.pdf",
+          state_path: "/tmp/state/batch-state.json",
+          error: null,
+          publishable: true,
+          markdown_path: null,
+          chapter_tree_path: null,
+          review_pages: [
+            { page: 3, reason: "conflict", alignment_status: "conflict" },
+            { page: 7, reason: "sampled", alignment_status: "consistent" },
+          ],
+          review_pending: 2,
+        }),
+      }),
+    );
+
+    const { getSourceOcrStatus } = await import("./workbench");
+    await expect(getSourceOcrStatus("source-1")).resolves.toMatchObject({
+      status: "review_required",
+      review_pending: 2,
     });
   });
 });

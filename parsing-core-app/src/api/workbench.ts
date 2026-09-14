@@ -26,6 +26,7 @@ import type {
   OcrStatus,
   OcrChapterTree,
   OcrNoteResult,
+  OcrReviewPage,
 } from "./workbenchTypes";
 import { apiFetch } from "./client";
 
@@ -80,7 +81,7 @@ const TOPIC_STATUSES = new Set<TopicStatus>(["DRAFT", "NOT_READY", "READY", "RUN
 const TOPIC_SYNC_STATUSES = new Set<TopicSyncStatus>(["PENDING", "SYNCING", "SYNCED", "FAILED"]);
 const TOPIC_RUN_STATUSES = new Set<TopicRunStatus>(["RUNNING", "COMPLETED", "FAILED"]);
 const CHAPTER_RUN_STATUSES = new Set(["PENDING", "RUNNING", "COMPLETED", "FAILED"]);
-const OCR_STATUSES = new Set(["idle", "running", "completed", "blocked", "failed", "cancelled"]);
+const OCR_STATUSES = new Set(["idle", "running", "completed", "review_required", "blocked", "failed", "cancelled"]);
 
 function protocolError(): SafeApiError {
   return new SafeApiError("protocol");
@@ -266,6 +267,21 @@ function parseChapterDraftState(value: unknown): ChapterDraftState {
   return { chapters, fingerprint: value.fingerprint };
 }
 
+function isReviewPages(value: unknown): value is OcrReviewPage[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.page === "number" &&
+        Number.isInteger(item.page) &&
+        item.page >= 1 &&
+        (item.reason === "conflict" || item.reason === "complex" || item.reason === "sampled") &&
+        typeof item.alignment_status === "string",
+    )
+  );
+}
+
 function parseOcrStatus(value: unknown): OcrStatus {
   if (
     !isRecord(value) ||
@@ -276,7 +292,11 @@ function parseOcrStatus(value: unknown): OcrStatus {
     (value.error !== null && typeof value.error !== "string") ||
     typeof value.publishable !== "boolean" ||
     (value.markdown_path !== null && typeof value.markdown_path !== "string") ||
-    (value.chapter_tree_path !== null && typeof value.chapter_tree_path !== "string")
+    (value.chapter_tree_path !== null && typeof value.chapter_tree_path !== "string") ||
+    (value.review_pages !== null && !isReviewPages(value.review_pages)) ||
+    typeof value.review_pending !== "number" ||
+    !Number.isInteger(value.review_pending) ||
+    value.review_pending < 0
   )
     throw protocolError();
   return value as unknown as OcrStatus;
@@ -423,6 +443,10 @@ export function getSourceOcrStatus(sourceId: string): Promise<OcrStatus> {
 
 export function cancelSourceOcr(sourceId: string): Promise<OcrStatus> {
   return post<OcrStatus>(`/api/workbench/sources/${sourceId}/ocr/cancel`, undefined, parseOcrStatus);
+}
+
+export function reviewSourceOcr(sourceId: string): Promise<OcrStatus> {
+  return post<OcrStatus>(`/api/workbench/sources/${sourceId}/ocr/review`, undefined, parseOcrStatus);
 }
 
 export function recognizeSourceChapters(sourceId: string): Promise<OcrChapterTree> {

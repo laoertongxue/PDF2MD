@@ -25,7 +25,16 @@ export interface ImportedSource {
   stored_path: string;
 }
 
-export type OcrWorkflowStatus = "idle" | "running" | "completed" | "blocked" | "failed" | "cancelled";
+export type OcrWorkflowStatus =
+  "idle" | "running" | "completed" | "review_required" | "blocked" | "failed" | "cancelled";
+
+export type OcrReviewReason = "conflict" | "complex" | "sampled";
+
+export interface OcrReviewPage {
+  page: number;
+  reason: OcrReviewReason;
+  alignment_status: string;
+}
 
 export interface OcrStatus {
   status: OcrWorkflowStatus;
@@ -35,6 +44,8 @@ export interface OcrStatus {
   publishable: boolean;
   markdown_path: string | null;
   chapter_tree_path: string | null;
+  review_pages: OcrReviewPage[] | null;
+  review_pending: number;
 }
 
 export interface OcrChapter {
