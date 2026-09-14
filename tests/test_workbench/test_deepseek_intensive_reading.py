@@ -282,6 +282,8 @@ def test_generator_preserves_review_pending_markup():
     output = _generated(base)
     prompt = build_generation_prompt(base)
     output["metadata"]["prompt_fingerprint"] = prompt_fingerprint(prompt)
+    output["metadata"]["review_pending"] = 0
+    output["metadata"].pop("review_pages")
     client = FakeClient(json.dumps(output, ensure_ascii=False))
 
     result = DeepSeekIntensiveReadingGenerator(client).generate(base)

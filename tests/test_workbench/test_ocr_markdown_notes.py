@@ -10,6 +10,7 @@ import pytest
 from parsing_core.workbench.ocr.chapters import _chapter_fingerprint
 from parsing_core.workbench.ocr.markdown_notes import (
     MarkdownNoteError,
+    _digest,
     build_intensive_reading_note,
     persist_intensive_reading_note,
     validate_intensive_reading_note,
@@ -115,6 +116,28 @@ def _review_page(number: int) -> dict:
         "page_input_fingerprint": "book-input",
         "evidence_fingerprint": "",
     }
+
+
+def _without_review_metadata(note: dict) -> dict:
+    legacy_metadata = {
+        key: value
+        for key, value in note["metadata"].items()
+        if key not in {"review_pending", "review_pages"}
+    }
+    legacy_metadata["note_fingerprint"] = _digest(
+        {
+            "metadata": {
+                key: value
+                for key, value in legacy_metadata.items()
+                if key != "note_fingerprint"
+            },
+            "sections": note["sections"],
+            "mermaid": note["mermaid"],
+        }
+    )
+    legacy = dict(note)
+    legacy["metadata"] = legacy_metadata
+    return legacy
 
 
 def test_builds_stable_note_with_citations_slots_and_previewable_mermaid():
@@ -367,3 +390,74 @@ def test_validate_rejects_missing_review_placeholder():
 
     with pytest.raises(MarkdownNoteError, match="review placeholder"):
         validate_intensive_reading_note(broken)
+
+
+def test_global_review_pending_count_may_exceed_chapter_review_pages():
+    tree, confirmation, _pages = _inputs()
+    pages = [_page(2, "第一章 战略管理", "战略是组织的长期方向。"), _review_page(3)]
+
+    note = build_intensive_reading_note(
+        tree,
+        confirmation,
+        pages,
+        source_id="source-1",
+        review_pending=3,
+    )
+
+    assert note["metadata"]["review_pending"] == 3
+    assert note["metadata"]["review_pages"] == [3]
+    validate_intensive_reading_note(note)
+
+
+def test_review_pending_count_below_chapter_review_pages_is_rejected():
+    tree, confirmation, _pages = _inputs()
+    pages = [_page(2, "第一章 战略管理", "战略是组织的长期方向。"), _review_page(3)]
+
+    with pytest.raises(MarkdownNoteError, match="review pending count is invalid"):
+        build_intensive_reading_note(
+            tree,
+            confirmation,
+            pages,
+            source_id="source-1",
+            review_pending=0,
+        )
+
+
+def test_validate_rejects_inconsistent_review_counter_and_legacy_markup():
+    tree, confirmation, _pages = _inputs()
+    pages = [_page(2, "第一章 战略管理", "战略是组织的长期方向。"), _review_page(3)]
+    note = build_intensive_reading_note(
+        tree,
+        confirmation,
+        pages,
+        source_id="source-1",
+        review_pending=1,
+    )
+
+    counter_broken = dict(note)
+    counter_broken["markdown"] = note["markdown"].replace(
+        "<!-- pdf2md: review_pending=1 -->",
+        "<!-- pdf2md: review_pending=2 -->",
+        1,
+    )
+    with pytest.raises(MarkdownNoteError, match="review pending header is missing"):
+        validate_intensive_reading_note(counter_broken)
+
+    legacy = _without_review_metadata(note)
+    assert "<!-- pdf2md: review_pending=1 -->" in legacy["markdown"]
+    with pytest.raises(MarkdownNoteError, match="unexpected review markup"):
+        validate_intensive_reading_note(legacy)
+
+
+def test_note_without_review_markup_or_metadata_still_validates():
+    tree, confirmation, pages = _inputs()
+    note = build_intensive_reading_note(tree, confirmation, pages, source_id="source-1")
+    assert note["metadata"]["review_pending"] == 0
+    assert note["metadata"]["review_pages"] == []
+    validate_intensive_reading_note(note)
+
+    legacy = _without_review_metadata(note)
+    assert "review_pending" not in legacy["metadata"]
+    assert "review_pages" not in legacy["metadata"]
+    assert "<!-- pdf2md:" not in legacy["markdown"]
+    validate_intensive_reading_note(legacy)
