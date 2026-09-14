@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -514,7 +515,7 @@ def test_batch_state_persists_exact_versioned_run_configuration(tmp_path):
 
     assert result.status is BatchStatus.COMPLETED
     state = json.loads((tmp_path / "ocr-state" / "batch-state.json").read_text())
-    assert state["schema_version"] == 2
+    assert state["schema_version"] == 3
     assert state["run_config"] == {
         "pages": [1],
         "dpi": 320,
@@ -1606,3 +1607,120 @@ def test_batch_state_fifo_fails_without_blocking(tmp_path):
     assert result_box[0].status is BatchStatus.FAILED
     assert result_box[0].error == "ocr_state_invalid"
     assert engines.calls == []
+
+
+def test_conflict_page_is_isolated_when_baidu_is_unavailable(tmp_path):
+    engines = FakeEngines(codex_text="不同文本")
+    orchestrator = _orchestrator(tmp_path, engines)
+    orchestrator.baidu = None
+
+    result = _run(orchestrator, engines)
+
+    assert result.status is BatchStatus.REVIEW_REQUIRED
+    assert result.pages[1].status is PageStatus.REVIEW_PENDING
+    assert engines.calls == ["vision:1", "codex:1"]
+    final = json.loads((tmp_path / "ocr-state" / "batch-final.json").read_text(encoding="utf-8"))
+    assert final["schema_version"] == 3
+    assert final["status"] == "review_required"
+    assert final["review_pages"] == [
+        {"page": 1, "reason": "conflict", "alignment_status": "conflict"}
+    ]
+    assert final["review_pending"] == 1
+    assert final["pages"]["1"]["status"] == "review_pending"
+    assert final["pages"]["1"]["review_reason"] == "conflict"
+    assert final["pages"]["1"]["alignment_status"] == "conflict"
+    assert "decision" not in final["pages"]["1"]
+
+
+def test_isolated_page_is_not_rerun_or_charged_attempts_without_baidu(tmp_path):
+    engines = FakeEngines(codex_text="不同文本")
+    orchestrator = _orchestrator(tmp_path, engines)
+    orchestrator.baidu = None
+    first = _run(orchestrator, engines)
+    assert first.status is BatchStatus.REVIEW_REQUIRED
+    state_path = tmp_path / "ocr-state" / "batch-state.json"
+    attempts_before = json.loads(state_path.read_text(encoding="utf-8"))["pages"]["1"]["attempts"]
+    calls_before = list(engines.calls)
+
+    second = _run(orchestrator, engines)
+
+    assert second.status is BatchStatus.REVIEW_REQUIRED
+    assert engines.calls == calls_before
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["pages"]["1"]["status"] == "review_pending"
+    assert state["pages"]["1"]["attempts"] == attempts_before
+
+
+def test_isolated_page_reruns_when_baidu_is_available(tmp_path):
+    engines = FakeEngines(codex_text="不同文本")
+    orchestrator = _orchestrator(tmp_path, engines)
+    orchestrator.baidu = None
+    assert _run(orchestrator, engines).status is BatchStatus.REVIEW_REQUIRED
+    engines.calls.clear()
+
+    resumed = _orchestrator(tmp_path, engines)
+
+    result = _run(resumed, engines)
+
+    assert result.status is BatchStatus.COMPLETED
+    assert "baidu:1" in engines.calls
+    final = json.loads((tmp_path / "ocr-state" / "batch-final.json").read_text(encoding="utf-8"))
+    assert final["status"] == "completed"
+    assert "review_pages" not in final
+    assert "review_pending" not in final
+    assert final["pages"]["1"]["attempts"] == 1
+
+
+def test_failed_review_page_returns_to_review_pending(tmp_path):
+    engines = FakeEngines(codex_text="不同文本")
+    orchestrator = _orchestrator(tmp_path, engines)
+    orchestrator.baidu = None
+    assert _run(orchestrator, engines).status is BatchStatus.REVIEW_REQUIRED
+
+    def blocked_adjudication(*args, **kwargs):
+        engines.calls.append("adjudicate:1")
+        return SimpleNamespace(payload={"status": "accepted"}, record={})
+
+    engines.codex.adjudicate_page = blocked_adjudication
+    resumed = _orchestrator(tmp_path, engines)
+
+    result = _run(resumed, engines)
+
+    assert result.status is BatchStatus.REVIEW_REQUIRED
+    assert result.pages[1].status is PageStatus.REVIEW_PENDING
+    final = json.loads((tmp_path / "ocr-state" / "batch-final.json").read_text(encoding="utf-8"))
+    assert final["review_pages"] == [
+        {"page": 1, "reason": "conflict", "alignment_status": "conflict"}
+    ]
+
+
+def test_review_final_validation_rejects_tampered_entries(tmp_path):
+    engines = FakeEngines(codex_text="不同文本")
+    orchestrator = _orchestrator(tmp_path, engines)
+    orchestrator.baidu = None
+    assert _run(orchestrator, engines).status is BatchStatus.REVIEW_REQUIRED
+    final = json.loads((tmp_path / "ocr-state" / "batch-final.json").read_text(encoding="utf-8"))
+
+    for mutate in (
+        lambda value: value["review_pages"][0].update({"reason": "guessed"}),
+        lambda value: value["pages"]["1"].update({"status": "completed"}),
+        lambda value: value.update({"review_pending": 2}),
+    ):
+        tampered = copy.deepcopy(final)
+        mutate(tampered)
+        assert orchestrator._review_final_is_valid(tampered) is False
+
+
+def test_legacy_schema_two_state_without_review_fields_still_loads(tmp_path):
+    engines = FakeEngines()
+    result = _run(_orchestrator(tmp_path, engines), engines)
+    assert result.status is BatchStatus.COMPLETED
+    state_path = tmp_path / "ocr-state" / "batch-state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["schema_version"] = 2
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    state_path.chmod(0o600)
+
+    loaded = orchestrator_module._read_batch_state(state_path)
+
+    assert loaded["schema_version"] == 2

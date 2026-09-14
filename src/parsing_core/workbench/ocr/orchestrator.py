@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import NotRequired, Protocol, TypedDict, TypeGuard
 
 from .alignment import (
+    AlignmentDecision,
     authorize_baidu_escalation,
     classify_page,
     compare_observations,
@@ -29,7 +30,9 @@ from .vision import canonicalize_vision_payload
 
 # Accepted output is publishable only at this unattended high-confidence floor.
 MIN_FINAL_ADJUDICATION_CONFIDENCE = 0.95
-_BATCH_STATE_SCHEMA_VERSION = 2
+_BATCH_STATE_SCHEMA_VERSION = 3
+_LEGACY_BATCH_STATE_SCHEMA_VERSIONS = frozenset({2})
+REVIEW_REASONS = frozenset({"conflict", "complex", "sampled"})
 _MAX_BATCH_STATE_BYTES = 16 * 1024 * 1024
 _STATE_READ_CHUNK_BYTES = 64 * 1024
 
@@ -69,6 +72,7 @@ def _sync_directory(fd: int) -> None:
 class BatchStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
+    REVIEW_REQUIRED = "review_required"
     FAILED = "failed"
     BLOCKED = "blocked"
     CANCELLED = "cancelled"
@@ -80,11 +84,20 @@ class PageStatus(StrEnum):
     PRIMARY_OCR = "primary_ocr"
     DIFFING = "diffing"
     BAIDU_PENDING = "baidu_pending"
+    REVIEW_PENDING = "review_pending"
     ADJUDICATING = "adjudicating"
     COMPLETED = "completed"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
     CANCELLED = "cancelled"
+
+
+def _review_reason(status: str) -> str:
+    if status == AlignmentDecision.CONFLICT.value:
+        return "conflict"
+    if status == AlignmentDecision.COMPLEX.value:
+        return "complex"
+    return "sampled"
 
 
 @dataclass(frozen=True)
@@ -205,6 +218,8 @@ class _PageState(TypedDict, total=False):
     decision: _JsonObject
     page_input_fingerprint: str
     evidence_fingerprint: str
+    review_reason: str
+    alignment_status: str
 
 
 class _BatchState(TypedDict):
@@ -216,6 +231,8 @@ class _BatchState(TypedDict):
     pages: dict[str, _PageState]
     updated_at: int
     error: NotRequired[str | None]
+    review_pages: NotRequired[list[_JsonObject]]
+    review_pending: NotRequired[int]
 
 
 class CancellationSignal:
@@ -305,6 +322,20 @@ class OcrOrchestrator:
                     BatchStatus.COMPLETED,
                     self._page_runs(completed["pages"]),
                 )
+            if self.baidu is None:
+                review = self._review_final_for_request(
+                    pdf_path,
+                    page_numbers,
+                    dpi,
+                    languages,
+                    sample_rate,
+                    deadline=deadline,
+                )
+                if review is not None:
+                    return BatchRun(
+                        BatchStatus.REVIEW_REQUIRED,
+                        self._page_runs(review["pages"]),
+                    )
             with self._publication_transaction(deadline=deadline):
                 completed = self._completed_final_for_request(
                     pdf_path,
@@ -319,6 +350,20 @@ class OcrOrchestrator:
                         BatchStatus.COMPLETED,
                         self._page_runs(completed["pages"]),
                     )
+                if self.baidu is None:
+                    review = self._review_final_for_request(
+                        pdf_path,
+                        page_numbers,
+                        dpi,
+                        languages,
+                        sample_rate,
+                        deadline=deadline,
+                    )
+                    if review is not None:
+                        return BatchRun(
+                            BatchStatus.REVIEW_REQUIRED,
+                            self._page_runs(review["pages"]),
+                        )
                 self._discard_final_artifact()
                 self._check_control(deadline)
                 state = self._load_or_create_state(
@@ -350,7 +395,16 @@ class OcrOrchestrator:
             for page in page_numbers:
                 current = page_state[str(page)]
                 self._check_control(deadline)
-                if current.get("status") == PageStatus.COMPLETED.value:
+                resumed_review = current.get("status") == PageStatus.REVIEW_PENDING.value
+                prior_reason: object = None
+                prior_alignment: object = None
+                if resumed_review:
+                    if self.baidu is None:
+                        continue
+                    prior_reason = current.get("review_reason")
+                    prior_alignment = current.get("alignment_status")
+                    self._reset_page(current)
+                elif current.get("status") == PageStatus.COMPLETED.value:
                     valid = self._completed_evidence_is_valid(state, current, page, sample_rate)
                     self._check_control(deadline)
                     if valid:
@@ -362,17 +416,49 @@ class OcrOrchestrator:
                     )
                 current["attempts"] = int(current.get("attempts", 0)) + 1
                 self._check_control(deadline)
-                self._run_page(
-                    state, current, pdf_path, page, dpi, languages, sample_rate, deadline
-                )
+                try:
+                    self._run_page(
+                        state, current, pdf_path, page, dpi, languages, sample_rate, deadline
+                    )
+                except (_BatchCancelled, AtomicCommitError, _StateInvalid, TimeoutError):
+                    raise
+                except Exception:
+                    if not resumed_review:
+                        raise
+                    if isinstance(prior_reason, str):
+                        current["review_reason"] = prior_reason
+                    if isinstance(prior_alignment, str):
+                        current["alignment_status"] = prior_alignment
+                    current["status"] = PageStatus.REVIEW_PENDING.value
+                    current.pop("error", None)
+                    self._persist(state)
                 self._check_control(deadline)
 
             self._check_control(deadline)
             if any(
-                page_state[str(page)].get("status") != PageStatus.COMPLETED.value
+                page_state[str(page)].get("status")
+                not in {PageStatus.COMPLETED.value, PageStatus.REVIEW_PENDING.value}
                 for page in page_numbers
             ):
                 return self._finish(state, BatchStatus.BLOCKED, "ocr_batch_incomplete", page_runs)
+            review_pages: list[_JsonObject] = []
+            for page in page_numbers:
+                record = page_state[str(page)]
+                if record.get("status") != PageStatus.REVIEW_PENDING.value:
+                    continue
+                reason = record.get("review_reason")
+                alignment_status = record.get("alignment_status")
+                if not isinstance(reason, str) or reason not in REVIEW_REASONS:
+                    raise _StateInvalid("review reason is invalid")
+                if not isinstance(alignment_status, str) or not alignment_status:
+                    raise _StateInvalid("review alignment status is invalid")
+                review_pages.append(
+                    {
+                        "page": page,
+                        "reason": reason,
+                        "alignment_status": alignment_status,
+                    }
+                )
             self._check_control(deadline)
             with self._publication_transaction(deadline=deadline):
                 completed = self._completed_final_for_request(
@@ -392,6 +478,17 @@ class OcrOrchestrator:
                     raise _StateInvalid("completed OCR publication changed")
                 self._check_control(deadline)
                 state["error"] = None
+                if review_pages:
+                    state["review_pages"] = review_pages
+                    state["review_pending"] = len(review_pages)
+                    self._set_status(state, BatchStatus.REVIEW_REQUIRED)
+                    self._check_control(deadline)
+                    if not self._review_final_is_valid(state):
+                        raise _StateInvalid("review OCR publication is invalid")
+                    self._publish_atomically_unlocked(state, deadline=deadline)
+                    return BatchRun(BatchStatus.REVIEW_REQUIRED, self._page_runs(page_state))
+                state.pop("review_pages", None)
+                state.pop("review_pending", None)
                 self._set_status(state, BatchStatus.COMPLETED)
                 self._check_control(deadline)
                 self._publish_atomically_unlocked(state, deadline=deadline)
@@ -533,6 +630,13 @@ class OcrOrchestrator:
         if needs_baidu(page_hash, page, status, sample_rate=sample_rate):
             if "baidu" not in current:
                 self._check_deadline(deadline)
+                if self.baidu is None:
+                    current["status"] = PageStatus.REVIEW_PENDING.value
+                    current["review_reason"] = _review_reason(status)
+                    current["alignment_status"] = status
+                    current.pop("error", None)
+                    self._persist(state)
+                    return
                 current["status"] = PageStatus.BAIDU_PENDING.value
                 self._persist(state)
                 authorization = authorize_baidu_escalation(
@@ -544,8 +648,6 @@ class OcrOrchestrator:
                 )
                 if authorization is None:
                     raise ValueError("Baidu escalation authorization is missing")
-                if self.baidu is None:
-                    raise ValueError("Baidu OCR engine is unavailable")
                 image = self._call_engine(self.image_loader, image_path, deadline=deadline)
                 if hashlib.sha256(image).hexdigest() != image_hash.lower():
                     raise ValueError("Baidu OCR image snapshot mismatch")
@@ -700,6 +802,7 @@ class OcrOrchestrator:
             raise _BatchCancelled() from None
         else:
             if value["input_fingerprint"] == fingerprint and value["run_config"] == run_config:
+                value["schema_version"] = _BATCH_STATE_SCHEMA_VERSION
                 return value
         return {
             "schema_version": _BATCH_STATE_SCHEMA_VERSION,
@@ -765,6 +868,113 @@ class OcrOrchestrator:
                 return None
         return final
 
+    def _review_final_for_request(
+        self,
+        pdf_path: str | Path,
+        pages: Sequence[int],
+        dpi: int,
+        languages: Sequence[str],
+        sample_rate: float,
+        *,
+        deadline: float | None,
+    ) -> _BatchState | None:
+        try:
+            state = _read_batch_state(
+                self.state_root / "batch-state.json",
+                deadline=deadline,
+            )
+            final = _read_batch_state(
+                self.state_root / "batch-final.json",
+                deadline=deadline,
+            )
+        except (FileNotFoundError, _StateInvalid):
+            return None
+
+        snapshot = _snapshot_pdf(pdf_path, deadline=deadline)
+        run_config: _RunConfig = {
+            "pages": list(pages),
+            "dpi": dpi,
+            "languages": list(languages),
+            "sample_rate": sample_rate,
+        }
+        fingerprint = _fingerprint(
+            {
+                "pdf_snapshot": snapshot,
+                "pages": list(pages),
+                "dpi": dpi,
+                "languages": list(languages),
+                "sample_rate": sample_rate,
+            }
+        )
+        if (
+            state != final
+            or final["status"] != BatchStatus.REVIEW_REQUIRED.value
+            or final["pdf_snapshot"] != snapshot
+            or final["run_config"] != run_config
+            or final["input_fingerprint"] != fingerprint
+        ):
+            return None
+        if not self._review_final_is_valid(final):
+            return None
+        return final
+
+    def _review_final_is_valid(self, state: object) -> bool:
+        if not _is_batch_state(state):
+            return False
+        if state.get("status") != BatchStatus.REVIEW_REQUIRED.value:
+            return False
+        review_pages = state.get("review_pages")
+        review_pending = state.get("review_pending")
+        if not isinstance(review_pages, list) or not review_pages:
+            return False
+        if (
+            not isinstance(review_pending, int)
+            or isinstance(review_pending, bool)
+            or review_pending != len(review_pages)
+        ):
+            return False
+        pages = state["run_config"]["pages"]
+        sample_rate = state["run_config"]["sample_rate"]
+        expected: dict[int, _JsonObject] = {}
+        for entry in review_pages:
+            if not isinstance(entry, dict) or set(entry) != {
+                "page",
+                "reason",
+                "alignment_status",
+            }:
+                return False
+            page = entry.get("page")
+            reason = entry.get("reason")
+            if (
+                not isinstance(page, int)
+                or isinstance(page, bool)
+                or page not in pages
+                or page in expected
+            ):
+                return False
+            if not isinstance(reason, str) or reason not in REVIEW_REASONS:
+                return False
+            expected[page] = entry
+        try:
+            for page in pages:
+                record = state["pages"][str(page)]
+                if page in expected:
+                    entry = expected[page]
+                    if record.get("status") != PageStatus.REVIEW_PENDING.value:
+                        return False
+                    if record.get("review_reason") != entry["reason"]:
+                        return False
+                    if record.get("alignment_status") != entry["alignment_status"]:
+                        return False
+                    continue
+                if record.get("status") != PageStatus.COMPLETED.value:
+                    return False
+                if not self._completed_evidence_is_valid(state, record, page, sample_rate):
+                    return False
+        except (KeyError, TypeError, ValueError):
+            return False
+        return True
+
     @staticmethod
     def _reset_page(current: _PageState) -> None:
         _clear_mapping(current)
@@ -778,6 +988,8 @@ class OcrOrchestrator:
         sample_rate: float,
     ) -> bool:
         if not _is_batch_state(state) or not _is_page_state(current):
+            return False
+        if current.get("status") == PageStatus.REVIEW_PENDING.value:
             return False
         try:
             vision = current["vision"]
@@ -1274,8 +1486,15 @@ def _is_batch_state(value: object) -> TypeGuard[_BatchState]:
         "pages",
         "updated_at",
         "error",
+        "review_pages",
+        "review_pending",
     }
-    if set(value) - allowed_fields or value.get("schema_version") != _BATCH_STATE_SCHEMA_VERSION:
+    schema_version = value.get("schema_version")
+    if (
+        set(value) - allowed_fields
+        or schema_version
+        not in ({_BATCH_STATE_SCHEMA_VERSION} | _LEGACY_BATCH_STATE_SCHEMA_VERSIONS)
+    ):
         return False
     if value.get("status") not in {status.value for status in BatchStatus}:
         return False
@@ -1346,6 +1565,43 @@ def _is_batch_state(value: object) -> TypeGuard[_BatchState]:
         not isinstance(error, str) or re.fullmatch(r"ocr_[a-z0-9_]+", error) is None
     ):
         return False
+    review_pages_value = value.get("review_pages")
+    review_pending_value = value.get("review_pending")
+    if review_pages_value is None:
+        if review_pending_value is not None:
+            return False
+    else:
+        if not isinstance(review_pages_value, list) or not review_pages_value:
+            return False
+        seen_review_pages: set[int] = set()
+        for entry in review_pages_value:
+            if not isinstance(entry, dict) or set(entry) != {
+                "page",
+                "reason",
+                "alignment_status",
+            }:
+                return False
+            review_page = entry.get("page")
+            reason = entry.get("reason")
+            if (
+                not isinstance(review_page, int)
+                or isinstance(review_page, bool)
+                or review_page not in configured_pages
+                or review_page in seen_review_pages
+            ):
+                return False
+            if not isinstance(reason, str) or reason not in REVIEW_REASONS:
+                return False
+            alignment_status = entry.get("alignment_status")
+            if not isinstance(alignment_status, str) or not alignment_status:
+                return False
+            seen_review_pages.add(review_page)
+        if (
+            not isinstance(review_pending_value, int)
+            or isinstance(review_pending_value, bool)
+            or review_pending_value != len(review_pages_value)
+        ):
+            return False
     expected_fingerprint = _fingerprint(
         {
             "pdf_snapshot": snapshot,
@@ -1361,10 +1617,18 @@ def _is_batch_state(value: object) -> TypeGuard[_BatchState]:
 def _is_page_state(value: object) -> TypeGuard[_PageState]:
     if not isinstance(value, dict) or not isinstance(value.get("status"), str):
         return False
+    if value.get("status") not in {status.value for status in PageStatus}:
+        return False
     attempts = value.get("attempts")
     if attempts is not None and not isinstance(attempts, int):
         return False
-    for field in ("error", "page_input_fingerprint", "evidence_fingerprint"):
+    for field in (
+        "error",
+        "page_input_fingerprint",
+        "evidence_fingerprint",
+        "review_reason",
+        "alignment_status",
+    ):
         field_value = value.get(field)
         if field_value is not None and not isinstance(field_value, str):
             return False
