@@ -461,3 +461,24 @@ def test_note_without_review_markup_or_metadata_still_validates():
     assert "review_pages" not in legacy["metadata"]
     assert "<!-- pdf2md:" not in legacy["markdown"]
     validate_intensive_reading_note(legacy)
+
+
+def test_validate_rejects_extra_review_comment():
+    tree, confirmation, _pages = _inputs()
+    pages = [_page(2, "第一章 战略管理", "战略是组织的长期方向。"), _review_page(3)]
+    note = build_intensive_reading_note(
+        tree, confirmation, pages, source_id="source-1", review_pending=1
+    )
+
+    extra = dict(note)
+    extra["markdown"] = note["markdown"].replace(
+        "<!-- pdf2md: review pending page 3 -->",
+        "<!-- pdf2md: review pending page 3 -->\n<!-- pdf2md: review pending page 9 -->",
+    )
+    with pytest.raises(MarkdownNoteError, match="unexpected review markup"):
+        validate_intensive_reading_note(extra)
+
+    duplicated = dict(note)
+    duplicated["markdown"] = "<!-- pdf2md: review_pending=1 -->\n" + note["markdown"]
+    with pytest.raises(MarkdownNoteError, match="unexpected review markup"):
+        validate_intensive_reading_note(duplicated)

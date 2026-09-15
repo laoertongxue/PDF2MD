@@ -7182,3 +7182,45 @@ def test_publish_review_note_records_pending_pages(tmp_path: Path):
     assert payload["review_pages"] == [
         {"page": 2, "reason": "conflict", "alignment_status": "conflict"}
     ]
+
+
+def test_markdown_publication_rejects_extra_review_markup(tmp_path: Path):
+    _engines, state_root, final = _complete_workflow_fixture(tmp_path, publish_note=False)
+    _pages, tree, confirmation = _prepare_chapter_context(state_root, final)
+    metadata = _note_metadata(final, tree, confirmation)
+    metadata["review_pending"] = 1
+    metadata["review_pages"] = [2]
+    markdown = _valid_markdown(final, tree, confirmation).replace(
+        "## 原文证据\n",
+        "## 原文证据\n<!-- pdf2md: review pending page 2 -->\n",
+    )
+    markdown = "<!-- pdf2md: review_pending=1 -->\n" + markdown
+
+    extra = markdown.replace(
+        "<!-- pdf2md: review pending page 2 -->",
+        "<!-- pdf2md: review pending page 2 -->\n<!-- pdf2md: review pending page 9 -->",
+    )
+    extra_digest = hashlib.sha256(extra.encode()).hexdigest()
+    assert (
+        workflow_module._markdown_publication_is_valid(
+            metadata, extra, final["input_fingerprint"], expected_sha256=extra_digest
+        )
+        is False
+    )
+
+    duplicated = "<!-- pdf2md: review_pending=1 -->\n" + markdown
+    duplicated_digest = hashlib.sha256(duplicated.encode()).hexdigest()
+    assert (
+        workflow_module._markdown_publication_is_valid(
+            metadata, duplicated, final["input_fingerprint"], expected_sha256=duplicated_digest
+        )
+        is False
+    )
+
+    valid_digest = hashlib.sha256(markdown.encode()).hexdigest()
+    assert (
+        workflow_module._markdown_publication_is_valid(
+            metadata, markdown, final["input_fingerprint"], expected_sha256=valid_digest
+        )
+        is True
+    )

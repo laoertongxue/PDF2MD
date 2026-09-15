@@ -100,6 +100,15 @@ def _review_reason(status: str) -> str:
     return "sampled"
 
 
+def _review_reason_matches(reason: object, alignment_status: object) -> bool:
+    return (
+        isinstance(reason, str)
+        and isinstance(alignment_status, str)
+        and alignment_status in {status.value for status in AlignmentDecision}
+        and reason == _review_reason(alignment_status)
+    )
+
+
 @dataclass(frozen=True)
 class PageRun:
     page: int
@@ -481,6 +490,7 @@ class OcrOrchestrator:
                 if review_pages:
                     state["review_pages"] = review_pages
                     state["review_pending"] = len(review_pages)
+                    state["schema_version"] = _BATCH_STATE_SCHEMA_VERSION
                     self._set_status(state, BatchStatus.REVIEW_REQUIRED)
                     self._check_control(deadline)
                     if not self._review_final_is_valid(state):
@@ -951,7 +961,8 @@ class OcrOrchestrator:
                 or page in expected
             ):
                 return False
-            if not isinstance(reason, str) or reason not in REVIEW_REASONS:
+            alignment_status = entry.get("alignment_status")
+            if not _review_reason_matches(reason, alignment_status):
                 return False
             expected[page] = entry
         try:
@@ -1589,10 +1600,8 @@ def _is_batch_state(value: object) -> TypeGuard[_BatchState]:
                 or review_page in seen_review_pages
             ):
                 return False
-            if not isinstance(reason, str) or reason not in REVIEW_REASONS:
-                return False
             alignment_status = entry.get("alignment_status")
-            if not isinstance(alignment_status, str) or not alignment_status:
+            if not _review_reason_matches(reason, alignment_status):
                 return False
             seen_review_pages.add(review_page)
         if (

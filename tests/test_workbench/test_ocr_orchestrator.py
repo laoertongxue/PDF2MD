@@ -1724,3 +1724,50 @@ def test_legacy_schema_two_state_without_review_fields_still_loads(tmp_path):
     loaded = orchestrator_module._read_batch_state(state_path)
 
     assert loaded["schema_version"] == 2
+
+
+def test_review_final_from_legacy_v2_state_is_published_as_schema_three(tmp_path):
+    engines = FakeEngines(codex_text="不同文本")
+    orchestrator = _orchestrator(tmp_path, engines)
+    orchestrator.baidu = None
+    assert _run(orchestrator, engines).status is BatchStatus.REVIEW_REQUIRED
+    state_path = tmp_path / "ocr-state" / "batch-state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["schema_version"] = 2
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    state_path.chmod(0o600)
+    (tmp_path / "ocr-state" / "batch-final.json").unlink()
+
+    resumed = _orchestrator(tmp_path, engines)
+    resumed.baidu = None
+    result = _run(resumed, engines)
+
+    assert result.status is BatchStatus.REVIEW_REQUIRED
+    final = json.loads((tmp_path / "ocr-state" / "batch-final.json").read_text(encoding="utf-8"))
+    assert final["schema_version"] == 3
+
+
+def test_review_reason_matches_cross_validates_alignment_status():
+    assert orchestrator_module._review_reason_matches("sampled", "consistent") is True
+    assert orchestrator_module._review_reason_matches("conflict", "conflict") is True
+    assert orchestrator_module._review_reason_matches("complex", "complex") is True
+    assert orchestrator_module._review_reason_matches("conflict", "consistent") is False
+    assert orchestrator_module._review_reason_matches("sampled", "complex") is False
+    assert orchestrator_module._review_reason_matches("conflict", "") is False
+    assert orchestrator_module._review_reason_matches("conflict", None) is False
+
+
+def test_review_final_rejects_reason_alignment_mismatch(tmp_path):
+    engines = FakeEngines(codex_text="不同文本")
+    orchestrator = _orchestrator(tmp_path, engines)
+    orchestrator.baidu = None
+    assert _run(orchestrator, engines).status is BatchStatus.REVIEW_REQUIRED
+    final = json.loads((tmp_path / "ocr-state" / "batch-final.json").read_text(encoding="utf-8"))
+
+    for mutate in (
+        lambda value: value["review_pages"][0].update({"alignment_status": "consistent"}),
+        lambda value: value["review_pages"][0].update({"reason": "sampled"}),
+    ):
+        tampered = copy.deepcopy(final)
+        mutate(tampered)
+        assert orchestrator._review_final_is_valid(tampered) is False

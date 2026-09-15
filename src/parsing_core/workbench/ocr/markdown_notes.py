@@ -322,6 +322,12 @@ def validate_intensive_reading_note(value: Any) -> None:
         for page in review_pages:
             if f"<!-- pdf2md: review pending page {page} -->" not in markdown:
                 raise MarkdownNoteError("review placeholder is missing")
+        comments = _REVIEW_COMMENT_RE.findall(markdown)
+        allowed = {f"<!-- pdf2md: review_pending={review_pending} -->"} | {
+            f"<!-- pdf2md: review pending page {page} -->" for page in review_pages
+        }
+        if set(comments) != allowed or len(comments) != len(allowed):
+            raise MarkdownNoteError("unexpected review markup")
     elif review_pages or "<!-- pdf2md:" in markdown:
         raise MarkdownNoteError("unexpected review markup")
 
