@@ -134,6 +134,8 @@
 | `ocr_review_not_ready` | 继续复核前置不满足 | 去配置百度 |
 | `path_escape` 等既有码 | 既有路径 | 保持 |
 
+`ocr_review_not_ready` 通过 `params.reason` 细分触发原因（`baidu_key_missing` 表示未配置 Key；`ocr_review_not_ready` 表示不存在待复核 final），前端统一映射"去配置百度"。
+
 前端：新增 `parsing-core-app/src/api/errorMessages.ts`，映射 `code → {title, description, action}`；`action ∈ {open_deepseek_settings, pick_codex, open_baidu_settings, view_review, retry, open_logs, none}`。`workbench.ts` 解析结构化 detail 并生成 `WorkbenchApiError(code, params, status)`；组件展示映射文案与动作按钮，配置类错误一键跳转设置/自检卡。
 
 ## 6. 数据与兼容
