@@ -1765,9 +1765,16 @@ def test_review_final_rejects_reason_alignment_mismatch(tmp_path):
     final = json.loads((tmp_path / "ocr-state" / "batch-final.json").read_text(encoding="utf-8"))
 
     for mutate in (
-        lambda value: value["review_pages"][0].update({"alignment_status": "consistent"}),
-        lambda value: value["review_pages"][0].update({"reason": "sampled"}),
+        lambda value: (
+            value["review_pages"][0].update({"alignment_status": "consistent"}),
+            value["pages"]["1"].update({"alignment_status": "consistent"}),
+        ),
+        lambda value: (
+            value["review_pages"][0].update({"reason": "sampled"}),
+            value["pages"]["1"].update({"review_reason": "sampled"}),
+        ),
     ):
         tampered = copy.deepcopy(final)
         mutate(tampered)
         assert orchestrator._review_final_is_valid(tampered) is False
+        assert orchestrator_module._is_batch_state(tampered) is False
