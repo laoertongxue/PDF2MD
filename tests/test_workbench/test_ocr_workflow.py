@@ -184,6 +184,7 @@ def _mixed_review_fixture(tmp_path: Path):
         pages=[1, 2],
         dpi=300,
         languages=["zh-Hans"],
+        # 必须为 float：start_review 用 float(run_config["sample_rate"])，整数会失配指纹导致整批重跑
         sample_rate=0.0,
     )
     assert result.status is BatchStatus.REVIEW_REQUIRED
@@ -7113,6 +7114,8 @@ def test_mixed_batch_isolates_only_conflict_pages(tmp_path: Path):
     assert final["review_pages"] == [
         {"page": 2, "reason": "conflict", "alignment_status": "conflict"}
     ]
+    assert final["review_pending"] == 1
+    assert "decision" not in final["pages"]["2"]
 
 
 def test_review_note_marks_pending_pages_and_keeps_comment_contract(tmp_path: Path):
@@ -7137,6 +7140,7 @@ def test_review_note_marks_pending_pages_and_keeps_comment_contract(tmp_path: Pa
     assert "<!-- pdf2md: review_pending=1 -->" in note["markdown"]
     assert "<!-- pdf2md: review pending page 2 -->" in note["markdown"]
     assert "1 战略管理" in note["markdown"]
+    assert "冲突文本" not in note["markdown"]
     assert note["metadata"]["review_pending"] == 1
     assert note["metadata"]["review_pages"] == [2]
     validate_intensive_reading_note(note)
@@ -7151,8 +7155,7 @@ def test_publish_review_note_records_pending_pages(tmp_path: Path):
     )
     final, _pages = workflow.completed_evidence()
     tree = workflow.detect_chapters()
-    confirmation = build_confirmation(tree, tree["chapters"][0]["id"])
-    workflow_module.persist_chapter_confirmation(workflow.paths.confirmation, confirmation)
+    confirmation = workflow.confirm_chapter(tree["chapters"][0]["id"])
     metadata = _note_metadata(final, tree, confirmation)
     metadata["review_pending"] = 1
     metadata["review_pages"] = [2]

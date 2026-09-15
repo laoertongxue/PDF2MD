@@ -4031,4 +4031,4 @@ def test_ocr_review_route_upgrades_mixed_review_final(tmp_path, monkeypatch):
     assert final["pages"]["2"]["status"] == "completed"
     assert engines.calls.count("vision:1") == 1
     assert engines.calls.count("vision:2") == 2
-    assert "baidu:2" in engines.calls
+    assert engines.calls.count("baidu:2") == 1
