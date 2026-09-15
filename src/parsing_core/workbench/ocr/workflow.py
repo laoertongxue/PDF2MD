@@ -30,7 +30,7 @@ from .chapters import (
     validate_chapter_confirmation,
     validate_chapter_tree,
 )
-from .markdown_notes import _REVIEW_COMMENT_RE, validate_mermaid_block
+from .markdown_notes import _REVIEW_COMMENT_RE, expected_review_comments, validate_mermaid_block
 from .orchestrator import (
     BatchStatus,
     OcrOrchestrator,
@@ -2860,10 +2860,7 @@ def _markdown_publication_is_valid(
     if review_pending:
         if not isinstance(review_pages, list):
             return False
-        expected_header = f"<!-- pdf2md: review_pending={review_pending} -->"
-        allowed = {expected_header} | {
-            f"<!-- pdf2md: review pending page {page} -->" for page in review_pages
-        }
+        allowed = expected_review_comments(review_pending, review_pages)
         comments = _REVIEW_COMMENT_RE.findall(markdown)
         if set(comments) != allowed or len(comments) != len(allowed):
             return False

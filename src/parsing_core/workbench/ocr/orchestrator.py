@@ -33,6 +33,7 @@ MIN_FINAL_ADJUDICATION_CONFIDENCE = 0.95
 _BATCH_STATE_SCHEMA_VERSION = 3
 _LEGACY_BATCH_STATE_SCHEMA_VERSIONS = frozenset({2})
 REVIEW_REASONS = frozenset({"conflict", "complex", "sampled"})
+_REVIEW_ALIGNMENT_STATUSES = frozenset(status.value for status in AlignmentDecision)
 _MAX_BATCH_STATE_BYTES = 16 * 1024 * 1024
 _STATE_READ_CHUNK_BYTES = 64 * 1024
 
@@ -104,7 +105,7 @@ def _review_reason_matches(reason: object, alignment_status: object) -> bool:
     return (
         isinstance(reason, str)
         and isinstance(alignment_status, str)
-        and alignment_status in {status.value for status in AlignmentDecision}
+        and alignment_status in _REVIEW_ALIGNMENT_STATUSES
         and reason == _review_reason(alignment_status)
     )
 
@@ -490,6 +491,7 @@ class OcrOrchestrator:
                 if review_pages:
                     state["review_pages"] = review_pages
                     state["review_pending"] = len(review_pages)
+                    # review finals carry the v3 contract; v2 completed finals stay legacy-readable
                     state["schema_version"] = _BATCH_STATE_SCHEMA_VERSION
                     self._set_status(state, BatchStatus.REVIEW_REQUIRED)
                     self._check_control(deadline)
